@@ -10,6 +10,7 @@ pub mod cas;
 pub mod db;
 pub mod dedup;
 pub mod hash;
+pub mod links;
 pub mod scanner;
 
 pub use cas::CasStore;
