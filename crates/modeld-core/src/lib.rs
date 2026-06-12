@@ -8,6 +8,7 @@
 
 pub mod cas;
 pub mod db;
+pub mod dedup;
 pub mod hash;
 pub mod scanner;
 
