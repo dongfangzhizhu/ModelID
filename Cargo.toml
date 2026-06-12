@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/modeld-core",
+    "crates/modeld-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["modeld contributors"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/your-org/modeld"
+
+[workspace.dependencies]
+# Core dependencies
+blake3 = { version = "1.5", features = ["rayon", "mmap"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+rayon = "1.8"
+walkdir = "2.4"
+memmap2 = "0.9"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = "0.4"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+indicatif = "0.17"
+colored = "2.1"
+
+# Testing
+tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
