@@ -2,7 +2,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
-use modeld_core::{hash_file, CasStore, Database, DedupEngine, DedupMode, QuarantineManager, Scanner};
+use modeld_core::{
+    hash_file, CasStore, Database, DedupEngine, DedupMode,
+    Downloader, HfCache, QuarantineManager, Scanner,
+};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -63,6 +66,56 @@ enum Commands {
         #[command(subcommand)]
         action: QuarantineAction,
     },
+    /// Check if a HuggingFace file is in modeld cache
+    HfCheck {
+        /// HuggingFace repo ID (e.g. stabilityai/stable-diffusion-xl-base-1.0)
+        repo_id: String,
+        /// Filename within the repo
+        filename: String,
+        /// Git revision / branch (default: main)
+        #[arg(long, default_value = "main")]
+        revision: String,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+    },
+    /// Download a file from HuggingFace via modeld CAS
+    HfDownload {
+        /// HuggingFace repo ID
+        repo_id: String,
+        /// Filename within the repo
+        filename: String,
+        /// Git revision / branch (default: main)
+        #[arg(long, default_value = "main")]
+        revision: String,
+        /// HuggingFace access token (or set HF_TOKEN env var)
+        #[arg(long)]
+        token: Option<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+    },
+    /// Configure HF_HOME to point to the modeld HF cache
+    HfSetup {
+        /// Only print the HF_HOME path without making changes
+        #[arg(long)]
+        print_path: bool,
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+    },
+    /// Show HuggingFace cache statistics
+    HfStatus {
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -88,6 +141,14 @@ fn main() -> Result<()> {
             report,
         } => dedup_command(store, dry_run, auto, report)?,
         Commands::Quarantine { store, action } => quarantine_command(store, action)?,
+        Commands::HfCheck {
+            repo_id, filename, revision, json, store,
+        } => hf_check_command(store, &repo_id, &filename, &revision, json)?,
+        Commands::HfDownload {
+            repo_id, filename, revision, token, json, store,
+        } => hf_download_command(store, &repo_id, &filename, &revision, token, json)?,
+        Commands::HfSetup { print_path, store } => hf_setup_command(store, print_path)?,
+        Commands::HfStatus { store } => hf_status_command(store)?,
     }
 
     Ok(())
@@ -525,4 +586,230 @@ fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Result<(
     }
 
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HF Command implementations
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn open_db(store: &std::path::Path) -> Result<Database> {
+    let db_path = store.join("index.db");
+    Database::open(&db_path)
+}
+
+/// `modeld hf-check <repo_id> <filename>` — check modeld cache for a HF file
+fn hf_check_command(
+    store: PathBuf,
+    repo_id: &str,
+    filename: &str,
+    revision: &str,
+    json_output: bool,
+) -> Result<()> {
+    let db = open_db(&store)?;
+    let hf_cache = HfCache::new(&store);
+
+    // Check snapshot path
+    let snapshot_path = hf_cache.snapshot_file_path(repo_id, revision, filename);
+    let found = snapshot_path.exists();
+
+    if json_output {
+        if found {
+            println!(
+                r#"{{"found": true, "path": "{}"}}"#,
+                snapshot_path.display()
+            );
+        } else {
+            println!(r#"{{"found": false}}"#);
+        }
+    } else if found {
+        println!(
+            "{} Cache hit: {}/{}@{}",
+            "✓".green().bold(),
+            repo_id.cyan(),
+            filename.cyan(),
+            revision
+        );
+        println!("  Path: {}", snapshot_path.display().to_string().dimmed());
+    } else {
+        println!(
+            "{} Not cached: {}/{}@{}",
+            "✗".red(),
+            repo_id,
+            filename,
+            revision
+        );
+        std::process::exit(1);
+    }
+
+    drop(db);
+    Ok(())
+}
+
+/// `modeld hf-download <repo_id> <filename>` — download from HF via modeld CAS
+fn hf_download_command(
+    store: PathBuf,
+    repo_id: &str,
+    filename: &str,
+    revision: &str,
+    token: Option<String>,
+    json_output: bool,
+) -> Result<()> {
+    let mut db = open_db(&store)?;
+
+    let pb = ProgressBar::new(0);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.cyan} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    pb.set_message(format!("{}/{}", repo_id, filename));
+
+    let progress_pb = pb.clone();
+    let progress: modeld_core::downloader::ProgressCallback = Box::new(move |done, total, _name| {
+        if total > 0 {
+            progress_pb.set_length(total);
+        }
+        progress_pb.set_position(done);
+    });
+
+    let mut downloader = Downloader::new(&store);
+    if let Some(t) = token {
+        downloader = downloader.with_token(t);
+    }
+
+    let result = downloader.download_hf_file(&mut db, repo_id, filename, Some(revision), Some(&progress))?;
+    pb.finish_with_message("Done");
+
+    if json_output {
+        println!(
+            r#"{{"path": "{}", "blake3": "{}", "size": {}, "cached": {}}}"#,
+            result.cas_path.display(),
+            result.blake3_hash.as_hex(),
+            result.size_bytes,
+            result.was_cached,
+        );
+    } else {
+        let status = if result.was_cached {
+            "Cache hit (skipped download)".yellow().to_string()
+        } else {
+            "Downloaded".green().to_string()
+        };
+
+        println!("\n{} {}", "✓".green().bold(), status);
+        println!("  Repo:     {}", repo_id.cyan());
+        println!("  File:     {}", filename.cyan());
+        println!("  BLAKE3:   {}", &result.blake3_hash.as_hex()[..16]);
+        println!("  Size:     {}", format_bytes(result.size_bytes));
+        println!("  CAS path: {}", result.cas_path.display().to_string().dimmed());
+    }
+
+    Ok(())
+}
+
+/// `modeld hf-setup` — configure HF_HOME environment variable
+fn hf_setup_command(store: PathBuf, print_path: bool) -> Result<()> {
+    let hf_cache = HfCache::new(&store);
+    hf_cache.init()?;
+    let hf_home = hf_cache.hf_home();
+
+    if print_path {
+        // Machine-readable: just print the path (used by Python hook)
+        println!("{}", hf_home.display());
+        return Ok(());
+    }
+
+    println!("{}", "modeld HuggingFace Cache Setup".bold().cyan());
+    println!();
+    println!("HF cache directory: {}", hf_home.display().to_string().green());
+    println!();
+    println!("{}", "To activate, add to your shell profile:".bold());
+    println!();
+
+    #[cfg(windows)]
+    {
+        println!("  {} (PowerShell):", "Windows".yellow());
+        println!(
+            "  $env:HF_HOME = \"{}\"",
+            hf_home.display()
+        );
+        println!();
+        println!("  {} (CMD):", "Windows".yellow());
+        println!("  set HF_HOME={}", hf_home.display());
+    }
+
+    #[cfg(unix)]
+    {
+        println!("  {} ~/.bashrc or ~/.zshrc:", "Linux/macOS:".yellow());
+        println!("  export HF_HOME=\"{}\"", hf_home.display());
+    }
+
+    println!();
+    println!("{}", "Or install the Python hook for automatic interception:".bold());
+    println!("  pip install modeld-hook");
+    println!("  # Then add to your script:");
+    println!("  import modeld_hook  # Auto-activates on import");
+
+    Ok(())
+}
+
+/// `modeld hf-status` — show HF cache statistics
+fn hf_status_command(store: PathBuf) -> Result<()> {
+    let hf_cache = HfCache::new(&store);
+    let db = open_db(&store)?;
+
+    println!("{}", "HuggingFace Cache Status".bold().cyan());
+    println!("{}", "─".repeat(40).dimmed());
+
+    if !hf_cache.hf_home().exists() {
+        println!("{}", "HF cache not initialized. Run: modeld hf-setup".yellow());
+        return Ok(());
+    }
+
+    let stats = hf_cache.stats()?;
+
+    println!(
+        "  HF_HOME:     {}",
+        hf_cache.hf_home().display().to_string().green()
+    );
+    println!("  Repos:       {}", stats.total_repos.to_string().bold());
+    println!("  Blobs:       {}", stats.total_blobs.to_string().bold());
+
+    // List repos
+    let repos = hf_cache.list_repos()?;
+    if !repos.is_empty() {
+        println!();
+        println!("{}", "Cached repos:".bold());
+        for repo in &repos {
+            println!("  • {}", repo.cyan());
+        }
+    }
+
+    // Downloads from DB
+    let downloads = db.list_downloads(None)?;
+    let done_count = downloads.iter().filter(|d| {
+        matches!(d.status, modeld_core::DownloadStatus::Done)
+    }).count();
+
+    if !downloads.is_empty() {
+        println!();
+        println!(
+            "  Downloads:   {} total, {} completed",
+            downloads.len().to_string().bold(),
+            done_count.to_string().green().bold()
+        );
+    }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+    format!("{:.2} {}", size, UNITS[unit_idx])
 }

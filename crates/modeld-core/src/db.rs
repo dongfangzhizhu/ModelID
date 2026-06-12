@@ -230,6 +230,48 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_wal_status ON wal_transactions(status);
             CREATE INDEX IF NOT EXISTS idx_wal_created ON wal_transactions(created_at);
             CREATE INDEX IF NOT EXISTS idx_wal_operation ON wal_transactions(operation);
+
+            -- HuggingFace download records (Phase 3)
+            CREATE TABLE IF NOT EXISTS downloads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_hash TEXT,
+                source_url TEXT NOT NULL,
+                sha256_hash TEXT,
+                repo_id TEXT,
+                filename TEXT,
+                revision TEXT DEFAULT 'main',
+                status TEXT NOT NULL DEFAULT 'pending',
+                bytes_total INTEGER DEFAULT 0,
+                bytes_done INTEGER DEFAULT 0,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at TEXT,
+                error_message TEXT,
+
+                FOREIGN KEY (model_hash) REFERENCES models(blake3_hash),
+                CHECK (status IN ('pending', 'downloading', 'done', 'failed'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_downloads_model_hash ON downloads(model_hash);
+            CREATE INDEX IF NOT EXISTS idx_downloads_sha256 ON downloads(sha256_hash);
+            CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
+            CREATE INDEX IF NOT EXISTS idx_downloads_url ON downloads(source_url);
+
+            -- HF SHA256 <-> BLAKE3 mapping table (Phase 3)
+            CREATE TABLE IF NOT EXISTS hf_mappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sha256_hash TEXT UNIQUE NOT NULL,
+                blake3_hash TEXT NOT NULL,
+                repo_id TEXT,
+                filename TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+                FOREIGN KEY (blake3_hash) REFERENCES models(blake3_hash),
+                CHECK (length(sha256_hash) = 64),
+                CHECK (length(blake3_hash) = 64)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_hf_mappings_sha256 ON hf_mappings(sha256_hash);
+            CREATE INDEX IF NOT EXISTS idx_hf_mappings_blake3 ON hf_mappings(blake3_hash);
             "#,
         )?;
 
@@ -581,10 +623,346 @@ impl Database {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Download record types (Phase 3 — HF interception)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Download status
+#[derive(Debug, Clone, PartialEq)]
+pub enum DownloadStatus {
+    Pending,
+    Downloading,
+    Done,
+    Failed,
+}
+
+impl DownloadStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DownloadStatus::Pending => "pending",
+            DownloadStatus::Downloading => "downloading",
+            DownloadStatus::Done => "done",
+            DownloadStatus::Failed => "failed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(DownloadStatus::Pending),
+            "downloading" => Some(DownloadStatus::Downloading),
+            "done" => Some(DownloadStatus::Done),
+            "failed" => Some(DownloadStatus::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// Download record from the downloads table
+#[derive(Debug, Clone)]
+pub struct Download {
+    pub id: i64,
+    pub model_hash: Option<String>,
+    pub source_url: String,
+    pub sha256_hash: Option<String>,
+    pub repo_id: Option<String>,
+    pub filename: Option<String>,
+    pub revision: String,
+    pub status: DownloadStatus,
+    pub bytes_total: i64,
+    pub bytes_done: i64,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+}
+
+/// HF SHA256 ↔ BLAKE3 mapping record
+#[derive(Debug, Clone)]
+pub struct HfMapping {
+    pub id: i64,
+    pub sha256_hash: String,
+    pub blake3_hash: String,
+    pub repo_id: Option<String>,
+    pub filename: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Download CRUD
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl Database {
+    /// Insert a new download record
+    pub fn insert_download(
+        &mut self,
+        source_url: &str,
+        repo_id: Option<&str>,
+        filename: Option<&str>,
+        revision: Option<&str>,
+    ) -> Result<i64> {
+        let now = Utc::now().to_rfc3339();
+        let rev = revision.unwrap_or("main");
+        self.conn.execute(
+            r#"
+            INSERT INTO downloads (source_url, repo_id, filename, revision, status, started_at)
+            VALUES (?1, ?2, ?3, ?4, 'pending', ?5)
+            "#,
+            params![source_url, repo_id, filename, rev, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update download status and progress
+    pub fn update_download_progress(
+        &mut self,
+        id: i64,
+        status: DownloadStatus,
+        bytes_done: i64,
+        bytes_total: i64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            UPDATE downloads SET status = ?2, bytes_done = ?3, bytes_total = ?4,
+                finished_at = CASE WHEN ?2 IN ('done','failed') THEN ?5 ELSE finished_at END
+            WHERE id = ?1
+            "#,
+            params![id, status.as_str(), bytes_done, bytes_total, now],
+        )?;
+        Ok(())
+    }
+
+    /// Mark download as done with hash information
+    pub fn complete_download(
+        &mut self,
+        id: i64,
+        model_hash: &str,
+        sha256_hash: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            UPDATE downloads SET
+                status = 'done',
+                model_hash = ?2,
+                sha256_hash = ?3,
+                finished_at = ?4,
+                bytes_done = bytes_total
+            WHERE id = ?1
+            "#,
+            params![id, model_hash, sha256_hash, now],
+        )?;
+        Ok(())
+    }
+
+    /// Mark download as failed
+    pub fn fail_download(&mut self, id: i64, error: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            UPDATE downloads SET status = 'failed', error_message = ?2, finished_at = ?3
+            WHERE id = ?1
+            "#,
+            params![id, error, now],
+        )?;
+        Ok(())
+    }
+
+    /// Look up a download by SHA256 hash (HF dedup check)
+    pub fn get_download_by_sha256(&self, sha256: &str) -> Result<Option<Download>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, model_hash, source_url, sha256_hash, repo_id, filename, revision,
+                   status, bytes_total, bytes_done, started_at, finished_at, error_message
+            FROM downloads
+            WHERE sha256_hash = ?1 AND status = 'done'
+            ORDER BY finished_at DESC
+            LIMIT 1
+            "#,
+        )?;
+        parse_download_row(&mut stmt, params![sha256])
+    }
+
+    /// Get a download record by ID
+    pub fn get_download(&self, id: i64) -> Result<Option<Download>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, model_hash, source_url, sha256_hash, repo_id, filename, revision,
+                   status, bytes_total, bytes_done, started_at, finished_at, error_message
+            FROM downloads WHERE id = ?1
+            "#,
+        )?;
+        parse_download_row(&mut stmt, params![id])
+    }
+
+    /// List downloads by status
+    pub fn list_downloads(&self, status: Option<DownloadStatus>) -> Result<Vec<Download>> {
+        let sql = match &status {
+            Some(_) => {
+                "SELECT id, model_hash, source_url, sha256_hash, repo_id, filename, revision, \
+                 status, bytes_total, bytes_done, started_at, finished_at, error_message \
+                 FROM downloads WHERE status = ?1 ORDER BY started_at DESC"
+            }
+            None => {
+                "SELECT id, model_hash, source_url, sha256_hash, repo_id, filename, revision, \
+                 status, bytes_total, bytes_done, started_at, finished_at, error_message \
+                 FROM downloads ORDER BY started_at DESC"
+            }
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+
+        let mapper = |row: &rusqlite::Row<'_>| {
+            let status_str: String = row.get(7)?;
+            let started_str: String = row.get(10)?;
+            let finished_str: Option<String> = row.get(11)?;
+            Ok(Download {
+                id: row.get(0)?,
+                model_hash: row.get(1)?,
+                source_url: row.get(2)?,
+                sha256_hash: row.get(3)?,
+                repo_id: row.get(4)?,
+                filename: row.get(5)?,
+                revision: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "main".into()),
+                status: DownloadStatus::from_str(&status_str)
+                    .unwrap_or(DownloadStatus::Pending),
+                bytes_total: row.get(8)?,
+                bytes_done: row.get(9)?,
+                started_at: started_str
+                    .parse::<DateTime<Utc>>()
+                    .unwrap_or_else(|_| Utc::now()),
+                finished_at: finished_str
+                    .and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+                error_message: row.get(12)?,
+            })
+        };
+
+        let rows: Vec<Download> = match &status {
+            Some(s) => stmt
+                .query_map(params![s.as_str()], mapper)?
+                .collect::<rusqlite::Result<_>>()?,
+            None => stmt
+                .query_map([], mapper)?
+                .collect::<rusqlite::Result<_>>()?,
+        };
+        Ok(rows)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HF Mapping CRUD (SHA256 ↔ BLAKE3)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Insert or ignore a SHA256↔BLAKE3 mapping
+    pub fn upsert_hf_mapping(
+        &mut self,
+        sha256: &str,
+        blake3: &str,
+        repo_id: Option<&str>,
+        filename: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO hf_mappings (sha256_hash, blake3_hash, repo_id, filename, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![sha256, blake3, repo_id, filename, now],
+        )?;
+        Ok(())
+    }
+
+    /// Look up BLAKE3 hash by SHA256 (HF → CAS resolution)
+    pub fn get_blake3_by_sha256(&self, sha256: &str) -> Result<Option<HfMapping>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, sha256_hash, blake3_hash, repo_id, filename, created_at
+            FROM hf_mappings WHERE sha256_hash = ?1
+            "#,
+        )?;
+        let mapping = stmt
+            .query_row(params![sha256], |row| {
+                let created_str: String = row.get(5)?;
+                Ok(HfMapping {
+                    id: row.get(0)?,
+                    sha256_hash: row.get(1)?,
+                    blake3_hash: row.get(2)?,
+                    repo_id: row.get(3)?,
+                    filename: row.get(4)?,
+                    created_at: created_str
+                        .parse::<DateTime<Utc>>()
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })
+            .optional()?;
+        Ok(mapping)
+    }
+
+    /// Look up all SHA256s for a given BLAKE3 hash
+    pub fn get_sha256_by_blake3(&self, blake3: &str) -> Result<Vec<HfMapping>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, sha256_hash, blake3_hash, repo_id, filename, created_at
+            FROM hf_mappings WHERE blake3_hash = ?1
+            "#,
+        )?;
+        let rows: Vec<HfMapping> = stmt
+            .query_map(params![blake3], |row| {
+                let created_str: String = row.get(5)?;
+                Ok(HfMapping {
+                    id: row.get(0)?,
+                    sha256_hash: row.get(1)?,
+                    blake3_hash: row.get(2)?,
+                    repo_id: row.get(3)?,
+                    filename: row.get(4)?,
+                    created_at: created_str
+                        .parse::<DateTime<Utc>>()
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+}
+
+// Helper to parse a Download row from a prepared statement
+fn parse_download_row(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<Option<Download>> {
+    let row = stmt
+        .query_row(params, |row| {
+            let status_str: String = row.get(7)?;
+            let started_str: String = row.get(10)?;
+            let finished_str: Option<String> = row.get(11)?;
+            Ok(Download {
+                id: row.get(0)?,
+                model_hash: row.get(1)?,
+                source_url: row.get(2)?,
+                sha256_hash: row.get(3)?,
+                repo_id: row.get(4)?,
+                filename: row.get(5)?,
+                revision: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "main".into()),
+                status: DownloadStatus::from_str(&status_str)
+                    .unwrap_or(DownloadStatus::Pending),
+                bytes_total: row.get(8)?,
+                bytes_done: row.get(9)?,
+                started_at: started_str
+                    .parse::<DateTime<Utc>>()
+                    .unwrap_or_else(|_| Utc::now()),
+                finished_at: finished_str.and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+                error_message: row.get(12)?,
+            })
+        })
+        .optional()?;
+    Ok(row)
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
 
     #[test]
     fn test_db_init() {

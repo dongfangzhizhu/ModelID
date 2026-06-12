@@ -29,6 +29,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4"] }
+ureq = "2.9"
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
