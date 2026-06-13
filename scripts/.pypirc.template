@@ -1,0 +1,28 @@
+# PyPI 凭证配置文件
+# 
+# 位置: ~/.pypirc (或 %APPDATA%\.pypirc on Windows)
+# 权限: chmod 600 ~/.pypirc (保护敏感信息)
+# 
+# 配置步骤:
+# 1. 访问 https://pypi.org/account/register/
+# 2. 创建账户或登录
+# 3. 创建 API token: https://pypi.org/manage/account/tokens/
+# 4. 复制 token（格式: pypi-AgEIcHl...）
+# 5. 将以下内容复制到 ~/.pypirc 并填入 token
+
+[distutils]
+index-servers =
+    pypi
+    testpypi
+
+[pypi]
+# 实际 PyPI 服务器（生产环境）
+repository = https://upload.pypi.org/legacy/
+username = __token__
+password = pypi-YOUR_TOKEN_HERE
+
+[testpypi]
+# 测试 PyPI 服务器（推荐先在这里测试）
+repository = https://test.pypi.org/legacy/
+username = __token__
+password = pypi-YOUR_TEST_TOKEN_HERE
