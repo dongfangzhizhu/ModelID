@@ -16,3 +16,4 @@ clap.workspace = true
 indicatif.workspace = true
 colored.workspace = true
 anyhow.workspace = true
+serde_json.workspace = true

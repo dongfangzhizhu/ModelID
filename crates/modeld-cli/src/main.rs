@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
-    hash_file, CasStore, Database, DedupEngine, DedupMode,
-    Downloader, HfCache, QuarantineManager, Scanner,
+    build_model_lookup, find_workflow_files, hash_file, index_workflow, parse_workflow,
+    CasStore, Database, DedupEngine, DedupMode,
+    Downloader, GcEngine, HfCache, QuarantineManager, Scanner,
 };
 use std::path::PathBuf;
 
@@ -116,6 +117,43 @@ enum Commands {
         #[arg(short = 's', long, default_value = ".modeld")]
         store: PathBuf,
     },
+    /// Scan workflow files and index model dependencies
+    WorkflowScan {
+        /// Directory containing workflow JSON files
+        path: PathBuf,
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+    },
+    /// Show model dependencies of a single workflow file
+    WorkflowDeps {
+        /// Workflow JSON file
+        file: PathBuf,
+        /// Store directory (optional, for resolved hash lookup)
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+    },
+    /// List models with no workflow references (orphans)
+    RefsOrphans {
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Safe garbage collection: quarantine unreferenced models
+    Gc {
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+        /// Preview what would be collected without making changes
+        #[arg(long)]
+        preview: bool,
+        /// Also clean up expired quarantine entries (>30 days)
+        #[arg(long)]
+        cleanup_quarantine: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,6 +187,11 @@ fn main() -> Result<()> {
         } => hf_download_command(store, &repo_id, &filename, &revision, token, json)?,
         Commands::HfSetup { print_path, store } => hf_setup_command(store, print_path)?,
         Commands::HfStatus { store } => hf_status_command(store)?,
+        Commands::WorkflowScan { path, store } => workflow_scan_command(store, path)?,
+        Commands::WorkflowDeps { file, store } => workflow_deps_command(store, file)?,
+        Commands::RefsOrphans { store, json } => refs_orphans_command(store, json)?,
+        Commands::Gc { store, preview, cleanup_quarantine } =>
+            gc_command(store, preview, cleanup_quarantine)?,
     }
 
     Ok(())
@@ -812,4 +855,371 @@ fn format_bytes(bytes: u64) -> String {
         unit_idx += 1;
     }
     format!("{:.2} {}", size, UNITS[unit_idx])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4: Workflow & Reference Graph commands
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn workflow_scan_command(store: PathBuf, workflow_dir: PathBuf) -> Result<()> {
+    let db_path = store.join("modeld.db");
+    let db = Database::open(&db_path)?;
+
+    if !workflow_dir.exists() {
+        anyhow::bail!(
+            "Workflow directory does not exist: {}",
+            workflow_dir.display()
+        );
+    }
+
+    println!(
+        "{} {}",
+        "Scanning workflows in:".bold(),
+        workflow_dir.display().to_string().cyan()
+    );
+
+    // Find all .json files
+    let files = find_workflow_files(&workflow_dir)?;
+    if files.is_empty() {
+        println!("{}", "No workflow JSON files found.".yellow());
+        return Ok(());
+    }
+
+    println!("  Found {} workflow files", files.len().to_string().bold());
+    println!();
+
+    // Build model lookup from database
+    let lookup = build_model_lookup(&db)?;
+    let lookup_size = lookup.len();
+    println!(
+        "  Model lookup: {} entries in CAS index",
+        lookup_size.to_string().bold()
+    );
+    println!();
+
+    let pb = ProgressBar::new(files.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+
+    let mut total_resolved = 0usize;
+    let mut total_unresolved = 0usize;
+    let mut errors = 0usize;
+
+    for wf_path in &files {
+        let fname = wf_path.file_name().unwrap_or_default().to_string_lossy();
+        pb.set_message(fname.to_string());
+
+        match index_workflow(&db, wf_path, &lookup) {
+            Ok((_, resolved, unresolved)) => {
+                total_resolved += resolved;
+                total_unresolved += unresolved;
+            }
+            Err(e) => {
+                errors += 1;
+                pb.println(format!(
+                    "  {} {}: {}",
+                    "WARN".yellow().bold(),
+                    wf_path.display(),
+                    e
+                ));
+            }
+        }
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+
+    println!("{}", "Workflow scan complete:".green().bold());
+    println!(
+        "  Workflows indexed:  {}",
+        files.len().to_string().bold()
+    );
+    println!(
+        "  Refs resolved:      {}",
+        total_resolved.to_string().green().bold()
+    );
+    println!(
+        "  Refs unresolved:    {}",
+        total_unresolved.to_string().yellow().bold()
+    );
+    if errors > 0 {
+        println!(
+            "  Parse errors:       {}",
+            errors.to_string().red().bold()
+        );
+    }
+
+    Ok(())
+}
+
+fn workflow_deps_command(store: PathBuf, workflow_file: PathBuf) -> Result<()> {
+    if !workflow_file.exists() {
+        anyhow::bail!("File not found: {}", workflow_file.display());
+    }
+
+    let db_path = store.join("modeld.db");
+
+    println!(
+        "{} {}",
+        "Workflow:".bold(),
+        workflow_file.display().to_string().cyan()
+    );
+    println!();
+
+    let parsed = parse_workflow(&workflow_file)?;
+
+    if let Some(ref title) = parsed.title {
+        println!("  Title: {}", title.bold());
+        println!();
+    }
+
+    // Try to resolve against DB if available
+    let lookup = if db_path.exists() {
+        let db = Database::open(&db_path)?;
+        build_model_lookup(&db)?
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Print known refs
+    let all_refs: Vec<_> = parsed.refs.iter().chain(parsed.unresolved.iter()).collect();
+
+    if all_refs.is_empty() {
+        println!("{}", "No model references found.".yellow());
+        return Ok(());
+    }
+
+    println!("{}", "Model Dependencies:".bold());
+    println!();
+
+    // Group by ref_type
+    let mut by_type: std::collections::BTreeMap<&str, Vec<_>> = std::collections::BTreeMap::new();
+    for r in &all_refs {
+        by_type.entry(r.ref_type.as_str()).or_default().push(r);
+    }
+
+    for (ref_type, refs) in &by_type {
+        let type_label = match *ref_type {
+            "checkpoint" => "Checkpoints",
+            "lora"       => "LoRAs",
+            "vae"        => "VAEs",
+            "clip"       => "CLIP Models",
+            "controlnet" => "ControlNets",
+            "ipadapter"  => "IPAdapters",
+            "unet"       => "UNets",
+            "upscale_model" => "Upscale Models",
+            _            => ref_type,
+        };
+        println!("  {}:", type_label.bold());
+        for r in refs {
+            let resolved = lookup.contains_key(&r.model_name)
+                || lookup.contains_key(
+                    std::path::Path::new(&r.model_name)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                        .as_str(),
+                );
+            let status = if resolved {
+                "✓".green().bold()
+            } else {
+                "?".yellow()
+            };
+            println!("    {} {}", status, r.model_name);
+        }
+        println!();
+    }
+
+    println!(
+        "  Total: {} refs ({} resolved, {} unresolved)",
+        all_refs.len().to_string().bold(),
+        parsed.refs.len().to_string().green(),
+        parsed.unresolved.len().to_string().yellow(),
+    );
+
+    Ok(())
+}
+
+fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
+    let db_path = store.join("modeld.db");
+    if !db_path.exists() {
+        anyhow::bail!("Store not initialized. Run `modeld init` first.");
+    }
+
+    let db = Database::open(&db_path)?;
+    let orphans = db.orphan_models()?;
+
+    if json_output {
+        let arr: Vec<serde_json::Value> = orphans
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "hash": m.blake3_hash.as_hex(),
+                    "size_bytes": m.size_bytes,
+                    "format": m.format,
+                    "arch": m.arch,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+
+    if orphans.is_empty() {
+        println!("{}", "No orphan models found. All models are referenced by at least one workflow.".green());
+        return Ok(());
+    }
+
+    let total_size: i64 = orphans.iter().map(|m| m.size_bytes).sum();
+
+    println!("{}", "Orphan Models (no workflow references):".bold().yellow());
+    println!();
+    println!(
+        "  {:<66} {:>10}  {}",
+        "Hash".dimmed(),
+        "Size".dimmed(),
+        "Format".dimmed()
+    );
+    println!("  {}", "─".repeat(90).dimmed());
+
+    for m in &orphans {
+        let hash_str = &m.blake3_hash.as_hex()[..16];
+        let size_str = format_bytes(m.size_bytes as u64);
+        let fmt = m.format.as_deref().unwrap_or("unknown");
+        println!(
+            "  {}...  {:>10}  {}",
+            hash_str.yellow(),
+            size_str,
+            fmt
+        );
+    }
+
+    println!();
+    println!(
+        "  {} orphans, {} reclaimable",
+        orphans.len().to_string().bold(),
+        format_bytes(total_size as u64).yellow().bold()
+    );
+    println!();
+    println!("{}", "Tip: Run `modeld gc --preview` to see GC plan, or `modeld gc` to quarantine these models.".dimmed());
+
+    Ok(())
+}
+
+fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result<()> {
+    let db_path = store.join("modeld.db");
+    if !db_path.exists() {
+        anyhow::bail!("Store not initialized. Run `modeld init` first.");
+    }
+
+    let db = Database::open(&db_path)?;
+    let gc = GcEngine::new(&db, &store);
+
+    if preview {
+        let plan = gc.preview()?;
+
+        println!("{}", "GC Preview (no changes will be made):".bold());
+        println!();
+
+        println!(
+            "  {} models hard-protected (referenced by workflows)",
+            plan.hard_protected.len().to_string().green().bold()
+        );
+        if !plan.soft_protected.is_empty() {
+            println!(
+                "  {} models soft-protected (have aliases but no workflow refs):",
+                plan.soft_protected.len().to_string().yellow().bold()
+            );
+            for item in &plan.soft_protected {
+                println!(
+                    "    {}... ({} aliases, {})",
+                    item.hash_prefix.yellow(),
+                    item.alias_count,
+                    format_bytes(item.size_bytes as u64)
+                );
+            }
+        }
+        if !plan.would_quarantine.is_empty() {
+            println!(
+                "  {} models would be quarantined:",
+                plan.would_quarantine.len().to_string().red().bold()
+            );
+            for item in &plan.would_quarantine {
+                println!(
+                    "    {}... ({})",
+                    item.hash_prefix.red(),
+                    format_bytes(item.size_bytes as u64)
+                );
+            }
+            println!(
+                "  Total reclaimable: {}",
+                format_bytes(plan.total_reclaimable_bytes as u64).yellow().bold()
+            );
+        } else {
+            println!("  {}", "Nothing to quarantine.".green());
+        }
+        if plan.expired_quarantine_count > 0 {
+            println!();
+            println!(
+                "  {} expired quarantine entries ({}) could be deleted permanently.",
+                plan.expired_quarantine_count.to_string().yellow().bold(),
+                format_bytes(plan.expired_quarantine_bytes as u64)
+            );
+        }
+        println!();
+        println!("{}", "Run `modeld gc` (without --preview) to execute.".dimmed());
+        return Ok(());
+    }
+
+    // Execute GC
+    println!("{}", "Running safe GC...".bold());
+    let result = gc.run_safe()?;
+
+    println!();
+    if result.quarantined.is_empty() {
+        println!("{}", "Nothing quarantined — store is clean.".green().bold());
+    } else {
+        println!(
+            "  {} Quarantined {} models ({})",
+            "✓".green().bold(),
+            result.quarantined.len().to_string().bold(),
+            format_bytes(result.bytes_recovered as u64).yellow()
+        );
+    }
+    if !result.skipped_protected.is_empty() {
+        println!(
+            "  {} Skipped {} hard-protected models",
+            "•".blue(),
+            result.skipped_protected.len()
+        );
+    }
+    if !result.skipped_soft.is_empty() {
+        println!(
+            "  {} Skipped {} soft-protected models (use --force to override)",
+            "⚠".yellow(),
+            result.skipped_soft.len()
+        );
+    }
+
+    if cleanup_quarantine {
+        println!();
+        println!("{}", "Cleaning expired quarantine entries...".bold());
+        let cleaned = gc.cleanup_quarantine()?;
+        if cleaned > 0 {
+            println!(
+                "  {} Permanently deleted {} expired quarantine entries",
+                "✓".green().bold(),
+                cleaned
+            );
+        } else {
+            println!("  No expired quarantine entries found.");
+        }
+    }
+
+    Ok(())
 }

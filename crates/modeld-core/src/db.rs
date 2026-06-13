@@ -272,6 +272,41 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_hf_mappings_sha256 ON hf_mappings(sha256_hash);
             CREATE INDEX IF NOT EXISTS idx_hf_mappings_blake3 ON hf_mappings(blake3_hash);
+
+            -- Workflow files (Phase 4)
+            CREATE TABLE IF NOT EXISTS workflows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT UNIQUE NOT NULL,
+                -- BLAKE3 hash of the workflow JSON file itself
+                file_hash TEXT,
+                title TEXT,
+                parsed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                ref_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_workflows_path ON workflows(path);
+            CREATE INDEX IF NOT EXISTS idx_workflows_file_hash ON workflows(file_hash);
+
+            -- Workflow → Model dependency edges (Phase 4)
+            CREATE TABLE IF NOT EXISTS workflow_refs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workflow_id INTEGER NOT NULL,
+                model_hash TEXT,              -- NULL if unresolved
+                ref_type TEXT NOT NULL,       -- 'checkpoint','lora','vae','clip','controlnet','ipadapter','unet','unknown'
+                model_name TEXT NOT NULL,     -- raw name from workflow JSON
+                model_path TEXT,              -- resolved absolute path (if found)
+                resolved INTEGER NOT NULL DEFAULT 0,  -- 1 = matched to CAS
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+                FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+                FOREIGN KEY (model_hash) REFERENCES models(blake3_hash),
+                CHECK (ref_type IN ('checkpoint','lora','vae','clip','controlnet','ipadapter','unet','unknown'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_workflow_refs_workflow ON workflow_refs(workflow_id);
+            CREATE INDEX IF NOT EXISTS idx_workflow_refs_model ON workflow_refs(model_hash);
+            CREATE INDEX IF NOT EXISTS idx_workflow_refs_type ON workflow_refs(ref_type);
             "#,
         )?;
 
@@ -957,6 +992,249 @@ fn parse_download_row(
 }
 
 
+
+// ──────────────────────────────────────────────────────────────────────────
+// Phase 4: Workflow & Reference Graph
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A parsed ComfyUI (or other format) workflow file
+#[derive(Debug, Clone)]
+pub struct WorkflowRecord {
+    pub id: i64,
+    pub path: String,
+    pub file_hash: Option<String>,
+    pub title: Option<String>,
+    pub parsed_at: String,
+    pub last_seen_at: String,
+    pub ref_count: i64,
+}
+
+/// A single model reference extracted from a workflow
+#[derive(Debug, Clone)]
+pub struct WorkflowRef {
+    pub id: i64,
+    pub workflow_id: i64,
+    pub model_hash: Option<String>,
+    pub ref_type: String,
+    pub model_name: String,
+    pub model_path: Option<String>,
+    pub resolved: bool,
+}
+
+impl Database {
+    /// Upsert a workflow record; returns the workflow ID.
+    pub fn upsert_workflow(
+        &self,
+        path: &str,
+        file_hash: Option<&str>,
+        title: Option<&str>,
+    ) -> Result<i64> {
+        self.conn.execute(
+            r#"INSERT INTO workflows (path, file_hash, title, parsed_at, last_seen_at)
+               VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
+               ON CONFLICT(path) DO UPDATE SET
+                 file_hash    = excluded.file_hash,
+                 title        = excluded.title,
+                 parsed_at    = excluded.parsed_at,
+                 last_seen_at = excluded.last_seen_at"#,
+            rusqlite::params![path, file_hash, title],
+        )?;
+        Ok(self.conn.last_insert_rowid().max(
+            self.conn.query_row(
+                "SELECT id FROM workflows WHERE path = ?1",
+                rusqlite::params![path],
+                |r| r.get::<_, i64>(0),
+            )?,
+        ))
+    }
+
+    /// Delete all workflow_refs for a workflow before re-inserting (refresh).
+    pub fn clear_workflow_refs(&self, workflow_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM workflow_refs WHERE workflow_id = ?1",
+            rusqlite::params![workflow_id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a single workflow → model reference edge.
+    pub fn insert_workflow_ref(
+        &self,
+        workflow_id: i64,
+        model_hash: Option<&str>,
+        ref_type: &str,
+        model_name: &str,
+        model_path: Option<&str>,
+        resolved: bool,
+    ) -> Result<i64> {
+        self.conn.execute(
+            r#"INSERT INTO workflow_refs
+               (workflow_id, model_hash, ref_type, model_name, model_path, resolved)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6)"#,
+            rusqlite::params![
+                workflow_id,
+                model_hash,
+                ref_type,
+                model_name,
+                model_path,
+                resolved as i64,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Update workflow ref_count to reflect current edge count
+    pub fn update_workflow_ref_count(&self, workflow_id: i64) -> Result<()> {
+        self.conn.execute(
+            r#"UPDATE workflows SET ref_count = (
+                SELECT COUNT(*) FROM workflow_refs WHERE workflow_id = ?1
+               ) WHERE id = ?1"#,
+            rusqlite::params![workflow_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all workflow_refs that reference a given model (by blake3 hash).
+    pub fn get_workflows_for_model(&self, blake3: &str) -> Result<Vec<WorkflowRef>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT wr.id, wr.workflow_id, wr.model_hash, wr.ref_type,
+                      wr.model_name, wr.model_path, wr.resolved
+               FROM workflow_refs wr
+               WHERE wr.model_hash = ?1"#,
+        )?;
+        let rows = stmt.query_map(rusqlite::params![blake3], |r| {
+            Ok(WorkflowRef {
+                id: r.get(0)?,
+                workflow_id: r.get(1)?,
+                model_hash: r.get(2)?,
+                ref_type: r.get(3)?,
+                model_name: r.get(4)?,
+                model_path: r.get(5)?,
+                resolved: r.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Get all model refs for a given workflow path.
+    pub fn get_refs_for_workflow(&self, path: &str) -> Result<Vec<WorkflowRef>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT wr.id, wr.workflow_id, wr.model_hash, wr.ref_type,
+                      wr.model_name, wr.model_path, wr.resolved
+               FROM workflow_refs wr
+               JOIN workflows w ON wr.workflow_id = w.id
+               WHERE w.path = ?1"#,
+        )?;
+        let rows = stmt.query_map(rusqlite::params![path], |r| {
+            Ok(WorkflowRef {
+                id: r.get(0)?,
+                workflow_id: r.get(1)?,
+                model_hash: r.get(2)?,
+                ref_type: r.get(3)?,
+                model_name: r.get(4)?,
+                model_path: r.get(5)?,
+                resolved: r.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// List all known workflows.
+    pub fn list_workflows(&self) -> Result<Vec<WorkflowRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, file_hash, title, parsed_at, last_seen_at, ref_count FROM workflows ORDER BY last_seen_at DESC"
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(WorkflowRecord {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                file_hash: r.get(2)?,
+                title: r.get(3)?,
+                parsed_at: r.get(4)?,
+                last_seen_at: r.get(5)?,
+                ref_count: r.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Return models that have zero workflow_refs (candidates for GC).
+    pub fn orphan_models(&self) -> Result<Vec<Model>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT m.id, m.blake3_hash, m.size_bytes, m.format,
+                      m.arch, m.category, m.base_model, m.created_at, m.last_seen, m.quarantined_at
+               FROM models m
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM workflow_refs wr WHERE wr.model_hash = m.blake3_hash
+               )
+               ORDER BY m.size_bytes DESC"#,
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Model {
+                id: r.get(0)?,
+                blake3_hash: Blake3Hash::from_hex(&r.get::<_, String>(1)?).unwrap(),
+                size_bytes: r.get(2)?,
+                format: r.get(3)?,
+                arch: r.get(4)?,
+                category: r.get(5)?,
+                base_model: r.get(6)?,
+                created_at: DateTime::parse_from_rfc3339(&r.get::<_, String>(7)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                last_seen: DateTime::parse_from_rfc3339(&r.get::<_, String>(8)?)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                quarantined_at: r.get::<_, Option<String>>(9)?
+                    .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc)),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Return workflow_refs that could not be resolved to a CAS model.
+    pub fn unresolved_refs(&self) -> Result<Vec<WorkflowRef>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT id, workflow_id, model_hash, ref_type, model_name, model_path, resolved
+               FROM workflow_refs WHERE resolved = 0"#,
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(WorkflowRef {
+                id: r.get(0)?,
+                workflow_id: r.get(1)?,
+                model_hash: r.get(2)?,
+                ref_type: r.get(3)?,
+                model_name: r.get(4)?,
+                model_path: r.get(5)?,
+                resolved: false,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Get a workflow record by path.
+    pub fn get_workflow(&self, path: &str) -> Result<Option<WorkflowRecord>> {
+        let result = self.conn.query_row(
+            "SELECT id, path, file_hash, title, parsed_at, last_seen_at, ref_count FROM workflows WHERE path = ?1",
+            rusqlite::params![path],
+            |r| {
+                Ok(WorkflowRecord {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    file_hash: r.get(2)?,
+                    title: r.get(3)?,
+                    parsed_at: r.get(4)?,
+                    last_seen_at: r.get(5)?,
+                    ref_count: r.get(6)?,
+                })
+            },
+        );
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
