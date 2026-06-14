@@ -254,10 +254,17 @@ impl Downloader {
 
         let agent = build_agent(self.hf_token.as_deref());
 
-        // Send HEAD request to get metadata without downloading body
-        let resp = agent
+        // Send HEAD request to get metadata without downloading body.
+        // Attach the HF bearer token explicitly: ureq's AgentBuilder does not
+        // carry default headers, so per-request `.set()` is required for
+        // private/gated repos to be reachable.
+        let mut req = agent
             .head(&url)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30));
+        if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
+            req = req.set("Authorization", &hdr);
+        }
+        let resp = req
             .call()
             .context("HF metadata HEAD request failed")?;
 
@@ -317,18 +324,22 @@ impl Downloader {
         };
 
         let resp = if bytes_done > 0 {
-            agent
+            let mut req = agent
                 .get(url)
                 .set("Range", &format!("bytes={}-", bytes_done))
-                .timeout(Duration::from_secs(600))
-                .call()
-                .context("HTTP GET with range request failed")?
+                .timeout(Duration::from_secs(600));
+            if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
+                req = req.set("Authorization", &hdr);
+            }
+            req.call().context("HTTP GET with range request failed")?
         } else {
-            agent
+            let mut req = agent
                 .get(url)
-                .timeout(Duration::from_secs(600))
-                .call()
-                .context("HTTP GET request failed")?
+                .timeout(Duration::from_secs(600));
+            if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
+                req = req.set("Authorization", &hdr);
+            }
+            req.call().context("HTTP GET request failed")?
         };
 
         let total = expected_size.unwrap_or(0);
@@ -356,16 +367,22 @@ impl Downloader {
 // ureq HTTP agent builder
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn build_agent(hf_token: Option<&str>) -> ureq::Agent {
-    let agent = ureq::AgentBuilder::new()
+fn build_agent(_hf_token: Option<&str>) -> ureq::Agent {
+    // Note: ureq 2.x AgentBuilder does not support default headers, so the HF
+    // bearer token is attached per-request at each call site (see
+    // `auth_header`). The token parameter is kept for API stability and future
+    // use (e.g. an async agent that supports default headers).
+    ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(60))
         .timeout_write(Duration::from_secs(60))
-        .build();
+        .build()
+}
 
-    // Note: ureq 2.x does not support default headers on AgentBuilder directly.
-    // The token is added per-request in get/head calls instead.
-    let _ = hf_token; // used in get/head call sites
-    agent
+/// Build an HTTP `Authorization` header value for the HuggingFace bearer token.
+/// Returns `None` when no token is configured, leaving the request unauthenticated
+/// (sufficient for public repos).
+fn auth_header(token: Option<&str>) -> Option<String> {
+    token.map(|t| format!("Bearer {}", t))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "modeld")]
+#[command(version)] // enables `--version` and `-V` from CARGO_PKG_VERSION
 #[command(about = "Content-Addressable Storage for AI models", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -636,7 +637,11 @@ fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Result<(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn open_db(store: &std::path::Path) -> Result<Database> {
-    let db_path = store.join("index.db");
+    // Use the same DB filename as every other command so HF downloads land in
+    // the same metadata store that `scan`/`status`/`dedup`/`gc`/`workflow-scan`
+    // read from. (Previously this used "index.db", which caused the HF path to
+    // silently diverge from the rest of the pipeline.)
+    let db_path = store.join("modeld.db");
     Database::open(&db_path)
 }
 

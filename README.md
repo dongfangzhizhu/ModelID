@@ -2,7 +2,7 @@
 
 Content-Addressable Storage (CAS) infrastructure for AI models.
 
-**Status**: Phase 1 - Core CAS Implementation (In Progress)
+**Status**: Phases 1–4 complete · Phase 5 (Local Registry & Proxy) in progress
 
 ## Overview
 
@@ -13,14 +13,15 @@ modeld is the "containerd + git-lfs + nix store" for AI models. It provides:
 - **Transparent Integration**: Works with ComfyUI, Forge, A1111, HuggingFace
 - **Cross-Platform**: Windows, Linux, macOS support
 
-## Phase 1 Status
+## Phases
 
-Current implementation:
-- [ ] BLAKE3 hashing (≥2GB/s target)
-- [ ] CAS storage layer
-- [ ] SQLite metadata index
-- [ ] File scanner
-- [ ] Basic CLI (`init`, `scan`, `status`, `hash`)
+| Phase | Focus | Status |
+|-------|-------|--------|
+| 1 | Core CAS — BLAKE3, storage, SQLite, scanner, CLI | ✅ Complete |
+| 2 | Dedup engine — two-phase commit, links, quarantine | ✅ Complete |
+| 3 | HuggingFace interception — fake HF cache, downloader, Python hook | ✅ Complete |
+| 4 | Workflow reference graph + safe GC | ✅ Complete |
+| 5 | Local registry & proxy (LAN sharing, mDNS, Range requests) | 🚧 In progress |
 
 ## Quick Start
 
@@ -28,7 +29,7 @@ Current implementation:
 # Initialize store
 modeld init
 
-# Scan models directory
+# Scan models directory and ingest into CAS
 modeld scan ~/models/
 
 # Check status
@@ -38,11 +39,61 @@ modeld status
 modeld hash model.safetensors
 ```
 
+## Deduplication
+
+```bash
+# Preview what would be deduplicated (no changes)
+modeld dedup --dry-run
+
+# Execute automatically
+modeld dedup --auto
+```
+
+Dedup uses a crash-safe two-phase commit (WAL-backed) and chooses a canonical
+path per content group (CAS > oldest mtime > shortest path). Replaced files go
+to a 30-day quarantine that can be inspected and restored.
+
+## HuggingFace integration
+
+```bash
+# Check whether a HF file is already in the modeld cache
+modeld hf-check stabilityai/stable-diffusion-xl-base-1.0 sd_xl_base_1.0.safetensors
+
+# Download via modeld CAS (dedups against existing content)
+modeld hf-download stabilityai/stable-diffusion-xl-base-1.0 sd_xl_base_1.0.safetensors
+
+# Point HF_HOME at the modeld fake cache
+modeld hf-setup
+```
+
+For automatic interception from `diffusers`/`transformers`/ComfyUI, install the
+Python hook (`pip install modeld-hook`) and `import modeld_hook`.
+
+## Workflow reference graph & GC
+
+```bash
+# Index ComfyUI workflow JSON and resolve model references
+modeld workflow-scan ~/comfyui/user/workflows/
+
+# Show dependencies of a single workflow
+modeld workflow-deps workflow.json
+
+# List models with no workflow references
+modeld refs-orphans
+
+# Safe GC: quarantine unreferenced models (workflow-referenced models are protected)
+modeld gc --preview
+modeld gc
+```
+
 ## Documentation
 
 - [Phase 0 Architecture](docs/architecture.md)
 - [RFCs](docs/rfcs/)
-- [Phase 1 Plan](PHASE1_PLAN.md)
+- [Phase 1 Plan](PHASE1_PLAN.md) · [Phase 1 Summary](PHASE1_SUMMARY.md)
+- [Phase 2 Plan](PHASE2_PLAN.md) · [Phase 3 Plan](PHASE3_PLAN.md)
+- [Phase 4 Plan](PHASE4_PLAN.md) · [Phase 5 Plan](PHASE5_PLAN.md)
+- [Publish Guide](PUBLISH_GUIDE.md)
 
 ## Building
 
@@ -53,7 +104,11 @@ cargo build --release
 ## Testing
 
 ```bash
+# Rust
 cargo test --workspace
+
+# Python hook
+cd python && python -m pytest tests/
 ```
 
 ## License

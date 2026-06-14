@@ -50,19 +50,42 @@ def _get_modeld_store() -> Optional[Path]:
                 return Path(path)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    # Fallback: check HF_HOME env var
-    hf_home = os.environ.get("HF_HOME")
-    if hf_home:
-        return Path(hf_home)
+    # Fallback: check HF_HOME env var (kept as raw string, see get_hf_home)
     return None
+
+
+def _get_modeld_store_raw() -> Optional[str]:
+    """Return the modeld HF cache path as a raw string.
+
+    For the env-var fallback we preserve the original value verbatim instead of
+    round-tripping it through `Path`, which on Windows would rewrite POSIX
+    separators (e.g. ``/custom/hf/home`` → ``\\custom\\hf\\home``) and surprise
+    callers. The CLI-provided path is already platform-native and is returned
+    via `str(Path(...))`.
+    """
+    try:
+        result = subprocess.run(
+            ["modeld", "hf-setup", "--print-path"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            path = result.stdout.strip()
+            if path:
+                return path
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return os.environ.get("HF_HOME")
 
 
 def get_hf_home() -> Optional[str]:
-    """Return the current HF_HOME path managed by modeld, or None."""
-    store = _get_modeld_store()
-    if store:
-        return str(store)
-    return None
+    """Return the current HF_HOME path managed by modeld, or None.
+
+    Environment-variable values are returned verbatim (no separator rewriting);
+    CLI-provided paths are returned in the platform-native form.
+    """
+    return _get_modeld_store_raw()
 
 
 def is_active() -> bool:
