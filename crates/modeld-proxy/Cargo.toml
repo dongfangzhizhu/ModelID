@@ -1,0 +1,26 @@
+[package]
+name = "modeld-proxy"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+modeld-core = { path = "../modeld-core" }
+tiny_http.workspace = true
+toml.workspace = true
+ctrlc.workspace = true
+mdns.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+# mDNS discovery (mdns 3.x) is async-std based; drive its stream synchronously.
+async-std = "1.13"
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile.workspace = true
+ureq.workspace = true
+modeld-client = { path = "../modeld-client" }
