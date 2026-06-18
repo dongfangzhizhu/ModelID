@@ -2,7 +2,7 @@
 
 Content-Addressable Storage (CAS) infrastructure for AI models.
 
-**Status**: Phases 1–4 complete · Phase 5 (Local Registry & Proxy) in progress
+**Status**: Phases 1–5 complete
 
 ## Overview
 
@@ -21,7 +21,7 @@ modeld is the "containerd + git-lfs + nix store" for AI models. It provides:
 | 2 | Dedup engine — two-phase commit, links, quarantine | ✅ Complete |
 | 3 | HuggingFace interception — fake HF cache, downloader, Python hook | ✅ Complete |
 | 4 | Workflow reference graph + safe GC | ✅ Complete |
-| 5 | Local registry & proxy (LAN sharing, mDNS, Range requests) | 🚧 In progress |
+| 5 | Local registry & proxy (LAN sharing, mDNS, Range requests) | ✅ Complete |
 
 ## Quick Start
 
@@ -86,6 +86,34 @@ modeld gc --preview
 modeld gc
 ```
 
+## Local registry & proxy
+
+Share one CAS store across the LAN — download once, serve everywhere at full
+LAN bandwidth, with transparent HuggingFace deduplication.
+
+```bash
+# Start the proxy (on the machine holding the store)
+modeld proxy start --port 8234 --store .modeld
+
+# Discover proxies on the LAN (mDNS)
+modeld proxy discover
+
+# Check a running server
+modeld proxy status --url http://localhost:8234
+```
+
+Use it as a transparent HuggingFace mirror — point `HF_ENDPOINT` at the proxy
+and every HF-based framework (diffusers/transformers/ComfyUI/Forge/A1111)
+downloads through modeld with no code changes:
+
+```bash
+export HF_ENDPOINT="http://192.168.1.5:8234/v1/hf-proxy"
+```
+
+A Rust client SDK (`modeld-client`) provides health checks, model listing, and
+resumable blob/HF downloads. See the [proxy setup guide](docs/proxy-setup.md)
+and [HTTP API reference](docs/proxy-api.md).
+
 ## Documentation
 
 - [Phase 0 Architecture](docs/architecture.md)
@@ -93,6 +121,7 @@ modeld gc
 - [Phase 1 Plan](PHASE1_PLAN.md) · [Phase 1 Summary](PHASE1_SUMMARY.md)
 - [Phase 2 Plan](PHASE2_PLAN.md) · [Phase 3 Plan](PHASE3_PLAN.md)
 - [Phase 4 Plan](PHASE4_PLAN.md) · [Phase 5 Plan](PHASE5_PLAN.md)
+- [Proxy setup](docs/proxy-setup.md) · [Proxy HTTP API](docs/proxy-api.md)
 - [Publish Guide](PUBLISH_GUIDE.md)
 
 ## Building

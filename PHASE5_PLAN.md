@@ -1,9 +1,19 @@
 # Phase 5: Local Registry & Proxy
 
-**状态**: 🚧 **进行中**  
+**状态**: ✅ **完成**  
 **开始日期**: 2026-06-13  
-**预计时间**: 6-8周  
+**完成日期**: 2026-06-19  
 **目标**: 实现局域网模型共享和 HuggingFace 代理服务器
+
+> **实现说明**：Phase 5 按本计划完成，但有两处与原计划文档的偏差，
+> 已根据决策固化：
+> 1. **默认端口为 8234**（按 `modeld-project-plan.md §9`，非本文件原写的 8080）。
+> 2. **配置并入统一 `modeld.toml [proxy]` 段**（非独立的 `proxy.toml`）。
+> 3. **mDNS 发布依赖系统守护进程**：所用 `mdns` crate 仅支持发现（scan），
+>    不支持发布。`modeld proxy discover` 能扫到任何注册为
+>    `_modeld._tcp.local.` 的服务；要让本机被发现，需用 avahi-publish /
+>    dns-sd / Bonjour 发布。详见 `docs/proxy-setup.md`。
+
 
 ---
 

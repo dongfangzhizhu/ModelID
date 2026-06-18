@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/modeld-core",
     "crates/modeld-cli",
+    "crates/modeld-proxy",
+    "crates/modeld-client",
 ]
 
 [workspace.package]
@@ -35,6 +37,12 @@ ureq = "2.9"
 clap = { version = "4.4", features = ["derive"] }
 indicatif = "0.17"
 colored = "2.1"
+
+# Phase 5: proxy server
+tiny_http = "0.12"
+toml = "0.8"
+ctrlc = "3.4"
+mdns = "3.0"
 
 # Testing
 tempfile = "3.8"

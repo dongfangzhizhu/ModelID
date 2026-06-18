@@ -17,3 +17,16 @@ Thumbs.db
 # modeld specific
 /test-store/
 /.modeld-test/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+python/dist/
+python/build/
+*.egg-info/
+.venv/
+venv/
+
+# Node (not part of this project; ignore stray manifests)
+node_modules/
+package-lock.json

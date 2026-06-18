@@ -155,6 +155,51 @@ enum Commands {
         #[arg(long)]
         cleanup_quarantine: bool,
     },
+    /// Local registry & proxy server (Phase 5)
+    Proxy {
+        #[command(subcommand)]
+        action: ProxyAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProxyAction {
+    /// Start the proxy server (foreground; Ctrl+C to stop)
+    Start {
+        /// Bind address (default: 0.0.0.0)
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
+        /// Port (default: 8234)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+        /// Require a bearer token (set this to enable auth)
+        #[arg(long)]
+        token: Option<String>,
+        /// Allow anonymous (unauthenticated) access
+        #[arg(long, default_value = "true")]
+        allow_anonymous: bool,
+        /// Path to a modeld.toml config file
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Discover modeld proxy servers on the local network (mDNS)
+    Discover {
+        /// How long to scan, in seconds (default: 5)
+        #[arg(short = 't', long, default_value = "5")]
+        timeout: u64,
+    },
+    /// Query a running proxy server's health and model stats
+    Status {
+        /// Proxy base URL (e.g. http://192.168.1.5:8234)
+        #[arg(short = 'u', long, default_value = "http://localhost:8234")]
+        url: String,
+        /// Bearer token (if the server requires one)
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -193,6 +238,7 @@ fn main() -> Result<()> {
         Commands::RefsOrphans { store, json } => refs_orphans_command(store, json)?,
         Commands::Gc { store, preview, cleanup_quarantine } =>
             gc_command(store, preview, cleanup_quarantine)?,
+        Commands::Proxy { action } => proxy_command(action)?,
     }
 
     Ok(())
@@ -1223,6 +1269,158 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result
             );
         } else {
             println!("  No expired quarantine entries found.");
+        }
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 5: proxy commands
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn proxy_command(action: ProxyAction) -> Result<()> {
+    match action {
+        ProxyAction::Start {
+            bind,
+            port,
+            store,
+            token,
+            allow_anonymous,
+            config,
+        } => proxy_start_command(bind, port, store, token, allow_anonymous, config),
+        ProxyAction::Discover { timeout } => proxy_discover_command(timeout),
+        ProxyAction::Status { url, token } => proxy_status_command(&url, token),
+    }
+}
+
+fn proxy_start_command(
+    bind: String,
+    port: Option<u16>,
+    store: PathBuf,
+    token: Option<String>,
+    allow_anonymous: bool,
+    config: Option<PathBuf>,
+) -> Result<()> {
+    // Load config from file if provided; otherwise build from CLI flags.
+    let mut cfg = if let Some(ref cfg_path) = config {
+        modeld_proxy::ProxyConfig::load(cfg_path)?
+    } else {
+        modeld_proxy::ProxyConfig::from_cli(port, Some(bind.clone()), store.clone(), token, allow_anonymous)
+    };
+    // CLI bind override always wins (most explicit).
+    cfg.bind_address = bind;
+    if let Some(p) = port {
+        cfg.port = p;
+    }
+
+    // Initialize the store components if missing so a fresh store works.
+    let cas = modeld_core::CasStore::new(&store);
+    cas.init()?;
+    let db_path = store.join("modeld.db");
+    Database::open(&db_path)?;
+
+    let server = modeld_proxy::ProxyServer::new(cfg, store);
+    // mDNS announcement is best-effort; it logs the intended registration.
+    // (Publication needs the host's mDNS daemon — see discovery.rs docs.)
+    server.start()
+}
+
+fn proxy_discover_command(timeout: u64) -> Result<()> {
+    println!("{}", "Scanning LAN for modeld proxy servers...".cyan().bold());
+    println!("  (mDNS service: _modeld._tcp.local.)");
+    println!();
+
+    let servers = modeld_proxy::discover(timeout);
+
+    if servers.is_empty() {
+        println!(
+            "{}",
+            "No modeld proxy servers found on the local network.".yellow()
+        );
+        println!();
+        println!("{}", "Make sure:".dimmed());
+        println!("  • A server is running: modeld proxy start");
+        println!("  • mDNS is published (avahi-publish / dns-sd / Bonjour)");
+        println!("  • The machine is on the same network/subnet");
+        println!("  • mDNS traffic is allowed (UDP 5353)");
+        return Ok(());
+    }
+
+    println!(
+        "{} {} server(s) found:",
+        "✓".green().bold(),
+        servers.len()
+    );
+    println!();
+    for s in &servers {
+        println!(
+            "  {} {}",
+            "•".cyan(),
+            format!("http://{}:{}", s.address, s.port).bold()
+        );
+        if !s.txt.is_empty() {
+            let parts: Vec<String> = s
+                .txt
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            println!("      {}", parts.join(", ").dimmed());
+        }
+    }
+
+    Ok(())
+}
+
+fn proxy_status_command(url: &str, token: Option<String>) -> Result<()> {
+    let mut builder = modeld_client::ModeldClient::new(url);
+    if let Some(t) = token {
+        builder = builder.with_token(t);
+    }
+
+    let health = builder.health().map_err(|e| {
+        anyhow::anyhow!("failed to reach proxy at {}: {:#}", url, e)
+    })?;
+
+    println!("{}", "modeld Proxy Status".cyan().bold());
+    println!("{}", "─".repeat(40).cyan());
+    println!("  URL:           {}", url);
+    println!("  Status:        {}", health.status.green());
+    println!("  Version:       {}", health.version);
+    println!("  Uptime:        {}s", health.uptime_seconds);
+    println!("  Models:        {}", health.model_count.to_string().bold());
+    println!(
+        "  Total size:    {}",
+        format_bytes(health.total_bytes as u64)
+    );
+    println!("{}", "─".repeat(40).cyan());
+
+    match builder.list_models() {
+        Ok(models) => {
+            if models.is_empty() {
+                println!("{}", "No models in store.".dimmed());
+            } else {
+                println!();
+                println!(
+                    "{} (showing first 5):",
+                    "Recent models".cyan()
+                );
+                for m in models.iter().take(5) {
+                    let hash_short = &m.hash[..16.min(m.hash.len())];
+                    println!(
+                        "  {}  {}  {}",
+                        hash_short.dimmed(),
+                        format_bytes(m.size_bytes as u64),
+                        m.format.as_deref().unwrap_or("unknown")
+                    );
+                }
+                if models.len() > 5 {
+                    println!("  ... and {} more", models.len() - 5);
+                }
+            }
+        }
+        Err(e) => {
+            println!("  {} list_models failed: {:#}", "⚠".yellow(), e);
         }
     }
 
