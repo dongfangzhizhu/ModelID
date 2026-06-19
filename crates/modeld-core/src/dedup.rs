@@ -37,11 +37,7 @@ impl FileInfo {
 
         let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-        Ok(FileInfo {
-            path: path.to_path_buf(),
-            size: metadata.len(),
-            mtime,
-        })
+        Ok(FileInfo { path: path.to_path_buf(), size: metadata.len(), mtime })
     }
 }
 
@@ -91,11 +87,7 @@ pub struct DedupEngine {
 impl DedupEngine {
     pub fn new(db: Database, store_path: PathBuf) -> Self {
         let link_capability = LinkCapability::detect();
-        Self {
-            db,
-            store_path,
-            link_capability,
-        }
+        Self { db, store_path, link_capability }
     }
 
     pub fn with_link_capability(
@@ -103,11 +95,7 @@ impl DedupEngine {
         store_path: PathBuf,
         link_capability: LinkCapability,
     ) -> Self {
-        Self {
-            db,
-            store_path,
-            link_capability,
-        }
+        Self { db, store_path, link_capability }
     }
 
     /// Find all duplicate groups in the database
@@ -162,11 +150,8 @@ impl DedupEngine {
         // Priority 1: Check if any file already in CAS
         for file in files {
             if file.path.starts_with(&cas_prefix) {
-                let duplicates = files
-                    .iter()
-                    .filter(|f| f.path != file.path)
-                    .map(|f| f.path.clone())
-                    .collect();
+                let duplicates =
+                    files.iter().filter(|f| f.path != file.path).map(|f| f.path.clone()).collect();
 
                 return CanonicalSelection {
                     canonical: file.path.clone(),
@@ -181,18 +166,15 @@ impl DedupEngine {
             .iter()
             .min_by_key(|file| {
                 (
-                    file.mtime,                               // Oldest first
-                    file.path.as_os_str().len(),              // Shortest path
-                    file.path.to_string_lossy().to_string(),  // Alphabetical
+                    file.mtime,                              // Oldest first
+                    file.path.as_os_str().len(),             // Shortest path
+                    file.path.to_string_lossy().to_string(), // Alphabetical
                 )
             })
             .unwrap();
 
-        let duplicates = files
-            .iter()
-            .filter(|f| f.path != canonical.path)
-            .map(|f| f.path.clone())
-            .collect();
+        let duplicates =
+            files.iter().filter(|f| f.path != canonical.path).map(|f| f.path.clone()).collect();
 
         let reason = if files.iter().filter(|f| f.mtime == canonical.mtime).count() > 1 {
             if files
@@ -209,11 +191,7 @@ impl DedupEngine {
             "Oldest file (likely original)".to_string()
         };
 
-        CanonicalSelection {
-            canonical: canonical.path.clone(),
-            duplicates,
-            reason,
-        }
+        CanonicalSelection { canonical: canonical.path.clone(), duplicates, reason }
     }
 
     /// Calculate potential space savings from deduplication
@@ -298,8 +276,7 @@ impl DedupEngine {
             if staged_hash.as_hex() != group.hash.as_hex() {
                 // Hash mismatch - clean up and abort
                 let _ = std::fs::remove_file(&staging_path);
-                self.db
-                    .update_wal_status(&tx_id, TransactionStatus::Failed)?;
+                self.db.update_wal_status(&tx_id, TransactionStatus::Failed)?;
                 return Err(anyhow!(
                     "Hash mismatch during staging: expected {}, got {}",
                     group.hash.as_hex(),
@@ -309,8 +286,7 @@ impl DedupEngine {
         }
 
         // Update WAL - status=copied
-        self.db
-            .update_wal_status(&tx_id, TransactionStatus::Copied)?;
+        self.db.update_wal_status(&tx_id, TransactionStatus::Copied)?;
 
         // === PHASE B: COMMIT ===
 
@@ -320,7 +296,7 @@ impl DedupEngine {
             std::fs::create_dir_all(cas_dir)?;
 
             // On Windows, rename can fail across volumes - use copy+delete as fallback
-            if let Err(_) = std::fs::rename(&staging_path, &cas_path) {
+            if std::fs::rename(&staging_path, &cas_path).is_err() {
                 // Fallback: copy then remove staging
                 std::fs::copy(&staging_path, &cas_path)?;
                 let _ = std::fs::remove_file(&staging_path);
@@ -354,10 +330,14 @@ impl DedupEngine {
             let alias_type = match &link_result {
                 LinkResult::Success(atype) => atype.clone(),
                 LinkResult::Failed(err) => {
+                    let p = dup_path.display().to_string();
+                    let es = err.to_string();
                     eprintln!(
-                        "Warning: failed to create link for {}: {}",
-                        dup_path.display(),
-                        err
+                        "{}",
+                        crate::i18n::tf(
+                            "warn.dedup_link_failed",
+                            &[("path", &p), ("error", &es)],
+                        )
                     );
                     // Fall back to reference-only
                     AliasType::ReferenceOnly
@@ -367,13 +347,21 @@ impl DedupEngine {
             // Record alias in database
             let dup_path_str = dup_path.to_string_lossy().to_string();
             if self.db.get_alias_by_path(&dup_path_str)?.is_none() {
-                self.db
-                    .insert_alias(&group.hash, &dup_path_str, Frontend::User, alias_type.clone())?;
+                self.db.insert_alias(
+                    &group.hash,
+                    &dup_path_str,
+                    Frontend::User,
+                    alias_type.clone(),
+                )?;
             } else {
                 // Update existing alias type if changed
                 self.db.delete_alias(&dup_path_str)?;
-                self.db
-                    .insert_alias(&group.hash, &dup_path_str, Frontend::User, alias_type.clone())?;
+                self.db.insert_alias(
+                    &group.hash,
+                    &dup_path_str,
+                    Frontend::User,
+                    alias_type.clone(),
+                )?;
             }
 
             links_created.push((dup_path.clone(), alias_type));
@@ -381,8 +369,7 @@ impl DedupEngine {
         }
 
         // Update WAL - status=committed
-        self.db
-            .update_wal_status(&tx_id, TransactionStatus::Committed)?;
+        self.db.update_wal_status(&tx_id, TransactionStatus::Committed)?;
 
         // Clean up committed WAL entry
         self.db.delete_wal_transaction(&tx_id)?;
@@ -422,7 +409,14 @@ impl DedupEngine {
                 }
                 Err(e) => {
                     stats.groups_failed += 1;
-                    eprintln!("Warning: dedup failed for group {}: {}", hash_prefix, e);
+                    let es = format!("{:#}", e);
+                    eprintln!(
+                        "{}",
+                        crate::i18n::tf(
+                            "warn.dedup_group_failed",
+                            &[("prefix", &hash_prefix), ("error", &es)],
+                        )
+                    );
                 }
             }
         }
@@ -454,9 +448,13 @@ impl DedupEngine {
                     }
                     // Mark as failed
                     self.db.update_wal_status(&tx.tx_id, TransactionStatus::Failed)?;
+                    let tx_short = &tx.tx_id[..8];
                     eprintln!(
-                        "Recovery: rolled back pending transaction {}",
-                        &tx.tx_id[..8]
+                        "{}",
+                        crate::i18n::tf(
+                            "warn.recover_rolled_back",
+                            &[("tx", &tx_short)],
+                        )
                     );
                 }
 
@@ -478,13 +476,17 @@ impl DedupEngine {
                                 }
 
                                 if let Err(e) = std::fs::rename(&staging_path, &cas_path) {
+                                    let tx_short = &tx.tx_id[..8];
+                                    let es = format!("{:#}", e);
                                     eprintln!(
-                                        "Recovery: failed to move staging to CAS for tx {}: {}",
-                                        &tx.tx_id[..8],
-                                        e
+                                        "{}",
+                                        crate::i18n::tf(
+                                            "warn.recover_move_failed",
+                                            &[("tx", &tx_short), ("error", &es)],
+                                        )
                                     );
                                     // Try copy+delete
-                                    if let Ok(_) = std::fs::copy(&staging_path, &cas_path) {
+                                    if std::fs::copy(&staging_path, &cas_path).is_ok() {
                                         let _ = std::fs::remove_file(&staging_path);
                                     }
                                 }
@@ -515,8 +517,11 @@ impl DedupEngine {
                                     }
 
                                     eprintln!(
-                                        "Recovery: completed Phase B for tx {}",
-                                        &tx.tx_id[..8]
+                                        "{}",
+                                        crate::i18n::tf(
+                                            "warn.recover_phase_b_done",
+                                            &[("tx", &&tx.tx_id[..8])],
+                                        )
                                     );
                                 }
                             } else if cas_path.exists() {
@@ -529,8 +534,7 @@ impl DedupEngine {
                     }
 
                     // Mark committed
-                    self.db
-                        .update_wal_status(&tx.tx_id, TransactionStatus::Committed)?;
+                    self.db.update_wal_status(&tx.tx_id, TransactionStatus::Committed)?;
                     self.db.delete_wal_transaction(&tx.tx_id)?;
                 }
 
@@ -547,7 +551,10 @@ impl DedupEngine {
         }
 
         if count > 0 {
-            eprintln!("Recovery: processed {} incomplete transactions", count);
+            eprintln!(
+                "{}",
+                crate::i18n::tf("warn.recover_processed", &[("count", &count)])
+            );
         }
 
         Ok(count)
@@ -557,11 +564,7 @@ impl DedupEngine {
     pub fn cas_path_for_hash(&self, hash: &Blake3Hash) -> PathBuf {
         let hex = hash.as_hex();
         let prefix = hash.prefix();
-        self.store_path
-            .join("cas")
-            .join("blake3")
-            .join(prefix)
-            .join(&hex)
+        self.store_path.join("cas").join("blake3").join(prefix).join(hex)
     }
 }
 
@@ -625,10 +628,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         fs::write(&user_file, "test").unwrap();
 
-        let files = vec![
-            FileInfo::from_path(&user_file).unwrap(),
-            FileInfo::from_path(&cas_file).unwrap(),
-        ];
+        let files =
+            vec![FileInfo::from_path(&user_file).unwrap(), FileInfo::from_path(&cas_file).unwrap()];
 
         let selection = engine.select_canonical(&files);
 
@@ -775,8 +776,7 @@ mod tests {
         let hash = crate::hash::hash_file(&test_file1).unwrap();
 
         // Register in DB
-        db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None)
-            .unwrap();
+        db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None).unwrap();
         db.insert_alias(
             &hash,
             &test_file1.to_string_lossy(),
@@ -797,9 +797,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
 
         // Dry run should not create any links
-        let result = engine
-            .execute_dedup_group(&groups[0], DedupMode::DryRun)
-            .unwrap();
+        let result = engine.execute_dedup_group(&groups[0], DedupMode::DryRun).unwrap();
         assert_eq!(result.links_created.len(), 0);
         // Space saved should be non-zero
         assert!(result.space_saved > 0);
@@ -820,8 +818,7 @@ mod tests {
 
         let hash = crate::hash::hash_file(&test_file1).unwrap();
 
-        db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None)
-            .unwrap();
+        db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None).unwrap();
         db.insert_alias(
             &hash,
             &test_file1.to_string_lossy(),
@@ -842,22 +839,21 @@ mod tests {
         assert_eq!(groups.len(), 1);
 
         // Auto mode should actually execute
-        let result = engine
-            .execute_dedup_group(&groups[0], DedupMode::Auto)
-            .unwrap();
+        let result = engine.execute_dedup_group(&groups[0], DedupMode::Auto).unwrap();
 
         // CAS file should exist
         let cas_path = engine.cas_path_for_hash(&groups[0].hash);
         assert!(cas_path.exists(), "CAS file should exist after dedup");
 
         // Link(s) should have been created
-        assert!(
-            !result.links_created.is_empty(),
-            "Should have created links"
-        );
+        assert!(!result.links_created.is_empty(), "Should have created links");
         println!(
             "Links created: {:?}",
-            result.links_created.iter().map(|(p, t)| (p.display().to_string(), t.as_str())).collect::<Vec<_>>()
+            result
+                .links_created
+                .iter()
+                .map(|(p, t)| (p.display().to_string(), t.as_str()))
+                .collect::<Vec<_>>()
         );
     }
 

@@ -19,6 +19,7 @@ thiserror.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 ureq.workspace = true
+sys-locale.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

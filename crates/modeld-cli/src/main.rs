@@ -1,13 +1,13 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
-    build_model_lookup, find_workflow_files, hash_file, index_workflow, parse_workflow,
-    CasStore, Database, DedupEngine, DedupMode,
-    Downloader, GcEngine, HfCache, QuarantineManager, Scanner,
+    build_model_lookup, find_workflow_files, hash_file, index_workflow, parse_workflow, t, tf,
+    CasStore, Database, DedupEngine, DedupMode, Downloader, GcEngine, HfCache, QuarantineManager,
+    Scanner,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "modeld")]
@@ -39,6 +39,47 @@ enum Commands {
         /// Store directory
         #[arg(short = 's', long, default_value = ".modeld")]
         store: PathBuf,
+    },
+    /// Show store statistics and duplicate-space summary
+    Stats {
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+    },
+    /// Report duplicate model files
+    Dupes {
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+        /// Minimum duplicate file size to include, e.g. 100MB, 2GB
+        #[arg(long)]
+        min_size: Option<String>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List indexed models
+    List {
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+        /// Maximum number of models to show
+        #[arg(short, long)]
+        limit: Option<i64>,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show details for a model hash
+    Info {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Compute BLAKE3 hash of a file
     Hash {
@@ -217,31 +258,63 @@ fn main() -> Result<()> {
         Commands::Init { path } => init_command(path)?,
         Commands::Scan { path, store } => scan_command(path, store)?,
         Commands::Status { store } => status_command(store)?,
+        Commands::Stats { store } => stats_command(store)?,
+        Commands::Dupes { store, min_size, json } => dupes_command(store, min_size, json)?,
+        Commands::List { store, limit, json } => list_command(store, limit, json)?,
+        Commands::Info { hash, store, json } => info_command(store, &hash, json)?,
         Commands::Hash { file } => hash_command(file)?,
-        Commands::Dedup {
-            store,
-            dry_run,
-            auto,
-            report,
-        } => dedup_command(store, dry_run, auto, report)?,
+        Commands::Dedup { store, dry_run, auto, report } => {
+            dedup_command(store, dry_run, auto, report)?
+        }
         Commands::Quarantine { store, action } => quarantine_command(store, action)?,
-        Commands::HfCheck {
-            repo_id, filename, revision, json, store,
-        } => hf_check_command(store, &repo_id, &filename, &revision, json)?,
-        Commands::HfDownload {
-            repo_id, filename, revision, token, json, store,
-        } => hf_download_command(store, &repo_id, &filename, &revision, token, json)?,
+        Commands::HfCheck { repo_id, filename, revision, json, store } => {
+            hf_check_command(store, &repo_id, &filename, &revision, json)?
+        }
+        Commands::HfDownload { repo_id, filename, revision, token, json, store } => {
+            hf_download_command(store, &repo_id, &filename, &revision, token, json)?
+        }
         Commands::HfSetup { print_path, store } => hf_setup_command(store, print_path)?,
         Commands::HfStatus { store } => hf_status_command(store)?,
         Commands::WorkflowScan { path, store } => workflow_scan_command(store, path)?,
         Commands::WorkflowDeps { file, store } => workflow_deps_command(store, file)?,
         Commands::RefsOrphans { store, json } => refs_orphans_command(store, json)?,
-        Commands::Gc { store, preview, cleanup_quarantine } =>
-            gc_command(store, preview, cleanup_quarantine)?,
+        Commands::Gc { store, preview, cleanup_quarantine } => {
+            gc_command(store, preview, cleanup_quarantine)?
+        }
         Commands::Proxy { action } => proxy_command(action)?,
     }
 
     Ok(())
+}
+
+fn require_store_db(store_path: &Path) -> Result<PathBuf> {
+    let db_path = store_path.join("modeld.db");
+    if !db_path.exists() {
+        anyhow::bail!("{}", t("store.not_initialized"));
+    }
+    Ok(db_path)
+}
+
+fn parse_size(input: &str) -> Result<u64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{}", t("error.size_empty"));
+    }
+
+    let split_at =
+        trimmed.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(split_at);
+    let value: f64 =
+        number.parse().with_context(|| tf("error.size_invalid", &[("input", &input)]))?;
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        other => anyhow::bail!("{}", tf("error.size_unit", &[("unit", &other)])),
+    };
+    Ok((value * multiplier) as u64)
 }
 
 fn init_command(path: Option<PathBuf>) -> Result<()> {
@@ -249,16 +322,12 @@ fn init_command(path: Option<PathBuf>) -> Result<()> {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .expect("Could not determine home directory");
-        PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("modeld")
+        PathBuf::from(home).join(".local").join("share").join("modeld")
     });
 
     println!(
-        "{} {}",
-        "Initializing modeld store at:".green().bold(),
-        store_path.display()
+        "{}",
+        tf("init.at", &[("path", &store_path.display())]).green().bold()
     );
 
     // Initialize CAS
@@ -273,31 +342,31 @@ fn init_command(path: Option<PathBuf>) -> Result<()> {
     let qm = QuarantineManager::new(&store_path);
     qm.init()?;
 
-    println!("{}", "✓ Store initialized successfully".green());
-    println!("\nNext steps:");
-    println!("  {} modeld scan <directory>", "1.".bold());
-    println!("  {} modeld status", "2.".bold());
-    println!("  {} modeld dedup --dry-run", "3.".bold());
+    println!("{}", t("init.success").green());
+    println!("\n{}", t("init.next_steps"));
+    println!("  {}", t("init.step1").bold());
+    println!("  {}", t("init.step2").bold());
+    println!("  {}", t("init.step3").bold());
 
     Ok(())
 }
 
 fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
-    println!("{} {}", "Scanning:".cyan().bold(), scan_path.display());
+    println!("{}", tf("scan.scanning", &[("path", &scan_path.display())]).cyan().bold());
 
     // Quick count first
     let scanner = Scanner::new();
     let (file_count, total_size) = scanner.count_files(&scan_path)?;
 
     if file_count == 0 {
-        println!("{}", "No model files found".yellow());
+        println!("{}", t("scan.no_files").yellow());
         return Ok(());
     }
 
+    let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
     println!(
-        "Found {} model files ({:.2} GB)\n",
-        file_count.to_string().bold(),
-        total_size as f64 / 1_073_741_824.0
+        "{}\n",
+        tf("scan.found", &[("count", &file_count), ("gb", &gb)]).bold()
     );
 
     // Initialize components
@@ -316,20 +385,16 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
 
     // Scan and process
     let results = scanner.scan(&scan_path, |path, size| {
-        pb.set_message(format!(
-            "{} ({:.2} MB)",
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy(),
-            size as f64 / 1_048_576.0
-        ));
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let mb = format!("{:.2}", size as f64 / 1_048_576.0);
+        pb.set_message(tf("scan.progress_msg", &[("name", &name), ("mb", &mb)]));
         pb.inc(1);
     })?;
 
-    pb.finish_with_message("Done");
+    pb.finish_with_message(t("progress.done"));
 
     // Store in CAS and database
-    println!("\n{}", "Processing files...".cyan().bold());
+    println!("\n{}", t("scan.processing").cyan().bold());
     let mut processed = 0;
     for file in &results {
         // Store in CAS
@@ -352,9 +417,10 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
         processed += 1;
     }
 
-    println!("\n{}", "✓ Scan complete".green().bold());
-    println!("  Processed: {}", processed.to_string().bold());
-    println!("  Total size: {:.2} GB", total_size as f64 / 1_073_741_824.0);
+    println!("\n{}", t("scan.complete").green().bold());
+    let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
+    println!("  {}", tf("scan.processed", &[("count", &processed)]).bold());
+    println!("  {}", tf("scan.total_size", &[("gb", &gb)]));
 
     Ok(())
 }
@@ -363,10 +429,7 @@ fn status_command(store_path: PathBuf) -> Result<()> {
     let db_path = store_path.join("modeld.db");
 
     if !db_path.exists() {
-        eprintln!(
-            "{}",
-            "Store not initialized. Run 'modeld init' first.".red()
-        );
+        eprintln!("{}", t("store.not_initialized").red());
         std::process::exit(1);
     }
 
@@ -375,27 +438,21 @@ fn status_command(store_path: PathBuf) -> Result<()> {
     let count = db.count_models()?;
     let total_size = db.total_size()?;
 
-    println!("{}", "modeld Store Status".cyan().bold());
+    println!("{}", t("status.header").cyan().bold());
     println!("{}", "─".repeat(40).cyan());
-    println!("  Store path: {}", store_path.display());
-    println!("  Total models: {}", count.to_string().bold());
-    println!(
-        "  Total size: {:.2} GB",
-        (total_size as f64 / 1_073_741_824.0)
-            .to_string()
-            .bold()
-    );
+    println!("  {}", tf("status.store_path", &[("path", &store_path.display())]));
+    println!("  {}", tf("status.total_models", &[("count", &count)]).bold());
+    let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
+    println!("  {}", tf("status.total_size", &[("gb", &gb)]).bold());
     println!("{}", "─".repeat(40).cyan());
 
     if count > 0 {
-        println!("\n{}", "Recent models:".cyan());
+        println!("\n{}", t("status.recent").cyan());
         let models = db.list_models(Some(5))?;
         for model in models {
-            println!(
-                "  {} - {:.2} MB",
-                model.blake3_hash.as_hex()[..16].to_string().dimmed(),
-                model.size_bytes as f64 / 1_048_576.0
-            );
+            let hash = model.blake3_hash.as_hex()[..16].to_string();
+            let mb = format!("{:.2}", model.size_bytes as f64 / 1_048_576.0);
+            println!("  {}", tf("status.recent_line", &[("hash", &hash), ("mb", &mb)]).dimmed());
         }
     }
 
@@ -403,16 +460,14 @@ fn status_command(store_path: PathBuf) -> Result<()> {
     let qm = QuarantineManager::new(&store_path);
     if let Ok(qstats) = qm.stats() {
         if qstats.total_files > 0 {
-            println!("\n{}", "Quarantine:".yellow());
-            println!("  Files: {}", qstats.total_files.to_string().bold());
-            println!(
-                "  Size: {:.2} MB",
-                qstats.total_size as f64 / 1_048_576.0
-            );
+            println!("\n{}", t("status.quarantine").yellow());
+            println!("  {}", tf("status.q_files", &[("count", &qstats.total_files)]).bold());
+            let mb = format!("{:.2}", qstats.total_size as f64 / 1_048_576.0);
+            println!("  {}", tf("status.q_size", &[("mb", &mb)]));
             if qstats.expired_files > 0 {
                 println!(
-                    "  {} expired (run 'modeld quarantine cleanup')",
-                    qstats.expired_files.to_string().red()
+                    "  {}",
+                    tf("status.q_expired", &[("count", &qstats.expired_files)]).red()
                 );
             }
         }
@@ -421,49 +476,247 @@ fn status_command(store_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn hash_command(file: PathBuf) -> Result<()> {
-    if !file.exists() {
-        eprintln!(
-            "{} File not found: {}",
-            "Error:".red().bold(),
-            file.display()
-        );
-        std::process::exit(1);
-    }
+fn stats_command(store_path: PathBuf) -> Result<()> {
+    let db_path = require_store_db(&store_path)?;
+    let db = Database::open(&db_path)?;
+    let count = db.count_models()?;
+    let total_size = db.total_size()?;
+    let aliases = db.list_models(None)?.iter().try_fold(0i64, |acc, model| {
+        Ok::<_, anyhow::Error>(acc + db.count_aliases(&model.blake3_hash)?)
+    })?;
 
-    println!(
-        "{} {}",
-        "Computing BLAKE3 hash:".cyan(),
-        file.display()
-    );
+    let engine = DedupEngine::new(db, store_path.clone());
+    let groups = engine.find_duplicates()?;
+    let duplicate_bytes = engine.calculate_savings(&groups);
 
-    let hash = hash_file(&file)?;
-    let metadata = std::fs::metadata(&file)?;
-
-    println!("\n{}", "Results:".green().bold());
-    println!("  Hash: {}", hash.as_hex().bold());
-    println!("  Prefix: {}", hash.prefix().bold());
-    println!(
-        "  Size: {:.2} MB",
-        metadata.len() as f64 / 1_048_576.0
-    );
+    println!("{}", t("stats.header").cyan().bold());
+    println!("{}", "─".repeat(40).cyan());
+    println!("  {}", tf("stats.store_path", &[("path", &store_path.display())]));
+    println!("  {}", tf("stats.models", &[("count", &count)]).bold());
+    println!("  {}", tf("stats.aliases", &[("count", &aliases)]).bold());
+    let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
+    println!("  {}", tf("stats.indexed_size", &[("gb", &gb)]));
+    println!("  {}", tf("stats.dup_groups", &[("count", &groups.len())]).bold());
+    let gb = format!("{:.2}", duplicate_bytes as f64 / 1_073_741_824.0);
+    println!("  {}", tf("stats.savings", &[("gb", &gb)]));
+    println!("{}", "─".repeat(40).cyan());
 
     Ok(())
 }
 
-fn dedup_command(
-    store_path: PathBuf,
-    dry_run: bool,
-    auto: bool,
-    report: bool,
-) -> Result<()> {
+fn dupes_command(store_path: PathBuf, min_size: Option<String>, json_output: bool) -> Result<()> {
+    let db_path = require_store_db(&store_path)?;
+    let db = Database::open(&db_path)?;
+    let engine = DedupEngine::new(db, store_path);
+    let min_size_bytes = min_size.as_deref().map(parse_size).transpose()?.unwrap_or(0);
+
+    let groups: Vec<_> =
+        engine.find_duplicates()?.into_iter().filter(|g| g.total_size >= min_size_bytes).collect();
+    let duplicate_bytes = engine.calculate_savings(&groups);
+
+    if json_output {
+        let groups_json: Vec<_> = groups
+            .iter()
+            .map(|group| {
+                serde_json::json!({
+                    "hash": group.hash.as_hex(),
+                    "size_bytes": group.total_size,
+                    "duplicate_count": group.files.len(),
+                    "potential_savings_bytes": group.total_size.saturating_mul(group.files.len().saturating_sub(1) as u64),
+                    "files": group.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "duplicate_groups": groups_json,
+                "total_groups": groups.len(),
+                "potential_savings_bytes": duplicate_bytes,
+            })
+        );
+        return Ok(());
+    }
+
+    println!("{}", t("dupes.header").cyan().bold());
+    println!("{}", "─".repeat(40).cyan());
+    if groups.is_empty() {
+        println!("{}", t("dupes.none").green());
+        return Ok(());
+    }
+
+    for group in &groups {
+        let hash = group.hash.as_hex()[..16].to_string();
+        let mb = format!("{:.2}", group.total_size as f64 / 1_048_576.0);
+        println!(
+            "\n{}",
+            tf("dupes.group_line", &[("hash", &hash), ("mb", &mb), ("count", &group.files.len())])
+                .bold()
+        );
+        for file in &group.files {
+            let path = file.path.display().to_string();
+            println!("  {}", tf("dupes.file_line", &[("path", &path)]));
+        }
+    }
+    println!("{}", "─".repeat(40).cyan());
+    let gb = format!("{:.2}", duplicate_bytes as f64 / 1_073_741_824.0);
+    println!("{}", tf("dupes.savings", &[("gb", &gb)]));
+
+    Ok(())
+}
+
+fn list_command(store_path: PathBuf, limit: Option<i64>, json_output: bool) -> Result<()> {
+    let db_path = require_store_db(&store_path)?;
+    let db = Database::open(&db_path)?;
+    let models = db.list_models(limit)?;
+
+    if json_output {
+        let rows: Vec<_> = models
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "hash": m.blake3_hash.as_hex(),
+                    "size_bytes": m.size_bytes,
+                    "format": m.format,
+                    "arch": m.arch,
+                    "category": m.category,
+                    "base_model": m.base_model,
+                    "created_at": m.created_at.to_rfc3339(),
+                    "last_seen": m.last_seen.to_rfc3339(),
+                    "quarantined_at": m.quarantined_at.map(|d| d.to_rfc3339()),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::json!({ "models": rows, "total": rows.len() }));
+        return Ok(());
+    }
+
+    println!("{}", t("list.header").cyan().bold());
+    println!("{}", "─".repeat(40).cyan());
+    if models.is_empty() {
+        println!("{}", t("list.none").yellow());
+        return Ok(());
+    }
+    for model in models {
+        let hash = model.blake3_hash.as_hex()[..16].to_string();
+        let mb = format!("{:>9.2}", model.size_bytes as f64 / 1_048_576.0);
+        let format = model.format.as_deref().unwrap_or("unknown");
+        println!(
+            "{}",
+            tf("list.line", &[("hash", &hash), ("mb", &mb), ("format", &format)]).bold()
+        );
+    }
+
+    Ok(())
+}
+
+fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Result<()> {
+    let db_path = require_store_db(&store_path)?;
+    let db = Database::open(&db_path)?;
+    let hash = modeld_core::Blake3Hash::from_hex(hash_hex)?;
+    let Some(model) = db.get_model(&hash)? else {
+        anyhow::bail!("{}", tf("error.model_not_found", &[("hash", &hash_hex)]));
+    };
+    let aliases = db.get_aliases_for_model(&hash)?;
+    let cas_path = CasStore::new(&store_path).get(&hash);
+
+    if json_output {
+        let aliases_json: Vec<_> = aliases
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "path": a.path,
+                    "frontend": a.frontend.as_str(),
+                    "alias_type": a.alias_type.as_str(),
+                    "created_at": a.created_at.to_rfc3339(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "hash": model.blake3_hash.as_hex(),
+                "size_bytes": model.size_bytes,
+                "format": model.format,
+                "arch": model.arch,
+                "category": model.category,
+                "base_model": model.base_model,
+                "created_at": model.created_at.to_rfc3339(),
+                "last_seen": model.last_seen.to_rfc3339(),
+                "quarantined_at": model.quarantined_at.map(|d| d.to_rfc3339()),
+                "cas_path": cas_path.map(|p| p.display().to_string()),
+                "aliases": aliases_json,
+            })
+        );
+        return Ok(());
+    }
+
+    println!("{}", t("info.header").cyan().bold());
+    println!("{}", "─".repeat(40).cyan());
+    let hash = model.blake3_hash.as_hex().to_string();
+    println!("  {}", tf("info.hash", &[("hash", &hash)]).bold());
+    let mb = format!("{:.2}", model.size_bytes as f64 / 1_048_576.0);
+    println!("  {}", tf("info.size", &[("mb", &mb)]));
+    let format = model.format.as_deref().unwrap_or("unknown");
+    println!("  {}", tf("info.format", &[("value", &format)]));
+    let category = model.category.as_deref().unwrap_or("unknown");
+    println!("  {}", tf("info.category", &[("value", &category)]));
+    let last_seen = model.last_seen.to_rfc3339();
+    println!("  {}", tf("info.last_seen", &[("value", &last_seen)]));
+    if let Some(path) = cas_path {
+        let p = path.display().to_string();
+        println!("  {}", tf("info.cas_path", &[("path", &p)]));
+    }
+    println!("\n{}", t("info.aliases").cyan());
+    if aliases.is_empty() {
+        println!("{}", t("info.aliases_none"));
+    } else {
+        for alias in aliases {
+            let path = alias.path.clone();
+            let frontend = alias.frontend.as_str().to_string();
+            let kind = alias.alias_type.as_str().to_string();
+            println!(
+                "  {}",
+                tf(
+                    "info.alias_line",
+                    &[("path", &path), ("frontend", &frontend), ("kind", &kind)]
+                )
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn hash_command(file: PathBuf) -> Result<()> {
+    if !file.exists() {
+        let p = file.display().to_string();
+        eprintln!("{} {}", t("error.prefix").red().bold(), tf("error.file_not_found", &[("path", &p)]));
+        std::process::exit(1);
+    }
+
+    let p = file.display().to_string();
+    println!("{}", tf("hash.computing", &[("path", &p)]).cyan());
+
+    let hash = hash_file(&file)?;
+    let metadata = std::fs::metadata(&file)?;
+
+    println!("\n{}", t("hash.results").green().bold());
+    let hex = hash.as_hex().to_string();
+    println!("  {}", tf("hash.value", &[("hash", &hex)]).bold());
+    let prefix = hash.prefix().to_string();
+    println!("  {}", tf("hash.prefix", &[("prefix", &prefix)]).bold());
+    let mb = format!("{:.2}", metadata.len() as f64 / 1_048_576.0);
+    println!("  {}", tf("hash.size", &[("mb", &mb)]));
+
+    Ok(())
+}
+
+fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool) -> Result<()> {
     let db_path = store_path.join("modeld.db");
 
     if !db_path.exists() {
-        eprintln!(
-            "{}",
-            "Store not initialized. Run 'modeld init' first.".red()
-        );
+        eprintln!("{}", t("store.not_initialized").red());
         std::process::exit(1);
     }
 
@@ -480,16 +733,17 @@ fn dedup_command(
     };
 
     let mode_label = match mode {
-        DedupMode::DryRun => "DRY RUN (no changes will be made)",
-        DedupMode::Report => "REPORT (analysis only)",
-        DedupMode::Auto => "AUTO",
-        DedupMode::Interactive => "INTERACTIVE",
+        DedupMode::DryRun => t("dedup.mode.dry_run"),
+        DedupMode::Report => t("dedup.mode.report"),
+        DedupMode::Auto => t("dedup.mode.auto"),
+        DedupMode::Interactive => t("dedup.mode.interactive"),
     };
 
-    println!("{}", "modeld Deduplication".cyan().bold());
+    println!("{}", t("dedup.header").cyan().bold());
     println!("{}", "─".repeat(40).cyan());
-    println!("  Store: {}", store_path.display());
-    println!("  Mode:  {}", mode_label.yellow());
+    let sp = store_path.display().to_string();
+    println!("  {}", tf("dedup.store", &[("path", &sp)]));
+    println!("  {}", tf("dedup.mode", &[("mode", &mode_label)]).yellow());
     println!("{}", "─".repeat(40).cyan());
 
     let db = Database::open(&db_path)?;
@@ -499,57 +753,51 @@ fn dedup_command(
     let groups = engine.find_duplicates()?;
 
     if groups.is_empty() {
-        println!("\n{}", "✓ No duplicate files found".green());
+        println!("\n{}", t("dedup.no_dupes").green());
         return Ok(());
     }
 
     let total_savings = engine.calculate_savings(&groups);
 
     println!(
-        "\n{} {} duplicate groups found",
+        "\n{} {}",
         "→".cyan(),
-        groups.len().to_string().bold()
+        tf("dedup.groups_found", &[("count", &groups.len())]).bold()
     );
-    println!(
-        "{} Potential space savings: {:.2} GB",
-        "→".cyan(),
-        total_savings as f64 / 1_073_741_824.0
-    );
+    let gb = format!("{:.2}", total_savings as f64 / 1_073_741_824.0);
+    println!("{} {}", "→".cyan(), tf("dedup.potential_savings", &[("gb", &gb)]));
 
     // Show each group
-    println!("\n{}", "Duplicate groups:".cyan().bold());
+    println!("\n{}", t("dedup.groups_header").cyan().bold());
     for (i, group) in groups.iter().enumerate() {
+        let mb = format!("{:.2}", group.total_size as f64 / 1_048_576.0);
         println!(
-            "\n  Group {} ({:.2} MB per copy, {} copies):",
-            (i + 1).to_string().bold(),
-            group.total_size as f64 / 1_048_576.0,
-            group.files.len()
+            "\n  {}",
+            tf(
+                "dedup.group_header",
+                &[("i", &(i + 1)), ("mb", &mb), ("count", &group.files.len())]
+            )
+            .bold()
         );
         for file in &group.files {
-            println!("    {}", file.path.display().to_string().dimmed());
+            let p = file.path.display().to_string();
+            println!("    {}", tf("dedup.file_line", &[("path", &p)]).dimmed());
         }
-        println!(
-            "    {} Would save {:.2} MB",
-            "→".green(),
-            (group.total_size * (group.files.len() as u64 - 1)) as f64 / 1_048_576.0
-        );
+        let saved = (group.total_size * (group.files.len() as u64 - 1)) as f64 / 1_048_576.0;
+        let saved = format!("{:.2}", saved);
+        println!("    {} {}", "→".green(), tf("dedup.would_save", &[("mb", &saved)]));
     }
 
     if mode == DedupMode::DryRun || mode == DedupMode::Report {
         println!("\n{}", "─".repeat(40).cyan());
-        println!(
-            "  {} Total potential savings: {:.2} GB",
-            "✓".green(),
-            total_savings as f64 / 1_073_741_824.0
-        );
-        println!(
-            "  Run without --dry-run to apply deduplication"
-        );
+        let gb = format!("{:.2}", total_savings as f64 / 1_073_741_824.0);
+        println!("  {} {}", "✓".green(), tf("dedup.total_potential", &[("gb", &gb)]));
+        println!("{}", t("dedup.run_without_dry_run"));
         return Ok(());
     }
 
     // Execute deduplication with progress
-    println!("\n{}", "Executing deduplication...".cyan().bold());
+    println!("\n{}", t("dedup.executing").cyan().bold());
 
     let pb = ProgressBar::new(groups.len() as u64);
     pb.set_style(
@@ -560,39 +808,31 @@ fn dedup_command(
     );
 
     let stats = engine.run_dedup(mode, |current, total, hash_prefix| {
-        pb.set_message(format!("Processing {} ({}/{})", hash_prefix, current, total));
+        pb.set_message(tf(
+            "progress.processing",
+            &[("prefix", &hash_prefix), ("current", &current), ("total", &total)],
+        ));
         pb.set_position(current as u64 - 1);
     })?;
 
-    pb.finish_with_message("Done");
+    pb.finish_with_message(t("progress.done"));
 
     // Final report
     println!("\n{}", "─".repeat(40).cyan());
-    println!("{}", "Deduplication Complete".green().bold());
+    println!("{}", t("dedup.complete").green().bold());
+    println!("  {}", tf("dedup.groups_processed", &[("count", &stats.groups_processed)]).bold());
     println!(
-        "  Groups processed: {}",
-        stats.groups_processed.to_string().bold()
-    );
-    println!(
-        "  Groups succeeded: {}",
-        stats.groups_succeeded.to_string().green().bold()
+        "  {}",
+        tf("dedup.groups_succeeded", &[("count", &stats.groups_succeeded)]).green().bold()
     );
     if stats.groups_failed > 0 {
-        println!(
-            "  Groups failed:    {}",
-            stats.groups_failed.to_string().red().bold()
-        );
+        println!("  {}", tf("dedup.groups_failed", &[("count", &stats.groups_failed)]).red().bold());
     }
+    println!("  {}", tf("dedup.files_dedup", &[("count", &stats.files_deduplicated)]).bold());
+    let gb = format!("{:.2}", stats.space_saved as f64 / 1_073_741_824.0);
     println!(
-        "  Files deduplicated: {}",
-        stats.files_deduplicated.to_string().bold()
-    );
-    println!(
-        "  Space saved: {:.2} GB",
-        (stats.space_saved as f64 / 1_073_741_824.0)
-            .to_string()
-            .green()
-            .bold()
+        "  {}",
+        tf("dedup.space_saved", &[("gb", &gb)]).green().bold()
     );
     println!("{}", "─".repeat(40).cyan());
 
@@ -607,69 +847,60 @@ fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Result<(
             let entries = qm.list()?;
 
             if entries.is_empty() {
-                println!("{}", "No quarantined files".green());
+                println!("{}", t("quarantine.list.none").green());
                 return Ok(());
             }
 
-            println!("{}", "Quarantined Files".cyan().bold());
+            println!("{}", t("quarantine.list.header").cyan().bold());
             println!("{}", "─".repeat(60).cyan());
 
             for entry in &entries {
-                let days_str = match entry.days_remaining {
-                    Some(d) => format!("{} days remaining", d).yellow().to_string(),
-                    None => "EXPIRED".red().to_string(),
+                let status = match entry.days_remaining {
+                    Some(d) => tf("quarantine.days_remaining", &[("count", &d)]).yellow().to_string(),
+                    None => t("quarantine.expired").red().to_string(),
                 };
+                let qpath = entry.quarantine_path.display().to_string();
 
-                println!(
-                    "\n  {} {}",
-                    entry.quarantine_path.display().to_string().bold(),
-                    format!("({})", days_str)
-                );
-                println!(
-                    "    Original: {}",
-                    entry.meta.original_path.dimmed()
-                );
-                println!("    Hash:     {}", entry.meta.blake3_hash[..16].dimmed());
-                println!(
-                    "    Size:     {:.2} MB",
-                    entry.meta.size_bytes as f64 / 1_048_576.0
-                );
-                println!("    Reason:   {}", entry.meta.reason);
-                println!(
-                    "    Quarantined: {}",
-                    entry.meta.quarantined_at.format("%Y-%m-%d %H:%M UTC")
-                );
+                println!("\n  {}", tf("quarantine.entry_header", &[("path", &qpath), ("status", &status)]).bold());
+                let orig = entry.meta.original_path.clone();
+                println!("    {}", tf("quarantine.original", &[("path", &orig)]).dimmed());
+                let h = entry.meta.blake3_hash[..16].to_string();
+                println!("    {}", tf("quarantine.hash", &[("hash", &h)]).dimmed());
+                let mb = format!("{:.2}", entry.meta.size_bytes as f64 / 1_048_576.0);
+                println!("    {}", tf("quarantine.size", &[("mb", &mb)]));
+                let reason = entry.meta.reason.clone();
+                println!("    {}", tf("quarantine.reason", &[("reason", &reason)]));
+                let when = entry.meta.quarantined_at.format("%Y-%m-%d %H:%M UTC").to_string();
+                println!("    {}", tf("quarantine.quarantined_at", &[("value", &when)]));
             }
 
             println!("\n{}", "─".repeat(60).cyan());
-            println!("  Total: {} files", entries.len().to_string().bold());
+            println!("  {}", tf("quarantine.total", &[("count", &entries.len())]).bold());
 
             let stats = qm.stats()?;
-            println!(
-                "  Size:  {:.2} MB",
-                stats.total_size as f64 / 1_048_576.0
-            );
+            let mb = format!("{:.2}", stats.total_size as f64 / 1_048_576.0);
+            println!("  {}", tf("quarantine.size_line", &[("mb", &mb)]));
 
             if stats.expired_files > 0 {
                 println!(
-                    "\n  {} expired files - run 'modeld quarantine cleanup'",
-                    stats.expired_files.to_string().red()
+                    "{}",
+                    tf("quarantine.cleanup_expired_hint", &[("count", &stats.expired_files)]).red()
                 );
             }
         }
 
         QuarantineAction::Cleanup => {
-            println!("{}", "Cleaning up expired quarantine entries...".cyan());
+            println!("{}", t("quarantine.cleanup.start").cyan());
 
             let cleaned = qm.cleanup_expired()?;
 
             if cleaned == 0 {
-                println!("{}", "✓ No expired entries to clean up".green());
+                println!("{}", t("quarantine.cleanup.none").green());
             } else {
                 println!(
-                    "{} Removed {} expired quarantine entries",
+                    "{} {}",
                     "✓".green(),
-                    cleaned.to_string().bold()
+                    tf("quarantine.cleanup.done", &[("count", &cleaned)]).bold()
                 );
             }
         }
@@ -708,29 +939,23 @@ fn hf_check_command(
 
     if json_output {
         if found {
-            println!(
-                r#"{{"found": true, "path": "{}"}}"#,
-                snapshot_path.display()
-            );
+            println!(r#"{{"found": true, "path": "{}"}}"#, snapshot_path.display());
         } else {
             println!(r#"{{"found": false}}"#);
         }
     } else if found {
         println!(
-            "{} Cache hit: {}/{}@{}",
+            "{} {}",
             "✓".green().bold(),
-            repo_id.cyan(),
-            filename.cyan(),
-            revision
+            tf("hf.check.hit", &[("repo", &repo_id), ("file", &filename), ("rev", &revision)])
         );
-        println!("  Path: {}", snapshot_path.display().to_string().dimmed());
+        let p = snapshot_path.display().to_string();
+        println!("  {}", tf("hf.check.path", &[("path", &p)]).dimmed());
     } else {
         println!(
-            "{} Not cached: {}/{}@{}",
+            "{} {}",
             "✗".red(),
-            repo_id,
-            filename,
-            revision
+            tf("hf.check.miss", &[("repo", &repo_id), ("file", &filename), ("rev", &revision)])
         );
         std::process::exit(1);
     }
@@ -760,20 +985,22 @@ fn hf_download_command(
     pb.set_message(format!("{}/{}", repo_id, filename));
 
     let progress_pb = pb.clone();
-    let progress: modeld_core::downloader::ProgressCallback = Box::new(move |done, total, _name| {
-        if total > 0 {
-            progress_pb.set_length(total);
-        }
-        progress_pb.set_position(done);
-    });
+    let progress: modeld_core::downloader::ProgressCallback =
+        Box::new(move |done, total, _name| {
+            if total > 0 {
+                progress_pb.set_length(total);
+            }
+            progress_pb.set_position(done);
+        });
 
     let mut downloader = Downloader::new(&store);
     if let Some(t) = token {
         downloader = downloader.with_token(t);
     }
 
-    let result = downloader.download_hf_file(&mut db, repo_id, filename, Some(revision), Some(&progress))?;
-    pb.finish_with_message("Done");
+    let result =
+        downloader.download_hf_file(&mut db, repo_id, filename, Some(revision), Some(&progress))?;
+    pb.finish_with_message(t("progress.done"));
 
     if json_output {
         println!(
@@ -785,17 +1012,20 @@ fn hf_download_command(
         );
     } else {
         let status = if result.was_cached {
-            "Cache hit (skipped download)".yellow().to_string()
+            t("hf.dl.cached").yellow().to_string()
         } else {
-            "Downloaded".green().to_string()
+            t("hf.dl.downloaded").green().to_string()
         };
 
-        println!("\n{} {}", "✓".green().bold(), status);
-        println!("  Repo:     {}", repo_id.cyan());
-        println!("  File:     {}", filename.cyan());
-        println!("  BLAKE3:   {}", &result.blake3_hash.as_hex()[..16]);
-        println!("  Size:     {}", format_bytes(result.size_bytes));
-        println!("  CAS path: {}", result.cas_path.display().to_string().dimmed());
+        println!("\n{} {}", "✓".green().bold(), tf("hf.dl.success", &[("status", &status)]));
+        println!("  {}", tf("hf.dl.repo", &[("repo", &repo_id)]).cyan());
+        println!("  {}", tf("hf.dl.file", &[("file", &filename)]).cyan());
+        let h = result.blake3_hash.as_hex()[..16].to_string();
+        println!("  {}", tf("hf.dl.blake3", &[("hash", &h)]));
+        let size = format_bytes(result.size_bytes);
+        println!("  {}", tf("hf.dl.size", &[("value", &size)]));
+        let p = result.cas_path.display().to_string();
+        println!("  {}", tf("hf.dl.cas_path", &[("path", &p)]).dimmed());
     }
 
     Ok(())
@@ -813,36 +1043,36 @@ fn hf_setup_command(store: PathBuf, print_path: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("{}", "modeld HuggingFace Cache Setup".bold().cyan());
+    println!("{}", t("hf.setup.header").bold().cyan());
     println!();
-    println!("HF cache directory: {}", hf_home.display().to_string().green());
+    let p = hf_home.display().to_string();
+    println!("{} {}", t("hf.setup.dir"), p.green());
     println!();
-    println!("{}", "To activate, add to your shell profile:".bold());
+    println!("{}", t("hf.setup.activate").bold());
     println!();
 
     #[cfg(windows)]
     {
-        println!("  {} (PowerShell):", "Windows".yellow());
-        println!(
-            "  $env:HF_HOME = \"{}\"",
-            hf_home.display()
-        );
+        let p = hf_home.display().to_string();
+        println!("  {}", t("hf.setup.windows_ps").yellow());
+        println!("  {}", tf("hf.setup.set_ps", &[("path", &p)]));
         println!();
-        println!("  {} (CMD):", "Windows".yellow());
-        println!("  set HF_HOME={}", hf_home.display());
+        println!("  {}", t("hf.setup.windows_cmd").yellow());
+        println!("  {}", tf("hf.setup.set_cmd", &[("path", &p)]));
     }
 
     #[cfg(unix)]
     {
-        println!("  {} ~/.bashrc or ~/.zshrc:", "Linux/macOS:".yellow());
-        println!("  export HF_HOME=\"{}\"", hf_home.display());
+        let p = hf_home.display().to_string();
+        println!("  {}", t("hf.setup.unix").yellow());
+        println!("  {}", tf("hf.setup.set_unix", &[("path", &p)]));
     }
 
     println!();
-    println!("{}", "Or install the Python hook for automatic interception:".bold());
-    println!("  pip install modeld-hook");
-    println!("  # Then add to your script:");
-    println!("  import modeld_hook  # Auto-activates on import");
+    println!("{}", t("hf.setup.hook_header").bold());
+    println!("  {}", t("hf.setup.hook_pip"));
+    println!("  {}", t("hf.setup.hook_use"));
+    println!("  {}", t("hf.setup.hook_import"));
 
     Ok(())
 }
@@ -852,45 +1082,42 @@ fn hf_status_command(store: PathBuf) -> Result<()> {
     let hf_cache = HfCache::new(&store);
     let db = open_db(&store)?;
 
-    println!("{}", "HuggingFace Cache Status".bold().cyan());
+    println!("{}", t("hf.status.header").bold().cyan());
     println!("{}", "─".repeat(40).dimmed());
 
     if !hf_cache.hf_home().exists() {
-        println!("{}", "HF cache not initialized. Run: modeld hf-setup".yellow());
+        println!("{}", t("hf.status.not_initialized").yellow());
         return Ok(());
     }
 
     let stats = hf_cache.stats()?;
 
-    println!(
-        "  HF_HOME:     {}",
-        hf_cache.hf_home().display().to_string().green()
-    );
-    println!("  Repos:       {}", stats.total_repos.to_string().bold());
-    println!("  Blobs:       {}", stats.total_blobs.to_string().bold());
+    let p = hf_cache.hf_home().display().to_string();
+    println!("  {} {}", t("hf.status.hf_home"), p.green());
+    println!("  {}", tf("hf.status.repos", &[("count", &stats.total_repos)]).bold());
+    println!("  {}", tf("hf.status.blobs", &[("count", &stats.total_blobs)]).bold());
 
     // List repos
     let repos = hf_cache.list_repos()?;
     if !repos.is_empty() {
         println!();
-        println!("{}", "Cached repos:".bold());
+        println!("{}", t("hf.status.cached_repos").bold());
         for repo in &repos {
-            println!("  • {}", repo.cyan());
+            println!("  {} {}", "•".cyan(), tf("hf.status.repo_line", &[("repo", repo)]).cyan());
         }
     }
 
     // Downloads from DB
     let downloads = db.list_downloads(None)?;
-    let done_count = downloads.iter().filter(|d| {
-        matches!(d.status, modeld_core::DownloadStatus::Done)
-    }).count();
+    let done_count =
+        downloads.iter().filter(|d| matches!(d.status, modeld_core::DownloadStatus::Done)).count();
 
     if !downloads.is_empty() {
         println!();
         println!(
-            "  Downloads:   {} total, {} completed",
-            downloads.len().to_string().bold(),
-            done_count.to_string().green().bold()
+            "  {}",
+            tf("hf.status.downloads", &[("total", &downloads.len()), ("done", &done_count)])
+                .bold()
         );
     }
 
@@ -917,35 +1144,27 @@ fn workflow_scan_command(store: PathBuf, workflow_dir: PathBuf) -> Result<()> {
     let db = Database::open(&db_path)?;
 
     if !workflow_dir.exists() {
-        anyhow::bail!(
-            "Workflow directory does not exist: {}",
-            workflow_dir.display()
-        );
+        let p = workflow_dir.display().to_string();
+        anyhow::bail!("{}", tf("error.workflow_dir_missing", &[("path", &p)]));
     }
 
-    println!(
-        "{} {}",
-        "Scanning workflows in:".bold(),
-        workflow_dir.display().to_string().cyan()
-    );
+    let p = workflow_dir.display().to_string();
+    println!("{}", tf("wf.scan.scanning", &[("path", &p)]).bold());
 
     // Find all .json files
     let files = find_workflow_files(&workflow_dir)?;
     if files.is_empty() {
-        println!("{}", "No workflow JSON files found.".yellow());
+        println!("{}", t("wf.scan.no_files").yellow());
         return Ok(());
     }
 
-    println!("  Found {} workflow files", files.len().to_string().bold());
+    println!("  {}", tf("wf.scan.found", &[("count", &files.len())]).bold());
     println!();
 
     // Build model lookup from database
     let lookup = build_model_lookup(&db)?;
     let lookup_size = lookup.len();
-    println!(
-        "  Model lookup: {} entries in CAS index",
-        lookup_size.to_string().bold()
-    );
+    println!("  {}", tf("wf.scan.lookup", &[("count", &lookup_size)]).bold());
     println!();
 
     let pb = ProgressBar::new(files.len() as u64);
@@ -972,11 +1191,11 @@ fn workflow_scan_command(store: PathBuf, workflow_dir: PathBuf) -> Result<()> {
             }
             Err(e) => {
                 errors += 1;
+                let wp = wf_path.display().to_string();
+                let es = format!("{:#}", e);
                 pb.println(format!(
-                    "  {} {}: {}",
-                    "WARN".yellow().bold(),
-                    wf_path.display(),
-                    e
+                    "  {}",
+                    tf("wf.warn", &[("path", &wp), ("error", &es)]).yellow().bold()
                 ));
             }
         }
@@ -985,24 +1204,12 @@ fn workflow_scan_command(store: PathBuf, workflow_dir: PathBuf) -> Result<()> {
 
     pb.finish_and_clear();
 
-    println!("{}", "Workflow scan complete:".green().bold());
-    println!(
-        "  Workflows indexed:  {}",
-        files.len().to_string().bold()
-    );
-    println!(
-        "  Refs resolved:      {}",
-        total_resolved.to_string().green().bold()
-    );
-    println!(
-        "  Refs unresolved:    {}",
-        total_unresolved.to_string().yellow().bold()
-    );
+    println!("{}", t("wf.scan.complete").green().bold());
+    println!("  {}", tf("wf.scan.workflows", &[("count", &files.len())]).bold());
+    println!("  {}", tf("wf.scan.resolved", &[("count", &total_resolved)]).green().bold());
+    println!("  {}", tf("wf.scan.unresolved", &[("count", &total_unresolved)]).yellow().bold());
     if errors > 0 {
-        println!(
-            "  Parse errors:       {}",
-            errors.to_string().red().bold()
-        );
+        println!("  {}", tf("wf.scan.errors", &[("count", &errors)]).red().bold());
     }
 
     Ok(())
@@ -1010,22 +1217,20 @@ fn workflow_scan_command(store: PathBuf, workflow_dir: PathBuf) -> Result<()> {
 
 fn workflow_deps_command(store: PathBuf, workflow_file: PathBuf) -> Result<()> {
     if !workflow_file.exists() {
-        anyhow::bail!("File not found: {}", workflow_file.display());
+        let p = workflow_file.display().to_string();
+        anyhow::bail!("{}", tf("error.workflow_file_missing", &[("path", &p)]));
     }
 
     let db_path = store.join("modeld.db");
 
-    println!(
-        "{} {}",
-        "Workflow:".bold(),
-        workflow_file.display().to_string().cyan()
-    );
+    let p = workflow_file.display().to_string();
+    println!("{}", tf("wf.deps.workflow", &[("path", &p)]).bold());
     println!();
 
     let parsed = parse_workflow(&workflow_file)?;
 
     if let Some(ref title) = parsed.title {
-        println!("  Title: {}", title.bold());
+        println!("  {}", tf("wf.deps.title", &[("title", title)]).bold());
         println!();
     }
 
@@ -1041,11 +1246,11 @@ fn workflow_deps_command(store: PathBuf, workflow_file: PathBuf) -> Result<()> {
     let all_refs: Vec<_> = parsed.refs.iter().chain(parsed.unresolved.iter()).collect();
 
     if all_refs.is_empty() {
-        println!("{}", "No model references found.".yellow());
+        println!("{}", t("wf.deps.no_refs").yellow());
         return Ok(());
     }
 
-    println!("{}", "Model Dependencies:".bold());
+    println!("{}", t("wf.deps.header").bold());
     println!();
 
     // Group by ref_type
@@ -1055,17 +1260,8 @@ fn workflow_deps_command(store: PathBuf, workflow_file: PathBuf) -> Result<()> {
     }
 
     for (ref_type, refs) in &by_type {
-        let type_label = match *ref_type {
-            "checkpoint" => "Checkpoints",
-            "lora"       => "LoRAs",
-            "vae"        => "VAEs",
-            "clip"       => "CLIP Models",
-            "controlnet" => "ControlNets",
-            "ipadapter"  => "IPAdapters",
-            "unet"       => "UNets",
-            "upscale_model" => "Upscale Models",
-            _            => ref_type,
-        };
+        let type_key = format!("wf.deps.type.{}", ref_type);
+        let type_label = t(&type_key);
         println!("  {}:", type_label.bold());
         for r in refs {
             let resolved = lookup.contains_key(&r.model_name)
@@ -1076,21 +1272,23 @@ fn workflow_deps_command(store: PathBuf, workflow_file: PathBuf) -> Result<()> {
                         .unwrap_or_default()
                         .as_str(),
                 );
-            let status = if resolved {
-                "✓".green().bold()
-            } else {
-                "?".yellow()
-            };
+            let status = if resolved { "✓".green().bold() } else { "?".yellow() };
             println!("    {} {}", status, r.model_name);
         }
         println!();
     }
 
     println!(
-        "  Total: {} refs ({} resolved, {} unresolved)",
-        all_refs.len().to_string().bold(),
-        parsed.refs.len().to_string().green(),
-        parsed.unresolved.len().to_string().yellow(),
+        "  {}",
+        tf(
+            "wf.deps.total",
+            &[
+                ("count", &all_refs.len()),
+                ("resolved", &parsed.refs.len()),
+                ("unresolved", &parsed.unresolved.len()),
+            ]
+        )
+        .bold(),
     );
 
     Ok(())
@@ -1099,7 +1297,7 @@ fn workflow_deps_command(store: PathBuf, workflow_file: PathBuf) -> Result<()> {
 fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
     let db_path = store.join("modeld.db");
     if !db_path.exists() {
-        anyhow::bail!("Store not initialized. Run `modeld init` first.");
+        anyhow::bail!("{}", t("store.not_initialized_exit"));
     }
 
     let db = Database::open(&db_path)?;
@@ -1122,19 +1320,19 @@ fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
     }
 
     if orphans.is_empty() {
-        println!("{}", "No orphan models found. All models are referenced by at least one workflow.".green());
+        println!("{}", t("orphans.none").green());
         return Ok(());
     }
 
     let total_size: i64 = orphans.iter().map(|m| m.size_bytes).sum();
 
-    println!("{}", "Orphan Models (no workflow references):".bold().yellow());
+    println!("{}", t("orphans.header").bold().yellow());
     println!();
     println!(
         "  {:<66} {:>10}  {}",
-        "Hash".dimmed(),
-        "Size".dimmed(),
-        "Format".dimmed()
+        t("orphans.col_hash").dimmed(),
+        t("orphans.col_size").dimmed(),
+        t("orphans.col_format").dimmed()
     );
     println!("  {}", "─".repeat(90).dimmed());
 
@@ -1142,22 +1340,17 @@ fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
         let hash_str = &m.blake3_hash.as_hex()[..16];
         let size_str = format_bytes(m.size_bytes as u64);
         let fmt = m.format.as_deref().unwrap_or("unknown");
-        println!(
-            "  {}...  {:>10}  {}",
-            hash_str.yellow(),
-            size_str,
-            fmt
-        );
+        println!("  {}...  {:>10}  {}", hash_str.yellow(), size_str, fmt);
     }
 
     println!();
+    let size = format_bytes(total_size as u64);
     println!(
-        "  {} orphans, {} reclaimable",
-        orphans.len().to_string().bold(),
-        format_bytes(total_size as u64).yellow().bold()
+        "  {}",
+        tf("orphans.summary", &[("count", &orphans.len()), ("size", &size)]).bold()
     );
     println!();
-    println!("{}", "Tip: Run `modeld gc --preview` to see GC plan, or `modeld gc` to quarantine these models.".dimmed());
+    println!("{}", t("orphans.tip").dimmed());
 
     Ok(())
 }
@@ -1165,7 +1358,7 @@ fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
 fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result<()> {
     let db_path = store.join("modeld.db");
     if !db_path.exists() {
-        anyhow::bail!("Store not initialized. Run `modeld init` first.");
+        anyhow::bail!("{}", t("store.not_initialized_exit"));
     }
 
     let db = Database::open(&db_path)?;
@@ -1174,101 +1367,114 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result
     if preview {
         let plan = gc.preview()?;
 
-        println!("{}", "GC Preview (no changes will be made):".bold());
+        println!("{}", t("gc.preview.header").bold());
         println!();
 
         println!(
-            "  {} models hard-protected (referenced by workflows)",
-            plan.hard_protected.len().to_string().green().bold()
+            "  {}",
+            tf("gc.preview.hard", &[("count", &plan.hard_protected.len())]).green().bold()
         );
         if !plan.soft_protected.is_empty() {
             println!(
-                "  {} models soft-protected (have aliases but no workflow refs):",
-                plan.soft_protected.len().to_string().yellow().bold()
+                "  {}",
+                tf("gc.preview.soft_header", &[("count", &plan.soft_protected.len())])
+                    .yellow()
+                    .bold()
             );
             for item in &plan.soft_protected {
+                let size = format_bytes(item.size_bytes as u64);
                 println!(
-                    "    {}... ({} aliases, {})",
-                    item.hash_prefix.yellow(),
-                    item.alias_count,
-                    format_bytes(item.size_bytes as u64)
+                    "    {}",
+                    tf(
+                        "gc.preview.soft_line",
+                        &[
+                            ("prefix", &item.hash_prefix),
+                            ("aliases", &item.alias_count),
+                            ("size", &size),
+                        ]
+                    )
+                    .yellow()
                 );
             }
         }
         if !plan.would_quarantine.is_empty() {
             println!(
-                "  {} models would be quarantined:",
-                plan.would_quarantine.len().to_string().red().bold()
+                "  {}",
+                tf("gc.preview.quarantine_header", &[("count", &plan.would_quarantine.len())])
+                    .red()
+                    .bold()
             );
             for item in &plan.would_quarantine {
+                let size = format_bytes(item.size_bytes as u64);
                 println!(
-                    "    {}... ({})",
-                    item.hash_prefix.red(),
-                    format_bytes(item.size_bytes as u64)
+                    "    {}",
+                    tf("gc.preview.quarantine_line", &[("prefix", &item.hash_prefix), ("size", &size)])
+                        .red()
                 );
             }
-            println!(
-                "  Total reclaimable: {}",
-                format_bytes(plan.total_reclaimable_bytes as u64).yellow().bold()
-            );
+            let size = format_bytes(plan.total_reclaimable_bytes as u64);
+            println!("  {}", tf("gc.preview.reclaimable", &[("size", &size)]).yellow().bold());
         } else {
-            println!("  {}", "Nothing to quarantine.".green());
+            println!("  {}", t("gc.preview.nothing").green());
         }
         if plan.expired_quarantine_count > 0 {
             println!();
+            let size = format_bytes(plan.expired_quarantine_bytes as u64);
             println!(
-                "  {} expired quarantine entries ({}) could be deleted permanently.",
-                plan.expired_quarantine_count.to_string().yellow().bold(),
-                format_bytes(plan.expired_quarantine_bytes as u64)
+                "  {}",
+                tf(
+                    "gc.preview.expired",
+                    &[("count", &plan.expired_quarantine_count), ("size", &size)]
+                )
+                .yellow()
+                .bold()
             );
         }
         println!();
-        println!("{}", "Run `modeld gc` (without --preview) to execute.".dimmed());
+        println!("{}", t("gc.preview.run").dimmed());
         return Ok(());
     }
 
     // Execute GC
-    println!("{}", "Running safe GC...".bold());
+    println!("{}", t("gc.running").bold());
     let result = gc.run_safe()?;
 
     println!();
     if result.quarantined.is_empty() {
-        println!("{}", "Nothing quarantined — store is clean.".green().bold());
+        println!("{}", t("gc.nothing_quarantined").green().bold());
     } else {
+        let size = format_bytes(result.bytes_recovered as u64);
         println!(
-            "  {} Quarantined {} models ({})",
-            "✓".green().bold(),
-            result.quarantined.len().to_string().bold(),
-            format_bytes(result.bytes_recovered as u64).yellow()
+            "  {}",
+            tf("gc.quarantined", &[("count", &result.quarantined.len()), ("size", &size)]).bold()
         );
     }
     if !result.skipped_protected.is_empty() {
         println!(
-            "  {} Skipped {} hard-protected models",
+            "  {} {}",
             "•".blue(),
-            result.skipped_protected.len()
+            tf("gc.skipped_hard", &[("count", &result.skipped_protected.len())])
         );
     }
     if !result.skipped_soft.is_empty() {
         println!(
-            "  {} Skipped {} soft-protected models (use --force to override)",
+            "  {} {}",
             "⚠".yellow(),
-            result.skipped_soft.len()
+            tf("gc.skipped_soft", &[("count", &result.skipped_soft.len())])
         );
     }
 
     if cleanup_quarantine {
         println!();
-        println!("{}", "Cleaning expired quarantine entries...".bold());
+        println!("{}", t("gc.cleanup_header").bold());
         let cleaned = gc.cleanup_quarantine()?;
         if cleaned > 0 {
             println!(
-                "  {} Permanently deleted {} expired quarantine entries",
-                "✓".green().bold(),
-                cleaned
+                "  {}",
+                tf("gc.cleanup_done", &[("count", &cleaned)]).green().bold()
             );
         } else {
-            println!("  No expired quarantine entries found.");
+            println!("  {}", t("gc.cleanup_none"));
         }
     }
 
@@ -1281,14 +1487,9 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result
 
 fn proxy_command(action: ProxyAction) -> Result<()> {
     match action {
-        ProxyAction::Start {
-            bind,
-            port,
-            store,
-            token,
-            allow_anonymous,
-            config,
-        } => proxy_start_command(bind, port, store, token, allow_anonymous, config),
+        ProxyAction::Start { bind, port, store, token, allow_anonymous, config } => {
+            proxy_start_command(bind, port, store, token, allow_anonymous, config)
+        }
         ProxyAction::Discover { timeout } => proxy_discover_command(timeout),
         ProxyAction::Status { url, token } => proxy_status_command(&url, token),
     }
@@ -1306,7 +1507,13 @@ fn proxy_start_command(
     let mut cfg = if let Some(ref cfg_path) = config {
         modeld_proxy::ProxyConfig::load(cfg_path)?
     } else {
-        modeld_proxy::ProxyConfig::from_cli(port, Some(bind.clone()), store.clone(), token, allow_anonymous)
+        modeld_proxy::ProxyConfig::from_cli(
+            port,
+            Some(bind.clone()),
+            store.clone(),
+            token,
+            allow_anonymous,
+        )
     };
     // CLI bind override always wins (most explicit).
     cfg.bind_address = bind;
@@ -1327,44 +1534,34 @@ fn proxy_start_command(
 }
 
 fn proxy_discover_command(timeout: u64) -> Result<()> {
-    println!("{}", "Scanning LAN for modeld proxy servers...".cyan().bold());
-    println!("  (mDNS service: _modeld._tcp.local.)");
+    println!("{}", t("proxy.discover.scanning").cyan().bold());
+    println!("  {}", t("proxy.discover.service"));
     println!();
 
     let servers = modeld_proxy::discover(timeout);
 
     if servers.is_empty() {
-        println!(
-            "{}",
-            "No modeld proxy servers found on the local network.".yellow()
-        );
+        println!("{}", t("proxy.discover.none").yellow());
         println!();
-        println!("{}", "Make sure:".dimmed());
-        println!("  • A server is running: modeld proxy start");
-        println!("  • mDNS is published (avahi-publish / dns-sd / Bonjour)");
-        println!("  • The machine is on the same network/subnet");
-        println!("  • mDNS traffic is allowed (UDP 5353)");
+        println!("{}", t("proxy.discover.make_sure").dimmed());
+        println!("  {}", t("proxy.discover.tip_server"));
+        println!("  {}", t("proxy.discover.tip_mdns"));
+        println!("  {}", t("proxy.discover.tip_subnet"));
+        println!("  {}", t("proxy.discover.tip_firewall"));
         return Ok(());
     }
 
     println!(
-        "{} {} server(s) found:",
+        "{} {}",
         "✓".green().bold(),
-        servers.len()
+        tf("proxy.discover.found", &[("count", &servers.len())])
     );
     println!();
     for s in &servers {
-        println!(
-            "  {} {}",
-            "•".cyan(),
-            format!("http://{}:{}", s.address, s.port).bold()
-        );
+        let url = format!("http://{}:{}", s.address, s.port);
+        println!("  {} {}", "•".cyan(), tf("proxy.discover.line", &[("url", &url)]).bold());
         if !s.txt.is_empty() {
-            let parts: Vec<String> = s
-                .txt
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect();
+            let parts: Vec<String> = s.txt.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
             println!("      {}", parts.join(", ").dimmed());
         }
     }
@@ -1379,48 +1576,50 @@ fn proxy_status_command(url: &str, token: Option<String>) -> Result<()> {
     }
 
     let health = builder.health().map_err(|e| {
-        anyhow::anyhow!("failed to reach proxy at {}: {:#}", url, e)
+        let es = format!("{:#}", e);
+        anyhow::anyhow!("{}", tf("proxy.status.reach_failed", &[("url", &url), ("error", &es)]))
     })?;
 
-    println!("{}", "modeld Proxy Status".cyan().bold());
+    println!("{}", t("proxy.status.header").cyan().bold());
     println!("{}", "─".repeat(40).cyan());
-    println!("  URL:           {}", url);
-    println!("  Status:        {}", health.status.green());
-    println!("  Version:       {}", health.version);
-    println!("  Uptime:        {}s", health.uptime_seconds);
-    println!("  Models:        {}", health.model_count.to_string().bold());
-    println!(
-        "  Total size:    {}",
-        format_bytes(health.total_bytes as u64)
-    );
+    println!("  {}", tf("proxy.status.url", &[("url", &url)]));
+    println!("  {}", tf("proxy.status.status", &[("value", &health.status)]).green());
+    println!("  {}", tf("proxy.status.version", &[("value", &health.version)]));
+    println!("  {}", tf("proxy.status.uptime", &[("value", &health.uptime_seconds)]));
+    println!("  {}", tf("proxy.status.models", &[("count", &health.model_count)]).bold());
+    let size = format_bytes(health.total_bytes as u64);
+    println!("  {}", tf("proxy.status.total_size", &[("value", &size)]));
     println!("{}", "─".repeat(40).cyan());
 
     match builder.list_models() {
         Ok(models) => {
             if models.is_empty() {
-                println!("{}", "No models in store.".dimmed());
+                println!("{}", t("proxy.status.no_models").dimmed());
             } else {
                 println!();
-                println!(
-                    "{} (showing first 5):",
-                    "Recent models".cyan()
-                );
+                println!("{}", t("proxy.status.recent_header").cyan());
                 for m in models.iter().take(5) {
                     let hash_short = &m.hash[..16.min(m.hash.len())];
+                    let size = format_bytes(m.size_bytes as u64);
+                    let fmt = m.format.as_deref().unwrap_or("unknown");
                     println!(
-                        "  {}  {}  {}",
-                        hash_short.dimmed(),
-                        format_bytes(m.size_bytes as u64),
-                        m.format.as_deref().unwrap_or("unknown")
+                        "  {}",
+                        tf(
+                            "proxy.status.recent_line",
+                            &[("hash", &hash_short), ("size", &size), ("format", &fmt)]
+                        )
+                        .dimmed()
                     );
                 }
                 if models.len() > 5 {
-                    println!("  ... and {} more", models.len() - 5);
+                    let more = models.len() - 5;
+                    println!("  {}", tf("proxy.status.more", &[("count", &more)]));
                 }
             }
         }
         Err(e) => {
-            println!("  {} list_models failed: {:#}", "⚠".yellow(), e);
+            let es = format!("{:#}", e);
+            println!("  {} {}", "⚠".yellow(), tf("proxy.status.list_failed", &[("error", &es)]));
         }
     }
 

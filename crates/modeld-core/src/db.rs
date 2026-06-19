@@ -47,7 +47,7 @@ impl AliasType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_db_value(s: &str) -> Option<Self> {
         match s {
             "hardlink" => Some(AliasType::Hardlink),
             "symlink" => Some(AliasType::Symlink),
@@ -80,7 +80,7 @@ impl Frontend {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_db_value(s: &str) -> Option<Self> {
         match s {
             "comfyui" => Some(Frontend::ComfyUI),
             "forge" => Some(Frontend::Forge),
@@ -122,7 +122,7 @@ impl TransactionStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_db_value(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(TransactionStatus::Pending),
             "copied" => Some(TransactionStatus::Copied),
@@ -382,19 +382,17 @@ impl Database {
 
     /// Get total count of models
     pub fn count_models(&self) -> Result<i64> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM models", [], |row| row.get(0))?;
+        let count: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM models", [], |row| row.get(0))?;
         Ok(count)
     }
 
     /// Get total size of all models
     pub fn total_size(&self) -> Result<i64> {
-        let size: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(size_bytes), 0) FROM models",
-            [],
-            |row| row.get(0),
-        )?;
+        let size: i64 =
+            self.conn.query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM models", [], |row| {
+                row.get(0)
+            })?;
         Ok(size)
     }
 
@@ -459,13 +457,7 @@ impl Database {
             INSERT INTO aliases (model_hash, path, frontend, alias_type, created_at)
             VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
-            params![
-                model_hash.as_hex(),
-                path,
-                frontend.as_str(),
-                alias_type.as_str(),
-                now
-            ],
+            params![model_hash.as_hex(), path, frontend.as_str(), alias_type.as_str(), now],
         )?;
 
         Ok(self.conn.last_insert_rowid())
@@ -487,8 +479,8 @@ impl Database {
                     id: row.get(0)?,
                     model_hash: Blake3Hash::from_hex(&row.get::<_, String>(1)?).unwrap(),
                     path: row.get(2)?,
-                    frontend: Frontend::from_str(&row.get::<_, String>(3)?).unwrap(),
-                    alias_type: AliasType::from_str(&row.get::<_, String>(4)?).unwrap(),
+                    frontend: Frontend::from_db_value(&row.get::<_, String>(3)?).unwrap(),
+                    alias_type: AliasType::from_db_value(&row.get::<_, String>(4)?).unwrap(),
                     created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                         .unwrap()
                         .with_timezone(&Utc),
@@ -516,8 +508,8 @@ impl Database {
                     id: row.get(0)?,
                     model_hash: Blake3Hash::from_hex(&row.get::<_, String>(1)?).unwrap(),
                     path: row.get(2)?,
-                    frontend: Frontend::from_str(&row.get::<_, String>(3)?).unwrap(),
-                    alias_type: AliasType::from_str(&row.get::<_, String>(4)?).unwrap(),
+                    frontend: Frontend::from_db_value(&row.get::<_, String>(3)?).unwrap(),
+                    alias_type: AliasType::from_db_value(&row.get::<_, String>(4)?).unwrap(),
                     created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                         .unwrap()
                         .with_timezone(&Utc),
@@ -530,8 +522,7 @@ impl Database {
 
     /// Delete alias by path
     pub fn delete_alias(&mut self, path: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM aliases WHERE path = ?1", params![path])?;
+        self.conn.execute("DELETE FROM aliases WHERE path = ?1", params![path])?;
         Ok(())
     }
 
@@ -598,7 +589,7 @@ impl Database {
                     id: row.get(0)?,
                     tx_id: row.get(1)?,
                     operation: row.get(2)?,
-                    status: TransactionStatus::from_str(&row.get::<_, String>(3)?).unwrap(),
+                    status: TransactionStatus::from_db_value(&row.get::<_, String>(3)?).unwrap(),
                     source_path: row.get(4)?,
                     target_hash: row.get(5)?,
                     metadata: row.get(6)?,
@@ -633,7 +624,7 @@ impl Database {
                     id: row.get(0)?,
                     tx_id: row.get(1)?,
                     operation: row.get(2)?,
-                    status: TransactionStatus::from_str(&row.get::<_, String>(3)?).unwrap(),
+                    status: TransactionStatus::from_db_value(&row.get::<_, String>(3)?).unwrap(),
                     source_path: row.get(4)?,
                     target_hash: row.get(5)?,
                     metadata: row.get(6)?,
@@ -652,8 +643,7 @@ impl Database {
 
     /// Delete WAL transaction by tx_id
     pub fn delete_wal_transaction(&mut self, tx_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM wal_transactions WHERE tx_id = ?1", params![tx_id])?;
+        self.conn.execute("DELETE FROM wal_transactions WHERE tx_id = ?1", params![tx_id])?;
         Ok(())
     }
 }
@@ -681,7 +671,7 @@ impl DownloadStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn from_db_value(s: &str) -> Option<Self> {
         match s {
             "pending" => Some(DownloadStatus::Pending),
             "downloading" => Some(DownloadStatus::Downloading),
@@ -858,26 +848,21 @@ impl Database {
                 repo_id: row.get(4)?,
                 filename: row.get(5)?,
                 revision: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "main".into()),
-                status: DownloadStatus::from_str(&status_str)
+                status: DownloadStatus::from_db_value(&status_str)
                     .unwrap_or(DownloadStatus::Pending),
                 bytes_total: row.get(8)?,
                 bytes_done: row.get(9)?,
-                started_at: started_str
-                    .parse::<DateTime<Utc>>()
-                    .unwrap_or_else(|_| Utc::now()),
-                finished_at: finished_str
-                    .and_then(|s| s.parse::<DateTime<Utc>>().ok()),
+                started_at: started_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()),
+                finished_at: finished_str.and_then(|s| s.parse::<DateTime<Utc>>().ok()),
                 error_message: row.get(12)?,
             })
         };
 
         let rows: Vec<Download> = match &status {
-            Some(s) => stmt
-                .query_map(params![s.as_str()], mapper)?
-                .collect::<rusqlite::Result<_>>()?,
-            None => stmt
-                .query_map([], mapper)?
-                .collect::<rusqlite::Result<_>>()?,
+            Some(s) => {
+                stmt.query_map(params![s.as_str()], mapper)?.collect::<rusqlite::Result<_>>()?
+            }
+            None => stmt.query_map([], mapper)?.collect::<rusqlite::Result<_>>()?,
         };
         Ok(rows)
     }
@@ -922,9 +907,7 @@ impl Database {
                     blake3_hash: row.get(2)?,
                     repo_id: row.get(3)?,
                     filename: row.get(4)?,
-                    created_at: created_str
-                        .parse::<DateTime<Utc>>()
-                        .unwrap_or_else(|_| Utc::now()),
+                    created_at: created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()),
                 })
             })
             .optional()?;
@@ -948,9 +931,7 @@ impl Database {
                     blake3_hash: row.get(2)?,
                     repo_id: row.get(3)?,
                     filename: row.get(4)?,
-                    created_at: created_str
-                        .parse::<DateTime<Utc>>()
-                        .unwrap_or_else(|_| Utc::now()),
+                    created_at: created_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()),
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -976,13 +957,11 @@ fn parse_download_row(
                 repo_id: row.get(4)?,
                 filename: row.get(5)?,
                 revision: row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "main".into()),
-                status: DownloadStatus::from_str(&status_str)
+                status: DownloadStatus::from_db_value(&status_str)
                     .unwrap_or(DownloadStatus::Pending),
                 bytes_total: row.get(8)?,
                 bytes_done: row.get(9)?,
-                started_at: started_str
-                    .parse::<DateTime<Utc>>()
-                    .unwrap_or_else(|_| Utc::now()),
+                started_at: started_str.parse::<DateTime<Utc>>().unwrap_or_else(|_| Utc::now()),
                 finished_at: finished_str.and_then(|s| s.parse::<DateTime<Utc>>().ok()),
                 error_message: row.get(12)?,
             })
@@ -990,8 +969,6 @@ fn parse_download_row(
         .optional()?;
     Ok(row)
 }
-
-
 
 // ──────────────────────────────────────────────────────────────────────────
 // Phase 4: Workflow & Reference Graph
@@ -1039,13 +1016,11 @@ impl Database {
                  last_seen_at = excluded.last_seen_at"#,
             rusqlite::params![path, file_hash, title],
         )?;
-        Ok(self.conn.last_insert_rowid().max(
-            self.conn.query_row(
-                "SELECT id FROM workflows WHERE path = ?1",
-                rusqlite::params![path],
-                |r| r.get::<_, i64>(0),
-            )?,
-        ))
+        Ok(self.conn.last_insert_rowid().max(self.conn.query_row(
+            "SELECT id FROM workflows WHERE path = ?1",
+            rusqlite::params![path],
+            |r| r.get::<_, i64>(0),
+        )?))
     }
 
     /// Delete all workflow_refs for a workflow before re-inserting (refresh).
@@ -1184,7 +1159,8 @@ impl Database {
                 last_seen: DateTime::parse_from_rfc3339(&r.get::<_, String>(8)?)
                     .unwrap()
                     .with_timezone(&Utc),
-                quarantined_at: r.get::<_, Option<String>>(9)?
+                quarantined_at: r
+                    .get::<_, Option<String>>(9)?
                     .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc)),
             })
         })?;
@@ -1241,7 +1217,6 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-
     #[test]
     fn test_db_init() {
         let temp_db = NamedTempFile::new().unwrap();
@@ -1294,8 +1269,7 @@ mod tests {
         .unwrap();
 
         // Insert first time
-        db.insert_or_update_model(&hash, 2048, Some("gguf"), None, None, None)
-            .unwrap();
+        db.insert_or_update_model(&hash, 2048, Some("gguf"), None, None, None).unwrap();
 
         // Update with additional metadata
         db.insert_or_update_model(&hash, 2048, Some("gguf"), Some("llama"), Some("lora"), None)
@@ -1334,8 +1308,7 @@ mod tests {
         for i in 0..10 {
             let hash_str = format!("{:064x}", i);
             let hash = Blake3Hash::from_hex(&hash_str).unwrap();
-            db.insert_or_update_model(&hash, 1024, None, None, None, None)
-                .unwrap();
+            db.insert_or_update_model(&hash, 1024, None, None, None, None).unwrap();
         }
 
         // List all
@@ -1358,23 +1331,14 @@ mod tests {
         .unwrap();
 
         // Insert model first
-        db.insert_or_update_model(&hash, 1024, Some("safetensors"), None, None, None)
-            .unwrap();
+        db.insert_or_update_model(&hash, 1024, Some("safetensors"), None, None, None).unwrap();
 
         // Insert alias
-        db.insert_alias(
-            &hash,
-            "C:\\models\\sdxl.safetensors",
-            Frontend::User,
-            AliasType::Original,
-        )
-        .unwrap();
+        db.insert_alias(&hash, "C:\\models\\sdxl.safetensors", Frontend::User, AliasType::Original)
+            .unwrap();
 
         // Retrieve by path
-        let alias = db
-            .get_alias_by_path("C:\\models\\sdxl.safetensors")
-            .unwrap()
-            .unwrap();
+        let alias = db.get_alias_by_path("C:\\models\\sdxl.safetensors").unwrap().unwrap();
 
         assert_eq!(alias.model_hash.as_hex(), hash.as_hex());
         assert_eq!(alias.path, "C:\\models\\sdxl.safetensors");
@@ -1393,8 +1357,7 @@ mod tests {
         .unwrap();
 
         // Insert model
-        db.insert_or_update_model(&hash, 2048, None, None, None, None)
-            .unwrap();
+        db.insert_or_update_model(&hash, 2048, None, None, None, None).unwrap();
 
         // Insert multiple aliases
         db.insert_alias(
@@ -1433,8 +1396,7 @@ mod tests {
         .unwrap();
 
         // Insert model and alias
-        db.insert_or_update_model(&hash, 512, None, None, None, None)
-            .unwrap();
+        db.insert_or_update_model(&hash, 512, None, None, None, None).unwrap();
         db.insert_alias(&hash, "C:\\test.safetensors", Frontend::User, AliasType::Original)
             .unwrap();
 
@@ -1476,15 +1438,13 @@ mod tests {
         assert_eq!(tx.target_hash.as_deref(), Some(hash));
 
         // Update status
-        db.update_wal_status(tx_id, TransactionStatus::Copied)
-            .unwrap();
+        db.update_wal_status(tx_id, TransactionStatus::Copied).unwrap();
 
         let tx = db.get_wal_transaction(tx_id).unwrap().unwrap();
         assert_eq!(tx.status, TransactionStatus::Copied);
 
         // Update to committed
-        db.update_wal_status(tx_id, TransactionStatus::Committed)
-            .unwrap();
+        db.update_wal_status(tx_id, TransactionStatus::Committed).unwrap();
 
         let tx = db.get_wal_transaction(tx_id).unwrap().unwrap();
         assert_eq!(tx.status, TransactionStatus::Committed);
@@ -1496,45 +1456,17 @@ mod tests {
         let mut db = Database::open(temp_db.path()).unwrap();
 
         // Insert various transactions
-        db.insert_wal_transaction(
-            "tx1",
-            "dedup",
-            TransactionStatus::Pending,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db.insert_wal_transaction("tx1", "dedup", TransactionStatus::Pending, None, None, None)
+            .unwrap();
 
-        db.insert_wal_transaction(
-            "tx2",
-            "dedup",
-            TransactionStatus::Copied,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db.insert_wal_transaction("tx2", "dedup", TransactionStatus::Copied, None, None, None)
+            .unwrap();
 
-        db.insert_wal_transaction(
-            "tx3",
-            "dedup",
-            TransactionStatus::Committed,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db.insert_wal_transaction("tx3", "dedup", TransactionStatus::Committed, None, None, None)
+            .unwrap();
 
-        db.insert_wal_transaction(
-            "tx4",
-            "download",
-            TransactionStatus::Failed,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db.insert_wal_transaction("tx4", "download", TransactionStatus::Failed, None, None, None)
+            .unwrap();
 
         // Query incomplete (only pending and copied)
         let incomplete = db.get_incomplete_wal_transactions().unwrap();

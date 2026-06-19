@@ -89,12 +89,7 @@ impl HfCache {
     }
 
     /// Get the path of a specific file in a snapshot
-    pub fn snapshot_file_path(
-        &self,
-        repo_id: &str,
-        revision: &str,
-        filename: &str,
-    ) -> PathBuf {
+    pub fn snapshot_file_path(&self, repo_id: &str, revision: &str, filename: &str) -> PathBuf {
         self.snapshot_dir(repo_id, revision).join(filename)
     }
 
@@ -104,12 +99,7 @@ impl HfCache {
     }
 
     /// Check if a file already exists in the fake HF cache
-    pub fn check_cache(
-        &self,
-        repo_id: &str,
-        revision: &str,
-        filename: &str,
-    ) -> bool {
+    pub fn check_cache(&self, repo_id: &str, revision: &str, filename: &str) -> bool {
         self.snapshot_file_path(repo_id, revision, filename).exists()
     }
 
@@ -140,27 +130,25 @@ impl HfCache {
 
         // Handle subdirectories in filename (e.g. "text_encoder/model.safetensors")
         let file_path_in_snapshot = snapshot_dir.join(filename);
-        let parent_dir = file_path_in_snapshot
-            .parent()
-            .unwrap_or(&snapshot_dir);
+        let parent_dir = file_path_in_snapshot.parent().unwrap_or(&snapshot_dir);
 
-        fs::create_dir_all(&blobs_dir)
-            .context("Failed to create blobs directory")?;
-        fs::create_dir_all(parent_dir)
-            .context("Failed to create snapshot subdirectory")?;
-        fs::create_dir_all(&refs_dir)
-            .context("Failed to create refs directory")?;
+        fs::create_dir_all(&blobs_dir).context("Failed to create blobs directory")?;
+        fs::create_dir_all(parent_dir).context("Failed to create snapshot subdirectory")?;
+        fs::create_dir_all(&refs_dir).context("Failed to create refs directory")?;
 
         // 2. Create blob → CAS symlink
         let blob_path = blobs_dir.join(sha256);
         if !blob_path.exists() {
-            let cas_path = self.cas.get(blake3_hash)
-                .ok_or_else(|| anyhow::anyhow!("CAS object not found for blake3 hash: {}", blake3_hash.as_hex()))?;
-            create_symlink_or_copy(&cas_path, &blob_path)
-                .with_context(|| format!(
+            let cas_path = self.cas.get(blake3_hash).ok_or_else(|| {
+                anyhow::anyhow!("CAS object not found for blake3 hash: {}", blake3_hash.as_hex())
+            })?;
+            create_symlink_or_copy(&cas_path, &blob_path).with_context(|| {
+                format!(
                     "Failed to create blob symlink {} → {}",
-                    blob_path.display(), cas_path.display()
-                ))?;
+                    blob_path.display(),
+                    cas_path.display()
+                )
+            })?;
         }
 
         // 3. Create snapshot/{revision}/{filename} → ../../blobs/{sha256}
@@ -170,18 +158,14 @@ impl HfCache {
             let relative_prefix = "../".repeat(depth + 1); // +1 for snapshots/{rev}/
             let relative_blob = format!("{}blobs/{}", relative_prefix, sha256);
             create_symlink_or_copy_rel(&blob_path, &file_path_in_snapshot, &relative_blob)
-                .with_context(|| format!(
-                    "Failed to create snapshot symlink for {}",
-                    filename
-                ))?;
+                .with_context(|| format!("Failed to create snapshot symlink for {}", filename))?;
         }
 
         // 4. Write refs/{branch} = revision
         let branch_name = branch.unwrap_or("main");
         let ref_file = refs_dir.join(branch_name);
         if !ref_file.exists() {
-            fs::write(&ref_file, revision)
-                .context("Failed to write refs file")?;
+            fs::write(&ref_file, revision).context("Failed to write refs file")?;
         }
 
         Ok(file_path_in_snapshot)
@@ -199,7 +183,9 @@ impl HfCache {
         fs::create_dir_all(&blobs_dir)?;
         let blob_path = blobs_dir.join(sha256);
         if !blob_path.exists() {
-            let cas_path = self.cas.get(blake3_hash)
+            let cas_path = self
+                .cas
+                .get(blake3_hash)
                 .ok_or_else(|| anyhow::anyhow!("CAS object not found for blake3 hash"))?;
             create_symlink_or_copy(&cas_path, &blob_path)?;
         }
@@ -218,10 +204,7 @@ impl HfCache {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with("models--") {
                 // Convert "models--org--model" back to "org/model"
-                let repo_id = name
-                    .strip_prefix("models--")
-                    .unwrap_or(&name)
-                    .replacen("--", "/", 1);
+                let repo_id = name.strip_prefix("models--").unwrap_or(&name).replacen("--", "/", 1);
                 repos.push(repo_id);
             }
         }
@@ -244,11 +227,7 @@ impl HfCache {
             }
         }
 
-        Ok(HfCacheStats {
-            total_repos,
-            total_blobs,
-            hf_home: self.root.clone(),
-        })
+        Ok(HfCacheStats { total_repos, total_blobs, hf_home: self.root.clone() })
     }
 }
 
@@ -311,10 +290,7 @@ mod tests {
             HfCache::repo_to_dir_name("meta-llama/Llama-3-8B"),
             "models--meta-llama--Llama-3-8B"
         );
-        assert_eq!(
-            HfCache::repo_to_dir_name("single"),
-            "models--single"
-        );
+        assert_eq!(HfCache::repo_to_dir_name("single"), "models--single");
     }
 
     #[test]
@@ -374,14 +350,16 @@ mod tests {
         let sha256 = "a".repeat(64);
 
         // Create the cache entry
-        let file_path = cache.create_cache_entry(
-            "stabilityai/sdxl-base",
-            "model.safetensors",
-            "abc123def456",
-            &sha256,
-            &hash,
-            Some("main"),
-        ).unwrap();
+        let file_path = cache
+            .create_cache_entry(
+                "stabilityai/sdxl-base",
+                "model.safetensors",
+                "abc123def456",
+                &sha256,
+                &hash,
+                Some("main"),
+            )
+            .unwrap();
 
         // Verify structure
         assert!(file_path.exists(), "Snapshot file should exist");

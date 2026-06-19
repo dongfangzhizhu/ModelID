@@ -19,12 +19,27 @@ def run_test(name, cmd, cwd=None):
     print()
     
     try:
-        result = subprocess.run(cmd, cwd=cwd, check=True)
-        print(f"\n✓ {name} 通过")
+        subprocess.run(cmd, cwd=cwd, check=True)
+        print(f"\n[OK] {name} 通过")
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"\n✗ {name} 失败 (返回码: {e.returncode})")
+    except FileNotFoundError as e:
+        print(f"\n[FAIL] {name} 失败 (找不到命令: {e.filename})")
         return False
+    except subprocess.CalledProcessError as e:
+        print(f"\n[FAIL] {name} 失败 (返回码: {e.returncode})")
+        return False
+
+def run_path_test(name, path):
+    """检查路径是否存在"""
+    print(f"\n{'='*60}")
+    print(f"测试: {name}")
+    print(f"{'='*60}")
+    print(f"路径: {path}")
+    if path.exists():
+        print(f"\n[OK] {name} 通过")
+        return True
+    print(f"\n[FAIL] {name} 失败 (路径不存在)")
+    return False
 
 def main():
     """主测试函数"""
@@ -33,30 +48,42 @@ def main():
     
     tests = [
         # 环境检查
-        ("检查 Python 版本", [sys.executable, "--version"], None),
+        ("cmd", "检查 Python 版本", [sys.executable, "--version"], None),
         
         # 依赖检查
-        ("检查 build 工具", [sys.executable, "-m", "pip", "show", "build"], None),
-        ("检查 twine 工具", [sys.executable, "-m", "pip", "show", "twine"], None),
+        ("cmd", "检查 build 工具", [sys.executable, "-m", "pip", "show", "build"], None),
+        ("cmd", "检查 twine 工具", [sys.executable, "-m", "pip", "show", "twine"], None),
+        ("cmd", "检查 hatchling 工具", [sys.executable, "-m", "pip", "show", "hatchling"], None),
         
         # 项目结构检查
-        ("检查 pyproject.toml", ["ls", "-la", str(python_dir / "pyproject.toml")], None),
-        ("检查 Python 包", ["ls", "-la", str(python_dir / "modeld_hook")], None),
+        ("path", "检查 pyproject.toml", python_dir / "pyproject.toml", None),
+        ("path", "检查 Python 包", python_dir / "modeld_hook", None),
         
         # 测试
-        ("运行单元测试", [sys.executable, "-m", "pytest", "tests/", "-v"], python_dir),
+        ("cmd", "运行单元测试", [sys.executable, "-m", "pytest", "tests/", "-v"], python_dir),
         
         # 构建
-        ("构建 wheel", [sys.executable, "-m", "build", "--wheel"], python_dir),
-        
-        # 验证
-        ("验证 wheel", [sys.executable, "-m", "twine", "check", "dist/*.whl"], python_dir),
+        ("cmd", "构建 wheel", [sys.executable, "-m", "build", "--wheel", "--no-isolation"], python_dir),
     ]
     
     results = []
-    for name, cmd, cwd in tests:
-        success = run_test(name, cmd, cwd)
+    for kind, name, payload, cwd in tests:
+        if kind == "path":
+            success = run_path_test(name, payload)
+        else:
+            success = run_test(name, payload, cwd)
         results.append((name, success))
+
+    wheels = sorted((python_dir / "dist").glob("*.whl"))
+    if wheels:
+        success = run_test(
+            "验证 wheel",
+            [sys.executable, "-m", "twine", "check", *[str(wheel) for wheel in wheels]],
+            python_dir,
+        )
+    else:
+        success = run_path_test("验证 wheel", python_dir / "dist" / "*.whl")
+    results.append(("验证 wheel", success))
     
     # 总结
     print(f"\n{'='*60}")
@@ -67,20 +94,20 @@ def main():
     total = len(results)
     
     for name, success in results:
-        symbol = "✓" if success else "✗"
+        symbol = "[OK]" if success else "[FAIL]"
         print(f"{symbol} {name}")
     
     print()
     print(f"通过: {passed}/{total}")
     
     if passed == total:
-        print("\n✓ 所有测试通过！可以发布到 PyPI")
+        print("\n[OK] 所有测试通过！可以发布到 PyPI")
         print("\n下一步:")
         print("  python scripts/build_and_publish.py --publish --dry-run")
         print("  python scripts/build_and_publish.py --publish")
         return 0
     else:
-        print(f"\n✗ {total - passed} 个测试失败，请修复后重试")
+        print(f"\n[FAIL] {total - passed} 个测试失败，请修复后重试")
         return 1
 
 if __name__ == "__main__":

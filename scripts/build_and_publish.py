@@ -35,13 +35,20 @@ class Colors:
 def write_status(message: str, status_type: str = "info") -> None:
     """打印状态消息"""
     symbols = {
-        "success": f"{Colors.GREEN}✓{Colors.RESET}",
-        "error": f"{Colors.RED}✗{Colors.RESET}",
-        "warn": f"{Colors.YELLOW}⚠{Colors.RESET}",
-        "info": f"{Colors.CYAN}→{Colors.RESET}",
+        "success": f"{Colors.GREEN}[OK]{Colors.RESET}",
+        "error": f"{Colors.RED}[FAIL]{Colors.RESET}",
+        "warn": f"{Colors.YELLOW}[WARN]{Colors.RESET}",
+        "info": f"{Colors.CYAN}[INFO]{Colors.RESET}",
     }
-    prefix = symbols.get(status_type, "→")
+    prefix = symbols.get(status_type, "[INFO]")
     print(f"{prefix} {message}")
+
+def remove_tree(path: Path) -> None:
+    """Best-effort recursive removal for build artifacts."""
+    try:
+        shutil.rmtree(path)
+    except PermissionError as e:
+        write_status(f"无法删除 {path}: {e}; 已跳过", "warn")
 
 def run_command(cmd: list, cwd: Optional[Path] = None, check: bool = True) -> Tuple[int, str]:
     """运行命令并返回返回码和输出"""
@@ -74,7 +81,7 @@ def check_python_version() -> None:
 
 def install_dependencies() -> None:
     """安装必要的依赖"""
-    packages = ["build", "twine"]
+    packages = ["build", "twine", "hatchling"]
     for package in packages:
         try:
             __import__(package.replace("-", "_"))
@@ -142,12 +149,12 @@ def clean_build_files(python_dir: Path) -> None:
     for dir_name in dirs_to_remove:
         dir_path = python_dir / dir_name
         if dir_path.exists():
-            shutil.rmtree(dir_path)
+            remove_tree(dir_path)
     
     for pattern in patterns_to_remove:
         for item in python_dir.rglob(pattern):
             if item.is_dir():
-                shutil.rmtree(item)
+                remove_tree(item)
     
     write_status("旧文件已清理", "success")
 
@@ -156,7 +163,7 @@ def build_wheel(python_dir: Path) -> None:
     write_status("构建 wheel 包...", "info")
     
     returncode, output = run_command(
-        [sys.executable, "-m", "build", "--wheel"],
+        [sys.executable, "-m", "build", "--wheel", "--no-isolation"],
         cwd=python_dir,
         check=False
     )
@@ -174,7 +181,7 @@ def build_wheel(python_dir: Path) -> None:
     print(f"{Colors.CYAN}生成的文件:{Colors.RESET}")
     for wheel in wheels:
         size_mb = wheel.stat().st_size / (1024 * 1024)
-        print(f"  • {wheel.name} ({size_mb:.2f} MB)")
+        print(f"  - {wheel.name} ({size_mb:.2f} MB)")
 
 def verify_packages(python_dir: Path) -> None:
     """验证包完整性"""
@@ -201,9 +208,9 @@ def publish_to_pypi(
 ) -> None:
     """发布到 PyPI"""
     print()
-    print(f"{Colors.YELLOW}═══════════════════════════════════════════{Colors.RESET}")
+    print(f"{Colors.YELLOW}{'=' * 43}{Colors.RESET}")
     print(f"{Colors.YELLOW}准备发布到 {'Test ' if use_test_pypi else ''}PyPI{Colors.RESET}")
-    print(f"{Colors.YELLOW}═══════════════════════════════════════════{Colors.RESET}")
+    print(f"{Colors.YELLOW}{'=' * 43}{Colors.RESET}")
     print()
     
     # 检查 .pypirc 配置
@@ -240,7 +247,7 @@ password = pypi-AgEIcHlwaS5vcmc..."""
     
     print(f"{Colors.CYAN}待发布的包:{Colors.RESET}")
     for wheel in wheels:
-        print(f"  • {wheel.name}")
+        print(f"  - {wheel.name}")
     print()
     
     # 选择仓库
@@ -345,9 +352,9 @@ def main() -> None:
     if args.publish:
         publish_to_pypi(python_dir, args.dry_run, args.test_pypi)
     else:
-        print(f"{Colors.CYAN}═══════════════════════════════════════════{Colors.RESET}")
+        print(f"{Colors.CYAN}{'=' * 43}{Colors.RESET}")
         print(f"{Colors.CYAN}构建完成！{Colors.RESET}")
-        print(f"{Colors.CYAN}═══════════════════════════════════════════{Colors.RESET}")
+        print(f"{Colors.CYAN}{'=' * 43}{Colors.RESET}")
         print()
         print("下一步:")
         print("  1. 本地测试: pip install dist/modeld_hook-*.whl")

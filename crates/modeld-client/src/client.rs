@@ -56,10 +56,7 @@ impl ModeldClient {
         while url.ends_with('/') {
             url.pop();
         }
-        Self {
-            base_url: url,
-            token: None,
-        }
+        Self { base_url: url, token: None }
     }
 
     /// Attach a bearer token for authenticated servers.
@@ -79,7 +76,7 @@ impl ModeldClient {
             .build()
     }
 
-    fn authed<'a>(&self, req: ureq::Request) -> ureq::Request {
+    fn authed(&self, req: ureq::Request) -> ureq::Request {
         match &self.token {
             Some(t) => req.set("Authorization", &format!("Bearer {}", t)),
             None => req,
@@ -119,10 +116,7 @@ impl ModeldClient {
         let url = format!("{}/v1/blobs/{}", self.base_url, hash);
 
         // Resume from existing partial file.
-        let already = dest
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let already = dest.metadata().map(|m| m.len()).unwrap_or(0);
 
         let req = if already > 0 {
             self.authed(self.agent().get(&url)).set("Range", &format!("bytes={}-", already))
@@ -143,10 +137,8 @@ impl ModeldClient {
             anyhow::bail!("server returned {}: {}", status, body);
         }
 
-        let total_len = resp
-            .header("Content-Length")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+        let total_len =
+            resp.header("Content-Length").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
 
         let append = status == 206;
         let mut file = if append {
@@ -163,9 +155,7 @@ impl ModeldClient {
         let mut buf = vec![0u8; 64 * 1024];
         let mut written = already;
         loop {
-            let n = reader
-                .read(&mut buf)
-                .context("read blob body")?;
+            let n = reader.read(&mut buf).context("read blob body")?;
             if n == 0 {
                 break;
             }
@@ -192,10 +182,8 @@ impl ModeldClient {
         dest: &Path,
         progress: Option<&ProgressCallback>,
     ) -> Result<(u64, String)> {
-        let url = format!(
-            "{}/v1/hf-proxy/{}/resolve/{}/{}",
-            self.base_url, repo_id, revision, filename
-        );
+        let url =
+            format!("{}/v1/hf-proxy/{}/resolve/{}/{}", self.base_url, repo_id, revision, filename);
 
         let req = self.authed(self.agent().get(&url));
         let resp = req.call().map_err(|e| anyhow!("hf proxy request failed: {}", e))?;
@@ -205,14 +193,9 @@ impl ModeldClient {
             anyhow::bail!("server returned {}: {}", status, body);
         }
 
-        let cache_status = resp
-            .header("X-Modeld-Cache")
-            .unwrap_or("unknown")
-            .to_string();
-        let total_len = resp
-            .header("Content-Length")
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+        let cache_status = resp.header("X-Modeld-Cache").unwrap_or("unknown").to_string();
+        let total_len =
+            resp.header("Content-Length").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
 
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -249,9 +232,7 @@ fn read_body(resp: ureq::Response) -> Result<String> {
 
 fn read_body_from(resp: ureq::Response) -> Result<String> {
     let mut buf = String::new();
-    resp.into_reader()
-        .read_to_string(&mut buf)
-        .context("read response body")?;
+    resp.into_reader().read_to_string(&mut buf).context("read response body")?;
     Ok(buf)
 }
 
@@ -322,4 +303,3 @@ mod tests {
         );
     }
 }
-

@@ -21,10 +21,10 @@ $colors = @{
 
 function Write-Status($message, $type = "info") {
     $prefix = switch($type) {
-        "success" { "$($colors.Green)✓$($colors.Reset)" }
-        "error"   { "$($colors.Red)✗$($colors.Reset)" }
-        "warn"    { "$($colors.Yellow)⚠$($colors.Reset)" }
-        "info"    { "$($colors.Cyan)→$($colors.Reset)" }
+        "success" { "$($colors.Green)[OK]$($colors.Reset)" }
+        "error"   { "$($colors.Red)[FAIL]$($colors.Reset)" }
+        "warn"    { "$($colors.Yellow)[WARN]$($colors.Reset)" }
+        "info"    { "$($colors.Cyan)[INFO]$($colors.Reset)" }
     }
     Write-Host "$prefix $message"
 }
@@ -133,7 +133,7 @@ try {
     Write-Host ""
     Write-Host "$($colors.Cyan)生成的文件:$($colors.Reset)"
     Get-ChildItem $dist_dir | ForEach-Object {
-        Write-Host "  • $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
+        Write-Host "  - $($_.Name) ($([math]::Round($_.Length / 1MB, 2)) MB)"
     }
 } catch {
     Write-Status "构建失败: $_" "error"
@@ -170,9 +170,9 @@ Write-Host ""
 
 # 8. 发布到 PyPI
 if ($publish) {
-    Write-Host "$($colors.Yellow)═══════════════════════════════════════════$($colors.Reset)"
+    Write-Host "$($colors.Yellow)===========================================$($colors.Reset)"
     Write-Host "$($colors.Yellow)准备发布到 PyPI$($colors.Reset)"
-    Write-Host "$($colors.Yellow)═══════════════════════════════════════════$($colors.Reset)"
+    Write-Host "$($colors.Yellow)===========================================$($colors.Reset)"
     Write-Host ""
     
     # 检查 .pypirc 配置
@@ -207,7 +207,7 @@ password = pypi-AgEIcHlwaS5vcmc...
     # 显示待发布的包
     Write-Host "$($colors.Cyan)待发布的包:$($colors.Reset)"
     Get-ChildItem $dist_dir -Filter "*.whl" | ForEach-Object {
-        Write-Host "  • $($_.Name)"
+        Write-Host "  - $($_.Name)"
     }
     Write-Host ""
     
@@ -239,9 +239,9 @@ password = pypi-AgEIcHlwaS5vcmc...
         }
     }
 } else {
-    Write-Host "$($colors.Cyan)═══════════════════════════════════════════$($colors.Reset)"
+    Write-Host "$($colors.Cyan)===========================================$($colors.Reset)"
     Write-Host "$($colors.Cyan)构建完成！$($colors.Reset)"
-    Write-Host "$($colors.Cyan)═══════════════════════════════════════════$($colors.Reset)"
+    Write-Host "$($colors.Cyan)===========================================$($colors.Reset)"
     Write-Host ""
     Write-Host "下一步:"
     Write-Host "  1. 本地测试: pip install dist/modeld_hook-*.whl"

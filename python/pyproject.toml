@@ -37,3 +37,4 @@ packages = ["modeld_hook"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["-p", "no:cacheprovider"]

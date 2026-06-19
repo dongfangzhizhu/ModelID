@@ -1,11 +1,11 @@
 //! HTTP proxy server core (Phase 5).
 //!
 //! Routes (see `docs/proxy-api.md`):
-//! - `GET /health`                          → service health (no auth)
-//! - `GET /v1/models`                       → list all CAS models
-//! - `GET /v1/blobs/{blake3_hash}`          → stream a CAS object (Range-supported)
+//! - `GET /health`                          -> service health (no auth)
+//! - `GET /v1/models`                       -> list all CAS models
+//! - `GET /v1/blobs/{blake3_hash}`          -> stream a CAS object (Range-supported)
 //! - `GET /v1/hf-proxy/{org}/{repo}/resolve/{revision}/{file}`
-//!                                           → HuggingFace-compatible proxy
+//!   -> HuggingFace-compatible proxy
 //!
 //! All routes except `/health` pass through the auth + IP middleware.
 //! Uses blocking `tiny_http` with a per-connection thread, matching the rest
@@ -25,7 +25,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 /// Runtime statistics surfaced via `GET /health` and the CLI.
@@ -51,10 +51,10 @@ impl ProxyServer {
         let bind = self.config.bind_addr();
         let server = Server::http(bind.as_str())
             .map_err(|e| anyhow!("Failed to bind proxy server to {}: {}", bind, e))?;
+        let store = self.store_path.display().to_string();
         eprintln!(
-            "modeld proxy listening on {} (store: {})",
-            bind,
-            self.store_path.display()
+            "{}",
+            modeld_core::tf("proxy.listening", &[("bind", &bind), ("store", &store)])
         );
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -81,19 +81,27 @@ impl ProxyServer {
         let cas = Arc::new(CasStore::new(&self.store_path));
         let hf_cache = Arc::new(HfCache::new(&self.store_path));
         let store_for_dl = self.store_path.clone();
+        // Optional HF base URL override (mirror or test mock). Read once at
+        // startup; absent → Downloader defaults to https://huggingface.co.
+        let hf_base = std::env::var("MODELD_HF_BASE").ok();
         let started_at = Instant::now();
 
-        for request in server.incoming_requests() {
-            if shutdown.load(Ordering::SeqCst) {
-                eprintln!("shutdown requested, stopping proxy server");
-                break;
+        while !shutdown.load(Ordering::SeqCst) {
+            let request = match server.recv_timeout(Duration::from_millis(200)) {
+                Ok(Some(request)) => request,
+                Ok(None) => continue,
+                Err(e) => return Err(anyhow!("proxy server receive error: {}", e)),
+            };
+            let mut downloader = Downloader::new(&store_for_dl);
+            if let Some(ref base) = hf_base {
+                downloader = downloader.with_hf_base_url(base);
             }
             let ctx = RequestContext {
                 config: self.config.clone(),
                 db: db.clone(),
                 cas: cas.clone(),
                 hf_cache: hf_cache.clone(),
-                downloader: Downloader::new(&store_for_dl),
+                downloader,
                 started_at,
             };
             if let Err(e) = handle_request(request, &ctx) {
@@ -101,6 +109,7 @@ impl ProxyServer {
             }
         }
 
+        eprintln!("{}", modeld_core::t("proxy.shutdown"));
         Ok(())
     }
 }
@@ -130,7 +139,12 @@ fn handle_request(request: tiny_http::Request, ctx: &RequestContext) -> Result<(
 
     // Auth + IP gate for everything else.
     if !check_ip(&peer, &ctx.config.network) {
-        return respond(request, StatusCode(403), text_content_type(), b"forbidden: ip not allowed");
+        return respond(
+            request,
+            StatusCode(403),
+            text_content_type(),
+            b"forbidden: ip not allowed",
+        );
     }
     let provided_token = bearer_token(&request);
     if !ctx.config.network.allow_anonymous && provided_token.is_none() {
@@ -204,7 +218,11 @@ fn handle_list_models(request: tiny_http::Request, ctx: &RequestContext) -> Resu
     respond(request, StatusCode(200), json_content_type(), body.as_bytes())
 }
 
-fn handle_get_blob(request: tiny_http::Request, ctx: &RequestContext, hash_hex: &str) -> Result<()> {
+fn handle_get_blob(
+    request: tiny_http::Request,
+    ctx: &RequestContext,
+    hash_hex: &str,
+) -> Result<()> {
     let hash = match Blake3Hash::from_hex(hash_hex) {
         Ok(h) => h,
         Err(_) => {
@@ -220,16 +238,18 @@ fn handle_get_blob(request: tiny_http::Request, ctx: &RequestContext, hash_hex: 
     let path = match ctx.cas.get(&hash) {
         Some(p) => p,
         None => {
-            return respond(request, StatusCode(404), text_content_type(), b"not found: blob absent");
+            return respond(
+                request,
+                StatusCode(404),
+                text_content_type(),
+                b"not found: blob absent",
+            );
         }
     };
 
     let total_len = std::fs::metadata(&path)?.len();
-    let range_header = request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Range"))
-        .map(|h| h.value.as_str());
+    let range_header =
+        request.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.as_str());
 
     if let Some((start, end)) = parse_range(range_header, total_len) {
         stream_range(request, &path, start, end, total_len)
@@ -238,14 +258,16 @@ fn handle_get_blob(request: tiny_http::Request, ctx: &RequestContext, hash_hex: 
     }
 }
 
-fn handle_hf_proxy(request: tiny_http::Request, ctx: &RequestContext, parts: &HfProxyParts) -> Result<()> {
+fn handle_hf_proxy(
+    request: tiny_http::Request,
+    ctx: &RequestContext,
+    parts: &HfProxyParts,
+) -> Result<()> {
     let repo_id = format!("{}/{}", parts.org, parts.repo);
 
     // Fast path: the fake HF cache already has this revision/file.
     if ctx.hf_cache.check_cache(&repo_id, &parts.revision, &parts.file) {
-        let snapshot = ctx
-            .hf_cache
-            .snapshot_file_path(&repo_id, &parts.revision, &parts.file);
+        let snapshot = ctx.hf_cache.snapshot_file_path(&repo_id, &parts.revision, &parts.file);
         if snapshot.exists() {
             return stream_file_with_headers(request, &snapshot, "hit", None);
         }
@@ -254,10 +276,13 @@ fn handle_hf_proxy(request: tiny_http::Request, ctx: &RequestContext, parts: &Hf
     // Cache miss → pull through modeld (real HuggingFace). The Downloader
     // stores into CAS + fake HF cache, so subsequent requests hit above.
     let mut db = ctx.db.lock().expect("db lock poisoned");
-    match ctx
-        .downloader
-        .download_hf_file(&mut db, &repo_id, &parts.file, Some(&parts.revision), None)
-    {
+    match ctx.downloader.download_hf_file(
+        &mut db,
+        &repo_id,
+        &parts.file,
+        Some(&parts.revision),
+        None,
+    ) {
         Ok(result) => {
             drop(db);
             let blake3 = result.blake3_hash.as_hex().to_string();
@@ -284,9 +309,7 @@ fn respond(
     let response = Response::empty(status)
         .with_header(content_type)
         .with_data(Cursor::new(Vec::from(body)), Some(body.len()));
-    request
-        .respond(response)
-        .map_err(|e| anyhow!("failed to write response: {}", e))
+    request.respond(response).map_err(|e| anyhow!("failed to write response: {}", e))
 }
 
 fn stream_full(request: tiny_http::Request, path: &std::path::Path, total_len: u64) -> Result<()> {
@@ -299,9 +322,7 @@ fn stream_full(request: tiny_http::Request, path: &std::path::Path, total_len: u
         .with_header(header("Content-Length", &total_len.to_string()))
         .with_header(header("Accept-Ranges", "bytes"))
         .with_data(Cursor::new(all), Some(total_len as usize));
-    request
-        .respond(response)
-        .map_err(|e| anyhow!("stream full failed: {}", e))
+    request.respond(response).map_err(|e| anyhow!("stream full failed: {}", e))
 }
 
 fn stream_range(
@@ -324,9 +345,7 @@ fn stream_range(
         .with_header(header("Content-Range", &content_range))
         .with_header(header("Accept-Ranges", "bytes"))
         .with_data(Cursor::new(buf), Some(length as usize));
-    request
-        .respond(response)
-        .map_err(|e| anyhow!("stream range failed: {}", e))
+    request.respond(response).map_err(|e| anyhow!("stream range failed: {}", e))
 }
 
 fn stream_file_with_headers(
@@ -349,9 +368,7 @@ fn stream_file_with_headers(
         response = response.with_header(header("X-Modeld-Blake3", h));
     }
     let response = response.with_data(Cursor::new(data), Some(len as usize));
-    request
-        .respond(response)
-        .map_err(|e| anyhow!("stream hf failed: {}", e))
+    request.respond(response).map_err(|e| anyhow!("stream hf failed: {}", e))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,12 +421,7 @@ fn match_hf_proxy_url(url: &str) -> Option<HfProxyParts> {
     if org.is_empty() || repo.is_empty() || revision.is_empty() || file.is_empty() {
         return None;
     }
-    Some(HfProxyParts {
-        org,
-        repo,
-        revision,
-        file,
-    })
+    Some(HfProxyParts { org, repo, revision, file })
 }
 
 fn open_db(store_path: &std::path::Path) -> Result<Database> {
@@ -422,19 +434,11 @@ fn bearer_token(request: &tiny_http::Request) -> Option<String> {
         .headers()
         .iter()
         .find(|h| h.field.equiv("Authorization"))
-        .and_then(|h| {
-            h.value
-                .as_str()
-                .strip_prefix("Bearer ")
-                .map(|s| s.to_string())
-        })
+        .and_then(|h| h.value.as_str().strip_prefix("Bearer ").map(|s| s.to_string()))
 }
 
 fn peer_ip(request: &tiny_http::Request) -> String {
-    request
-        .remote_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_default()
+    request.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default()
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -475,10 +479,9 @@ mod tests {
 
     #[test]
     fn test_match_hf_proxy_url_valid() {
-        let parts = match_hf_proxy_url(
-            "/v1/hf-proxy/stabilityai/sdxl-base/resolve/main/model.safetensors",
-        )
-        .unwrap();
+        let parts =
+            match_hf_proxy_url("/v1/hf-proxy/stabilityai/sdxl-base/resolve/main/model.safetensors")
+                .unwrap();
         assert_eq!(parts.org, "stabilityai");
         assert_eq!(parts.repo, "sdxl-base");
         assert_eq!(parts.revision, "main");

@@ -254,12 +254,10 @@ fn test_e2e_dedup_workflow() {
 
     for file in &results {
         cas.store(&file.path, &file.hash).unwrap();
-        db.insert_or_update_model(&file.hash, file.size as i64, None, None, None, None)
-            .unwrap();
+        db.insert_or_update_model(&file.hash, file.size as i64, None, None, None, None).unwrap();
         let path_str = file.path.to_string_lossy().to_string();
         if db.get_alias_by_path(&path_str).unwrap().is_none() {
-            db.insert_alias(&file.hash, &path_str, Frontend::User, AliasType::Original)
-                .unwrap();
+            db.insert_alias(&file.hash, &path_str, Frontend::User, AliasType::Original).unwrap();
         }
     }
 
@@ -277,19 +275,12 @@ fn test_e2e_dedup_workflow() {
     assert_eq!(savings, content.len() as u64, "Savings should equal one copy size");
 
     // Execute dedup in dry-run first
-    let dry_result = engine
-        .execute_dedup_group(&groups[0], DedupMode::DryRun)
-        .unwrap();
+    let dry_result = engine.execute_dedup_group(&groups[0], DedupMode::DryRun).unwrap();
     assert_eq!(dry_result.links_created.len(), 0, "Dry run should not create links");
 
     // Execute actual dedup
-    let result = engine
-        .execute_dedup_group(&groups[0], DedupMode::Auto)
-        .unwrap();
-    assert!(
-        !result.links_created.is_empty(),
-        "Should have created at least one link"
-    );
+    let result = engine.execute_dedup_group(&groups[0], DedupMode::Auto).unwrap();
+    assert!(!result.links_created.is_empty(), "Should have created at least one link");
 
     // Verify CAS file exists
     let cas_path = engine.cas_path_for_hash(&groups[0].hash);
@@ -375,8 +366,7 @@ fn test_crash_recovery_copied() {
 
     // Create database with 'copied' WAL transaction
     let mut db = Database::open(&db_path).unwrap();
-    db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None)
-        .unwrap();
+    db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None).unwrap();
     db.insert_wal_transaction(
         "crash-recovery-copied-tx-001",
         "dedup",
@@ -422,9 +412,8 @@ fn test_quarantine_integration() {
     ];
 
     // Quarantine the file
-    let quarantine_path = qm
-        .quarantine(&model_file, fake_hash, "replaced by dedup", references.clone())
-        .unwrap();
+    let quarantine_path =
+        qm.quarantine(&model_file, fake_hash, "replaced by dedup", references.clone()).unwrap();
 
     // Original should be gone
     assert!(!model_file.exists());
@@ -474,8 +463,7 @@ fn test_dedup_engine_finds_duplicates_via_aliases() {
     let hash = modeld_core::hash_file(temp_file.path()).unwrap();
 
     // Insert model
-    db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None)
-        .unwrap();
+    db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None).unwrap();
 
     // Create real temp files for the aliases to point to
     let alias_file1 = test_dir.path().join("alias1.safetensors");
@@ -484,20 +472,10 @@ fn test_dedup_engine_finds_duplicates_via_aliases() {
     fs::write(&alias_file2, content).unwrap();
 
     // Insert two aliases (simulating two copies found during scan)
-    db.insert_alias(
-        &hash,
-        &alias_file1.to_string_lossy(),
-        Frontend::User,
-        AliasType::Original,
-    )
-    .unwrap();
-    db.insert_alias(
-        &hash,
-        &alias_file2.to_string_lossy(),
-        Frontend::ComfyUI,
-        AliasType::Hardlink,
-    )
-    .unwrap();
+    db.insert_alias(&hash, &alias_file1.to_string_lossy(), Frontend::User, AliasType::Original)
+        .unwrap();
+    db.insert_alias(&hash, &alias_file2.to_string_lossy(), Frontend::ComfyUI, AliasType::Hardlink)
+        .unwrap();
 
     // Engine should find this as a duplicate group
     let db2 = Database::open(&db_path).unwrap();

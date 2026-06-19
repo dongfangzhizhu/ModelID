@@ -49,26 +49,17 @@ pub struct QuarantineManager {
 impl QuarantineManager {
     /// Create a new QuarantineManager
     pub fn new(store_path: &Path) -> Self {
-        Self {
-            quarantine_dir: store_path.join("quarantine"),
-            ttl_days: 30,
-        }
+        Self { quarantine_dir: store_path.join("quarantine"), ttl_days: 30 }
     }
 
     pub fn with_ttl(store_path: &Path, ttl_days: i64) -> Self {
-        Self {
-            quarantine_dir: store_path.join("quarantine"),
-            ttl_days,
-        }
+        Self { quarantine_dir: store_path.join("quarantine"), ttl_days }
     }
 
     /// Initialize the quarantine directory
     pub fn init(&self) -> Result<()> {
         std::fs::create_dir_all(&self.quarantine_dir).with_context(|| {
-            format!(
-                "Failed to create quarantine directory: {}",
-                self.quarantine_dir.display()
-            )
+            format!("Failed to create quarantine directory: {}", self.quarantine_dir.display())
         })?;
         Ok(())
     }
@@ -115,7 +106,7 @@ impl QuarantineManager {
 
         // Move file to quarantine
         // Try rename first (atomic), fall back to copy+delete
-        if let Err(_) = std::fs::rename(file_path, &quarantine_path) {
+        if std::fs::rename(file_path, &quarantine_path).is_err() {
             std::fs::copy(file_path, &quarantine_path).with_context(|| {
                 format!(
                     "Failed to copy {} to quarantine {}",
@@ -154,19 +145,17 @@ impl QuarantineManager {
             }
 
             // Read corresponding metadata
-            let meta_path = path.with_extension("").with_extension("").with_file_name(
-                format!("{}.meta", path.file_name().unwrap().to_string_lossy()),
-            );
+            let meta_path = path
+                .with_extension("")
+                .with_extension("")
+                .with_file_name(format!("{}.meta", path.file_name().unwrap().to_string_lossy()));
 
             if meta_path.exists() {
                 if let Ok(meta_content) = std::fs::read_to_string(&meta_path) {
                     if let Ok(meta) = serde_json::from_str::<QuarantineMeta>(&meta_content) {
                         let expiry = meta.quarantined_at + Duration::days(self.ttl_days);
-                        let days_remaining = if now < expiry {
-                            Some((expiry - now).num_days())
-                        } else {
-                            None
-                        };
+                        let days_remaining =
+                            if now < expiry { Some((expiry - now).num_days()) } else { None };
 
                         entries.push(QuarantineEntry {
                             quarantine_path: path,
@@ -179,11 +168,7 @@ impl QuarantineManager {
         }
 
         // Sort by quarantine date (newest first)
-        entries.sort_by(|a, b| {
-            b.meta
-                .quarantined_at
-                .cmp(&a.meta.quarantined_at)
-        });
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.meta.quarantined_at));
 
         Ok(entries)
     }
@@ -207,9 +192,8 @@ impl QuarantineManager {
 
         // Ensure parent directory exists
         if let Some(parent) = original_path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create directory: {}", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
 
         // Check if original location is already occupied
@@ -221,7 +205,7 @@ impl QuarantineManager {
         }
 
         // Move file back to original location
-        if let Err(_) = std::fs::rename(quarantine_path, &original_path) {
+        if std::fs::rename(quarantine_path, &original_path).is_err() {
             std::fs::copy(quarantine_path, &original_path)?;
             std::fs::remove_file(quarantine_path)?;
         }
@@ -237,10 +221,7 @@ impl QuarantineManager {
         let meta_path = self.meta_path_for(quarantine_path);
 
         std::fs::remove_file(quarantine_path).with_context(|| {
-            format!(
-                "Failed to remove quarantined file: {}",
-                quarantine_path.display()
-            )
+            format!("Failed to remove quarantined file: {}", quarantine_path.display())
         })?;
 
         if meta_path.exists() {
@@ -261,10 +242,14 @@ impl QuarantineManager {
             if entry.days_remaining.is_none() {
                 // Expired - delete permanently
                 if let Err(e) = self.delete_permanent(&entry.quarantine_path) {
+                    let p = entry.quarantine_path.display().to_string();
+                    let es = format!("{:#}", e);
                     eprintln!(
-                        "Warning: failed to clean up expired quarantine entry {}: {}",
-                        entry.quarantine_path.display(),
-                        e
+                        "{}",
+                        crate::i18n::tf(
+                            "warn.quarantine_cleanup_failed",
+                            &[("path", &p), ("error", &es)],
+                        )
                     );
                 } else {
                     cleaned += 1;
@@ -277,11 +262,7 @@ impl QuarantineManager {
 
     /// Get the metadata path for a quarantined file
     fn meta_path_for(&self, quarantine_path: &Path) -> PathBuf {
-        let filename = quarantine_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let filename = quarantine_path.file_name().unwrap().to_string_lossy().to_string();
         self.quarantine_dir.join(format!("{}.meta", filename))
     }
 
@@ -291,11 +272,7 @@ impl QuarantineManager {
         let total_size: u64 = entries.iter().map(|e| e.meta.size_bytes).sum();
         let expired_count = entries.iter().filter(|e| e.days_remaining.is_none()).count();
 
-        Ok(QuarantineStats {
-            total_files: entries.len(),
-            total_size,
-            expired_files: expired_count,
-        })
+        Ok(QuarantineStats { total_files: entries.len(), total_size, expired_files: expired_count })
     }
 }
 
@@ -333,9 +310,8 @@ mod tests {
         fs::write(&test_file, "fake model content").unwrap();
 
         let fake_hash = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
-        let quarantine_path = qm
-            .quarantine(&test_file, fake_hash, "duplicate detected", vec![])
-            .unwrap();
+        let quarantine_path =
+            qm.quarantine(&test_file, fake_hash, "duplicate detected", vec![]).unwrap();
 
         // Original should be gone
         assert!(!test_file.exists(), "Original file should be removed");
@@ -343,15 +319,8 @@ mod tests {
         assert!(quarantine_path.exists(), "Quarantine file should exist");
 
         // Metadata should exist
-        let meta_filename = quarantine_path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        let meta_path = temp_dir
-            .path()
-            .join("quarantine")
-            .join(format!("{}.meta", meta_filename));
+        let meta_filename = quarantine_path.file_name().unwrap().to_string_lossy().to_string();
+        let meta_path = temp_dir.path().join("quarantine").join(format!("{}.meta", meta_filename));
         assert!(meta_path.exists(), "Metadata file should exist");
 
         // Read and verify metadata
@@ -398,9 +367,7 @@ mod tests {
         fs::write(&test_file, content).unwrap();
 
         let fake_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-        let quarantine_path = qm
-            .quarantine(&test_file, fake_hash, "test", vec![])
-            .unwrap();
+        let quarantine_path = qm.quarantine(&test_file, fake_hash, "test", vec![]).unwrap();
 
         // Restore
         let restored_path = qm.restore(&quarantine_path).unwrap();
@@ -469,9 +436,7 @@ mod tests {
         ];
 
         let hash = "2222222222222222222222222222222222222222222222222222222222222222";
-        let quarantine_path = qm
-            .quarantine(&test_file, hash, "dedup", references.clone())
-            .unwrap();
+        let quarantine_path = qm.quarantine(&test_file, hash, "dedup", references.clone()).unwrap();
 
         // Read back metadata
         let entries = qm.list().unwrap();

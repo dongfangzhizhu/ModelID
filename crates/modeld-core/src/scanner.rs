@@ -30,9 +30,7 @@ pub struct Scanner {
 impl Scanner {
     /// Create a new scanner with default extensions
     pub fn new() -> Self {
-        Self {
-            extensions: MODEL_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
-        }
+        Self { extensions: MODEL_EXTENSIONS.iter().map(|s| s.to_string()).collect() }
     }
 
     /// Set custom extensions to scan for
@@ -53,7 +51,8 @@ impl Scanner {
             .into_iter()
             .filter_entry(|e| !self.is_excluded(e.path()))
         {
-            let entry = entry.with_context(|| format!("Failed to read entry in {}", root.display()))?;
+            let entry =
+                entry.with_context(|| format!("Failed to read entry in {}", root.display()))?;
 
             // Skip directories
             if entry.file_type().is_dir() {
@@ -73,14 +72,10 @@ impl Scanner {
 
             // Compute hash
             progress_callback(path, size);
-            let hash = hash_file(path)
-                .with_context(|| format!("Failed to hash {}", path.display()))?;
+            let hash =
+                hash_file(path).with_context(|| format!("Failed to hash {}", path.display()))?;
 
-            results.push(ScannedFile {
-                path: path.to_path_buf(),
-                size,
-                hash,
-            });
+            results.push(ScannedFile { path: path.to_path_buf(), size, hash });
         }
 
         Ok(results)
@@ -97,11 +92,12 @@ impl Scanner {
                 }
                 // Exclude hidden directories that start with dot but are actual directory names
                 // (not .tmp* which is used by tempfile crate)
-                if name.starts_with('.') 
-                    && !name.starts_with(".tmp") 
-                    && name != "." 
-                    && name != ".." 
-                    && name != ".git" // Keep .git for now in case
+                if name.starts_with('.')
+                    && !name.starts_with(".tmp")
+                    && name != "."
+                    && name != ".."
+                    && name != ".git"
+                // Keep .git for now in case
                 {
                     return true;
                 }

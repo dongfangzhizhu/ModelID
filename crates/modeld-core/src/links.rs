@@ -29,10 +29,7 @@ impl LinkCapability {
         let has_symlink_privilege = detect_symlink_privilege();
         let primary_filesystem = detect_primary_filesystem();
 
-        Self {
-            has_symlink_privilege,
-            primary_filesystem,
-        }
+        Self { has_symlink_privilege, primary_filesystem }
     }
 }
 

@@ -34,6 +34,12 @@ modeld scan ~/models/
 
 # Check status
 modeld status
+modeld stats
+
+# Inspect indexed content
+modeld list
+modeld info <blake3-hash>
+modeld dupes --min-size 100MB
 
 # Hash a file
 modeld hash model.safetensors

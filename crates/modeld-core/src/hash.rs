@@ -92,12 +92,10 @@ fn hash_file_small(path: &Path) -> Result<Blake3Hash> {
 
 /// Hash large file (≥10MB) using memory-mapped parallel strategy
 fn hash_file_large(path: &Path) -> Result<Blake3Hash> {
-    let file =
-        File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
 
-    let mmap = unsafe {
-        Mmap::map(&file).with_context(|| format!("Failed to mmap {}", path.display()))?
-    };
+    let mmap =
+        unsafe { Mmap::map(&file).with_context(|| format!("Failed to mmap {}", path.display()))? };
 
     // For very large files, use parallel chunking
     if mmap.len() > CHUNK_SIZE * 2 {

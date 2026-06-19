@@ -47,11 +47,7 @@ impl MdnsAnnouncer {
 
     /// Create an announcer for the given port and TXT records.
     pub fn new(port: u16, txt: HashMap<String, String>) -> Self {
-        Self {
-            port,
-            txt,
-            started: false,
-        }
+        Self { port, txt, started: false }
     }
 
     pub fn port(&self) -> u16 {
@@ -80,19 +76,18 @@ impl MdnsAnnouncer {
             return;
         }
         self.started = true;
-        let txt_str = self
-            .txt
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let txt_str =
+            self.txt.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" ");
+        let stype = SERVICE_TYPE;
+        let port_str = self.port.to_string();
         eprintln!(
-            "modeld mDNS: service modeld.{} on :{} [TXT: {}]",
-            SERVICE_TYPE, self.port, txt_str
+            "{}",
+            modeld_core::i18n::tf(
+                "warn.mdns_announce",
+                &[("stype", &stype), ("port", &port_str), ("txt", &txt_str)],
+            )
         );
-        eprintln!(
-            "  (publication via host mDNS daemon: avahi-publish / dns-sd / Bonjour)"
-        );
+        eprintln!("{}", modeld_core::i18n::t("warn.mdns_announce_hint"));
     }
 }
 
@@ -103,7 +98,7 @@ impl MdnsAnnouncer {
 /// unavailable or no services respond.
 pub fn discover(timeout_secs: u64) -> Vec<DiscoveredServer> {
     // Cap the query interval so a short timeout still fires at least one query.
-    let query_interval = Duration::from_secs(timeout_secs.max(1).min(15));
+    let query_interval = Duration::from_secs(timeout_secs.clamp(1, 15));
     let deadline = Duration::from_secs(timeout_secs.max(1));
 
     let stream = match mdns::discover::all(SERVICE_TYPE, query_interval) {
@@ -127,16 +122,9 @@ pub fn discover(timeout_secs: u64) -> Vec<DiscoveredServer> {
                             txt.insert(k.to_string(), v.to_string());
                         }
                     }
-                    let server = DiscoveredServer {
-                        address: addr.to_string(),
-                        port,
-                        txt,
-                    };
+                    let server = DiscoveredServer { address: addr.to_string(), port, txt };
                     // dedupe by (address, port)
-                    if !found
-                        .iter()
-                        .any(|s| s.address == server.address && s.port == server.port)
-                    {
+                    if !found.iter().any(|s| s.address == server.address && s.port == server.port) {
                         found.push(server);
                     }
                 }

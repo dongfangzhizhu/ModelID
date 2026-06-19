@@ -66,11 +66,7 @@ pub struct GcEngine<'a> {
 
 impl<'a> GcEngine<'a> {
     pub fn new(db: &'a Database, store_path: &std::path::Path) -> Self {
-        Self {
-            db,
-            cas: CasStore::new(store_path),
-            quarantine: QuarantineManager::new(store_path),
-        }
+        Self { db, cas: CasStore::new(store_path), quarantine: QuarantineManager::new(store_path) }
     }
 
     /// List all GC candidates (models with their protection status).
@@ -127,9 +123,7 @@ impl<'a> GcEngine<'a> {
         let entries = self.quarantine.list().unwrap_or_default();
         let expired: Vec<_> = entries.iter().filter(|e| e.days_remaining.is_none()).collect();
         preview.expired_quarantine_count = expired.len();
-        preview.expired_quarantine_bytes = expired.iter()
-            .map(|e| e.meta.size_bytes as i64)
-            .sum();
+        preview.expired_quarantine_bytes = expired.iter().map(|e| e.meta.size_bytes as i64).sum();
 
         Ok(preview)
     }
@@ -168,7 +162,14 @@ impl<'a> GcEngine<'a> {
                             result.bytes_recovered += c.model.size_bytes;
                         }
                         Err(e) => {
-                            eprintln!("Warning: Failed to quarantine {}: {}", &hash_str[..16], e);
+                            let es = format!("{:#}", e);
+                            eprintln!(
+                                "{}",
+                                crate::i18n::tf(
+                                    "warn.gc_quarantine_failed",
+                                    &[("hash", &&hash_str[..16]), ("error", &es)],
+                                )
+                            );
                         }
                     }
                 }
@@ -303,10 +304,8 @@ mod tests {
         let gc = GcEngine::new(&db, tmp.path());
         let candidates = gc.candidates().unwrap();
 
-        let candidate = candidates
-            .iter()
-            .find(|c| c.model.blake3_hash.as_hex() == hash.as_hex())
-            .unwrap();
+        let candidate =
+            candidates.iter().find(|c| c.model.blake3_hash.as_hex() == hash.as_hex()).unwrap();
         assert!(candidate.is_hard_protected());
         assert_eq!(candidate.workflow_ref_count, 1);
     }

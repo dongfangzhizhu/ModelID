@@ -20,16 +20,16 @@ write_status() {
     
     case "$type" in
         success)
-            echo -e "${GREEN}✓${NC} $message"
+            echo -e "${GREEN}[OK]${NC} $message"
             ;;
         error)
-            echo -e "${RED}✗${NC} $message"
+            echo -e "${RED}[FAIL]${NC} $message"
             ;;
         warn)
-            echo -e "${YELLOW}⚠${NC} $message"
+            echo -e "${YELLOW}[WARN]${NC} $message"
             ;;
         info)
-            echo -e "${CYAN}→${NC} $message"
+            echo -e "${CYAN}[INFO]${NC} $message"
             ;;
     esac
 }
@@ -145,7 +145,7 @@ write_status "成功生成 $WHEEL_COUNT 个 wheel 包" "success"
 
 echo ""
 echo -e "${CYAN}生成的文件:${NC}"
-ls -lh dist/ | awk 'NR>1 {printf "  • %s (%s)\n", $9, $5}'
+ls -lh dist/ | awk 'NR>1 {printf "  - %s (%s)\n", $9, $5}'
 echo ""
 
 # 验证包
@@ -164,9 +164,9 @@ echo ""
 
 # 发布到 PyPI
 if [ "$PUBLISH" = true ]; then
-    echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}===========================================${NC}"
     echo -e "${YELLOW}准备发布到 PyPI${NC}"
-    echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}===========================================${NC}"
     echo ""
     
     # 检查 .pypirc 配置
@@ -201,7 +201,7 @@ EOF
     
     # 显示待发布的包
     echo -e "${CYAN}待发布的包:${NC}"
-    ls -1 dist/*.whl | xargs -I {} basename {} | sed 's/^/  • /'
+    ls -1 dist/*.whl | xargs -I {} basename {} | sed 's/^/  - /'
     echo ""
     
     if [ "$DRY_RUN" = true ]; then
@@ -232,9 +232,9 @@ EOF
         fi
     fi
 else
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
+    echo -e "${CYAN}===========================================${NC}"
     echo -e "${CYAN}构建完成！${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════${NC}"
+    echo -e "${CYAN}===========================================${NC}"
     echo ""
     echo "下一步:"
     echo "  1. 本地测试: pip install dist/modeld_hook-*.whl"

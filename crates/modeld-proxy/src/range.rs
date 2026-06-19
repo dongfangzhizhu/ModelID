@@ -30,7 +30,7 @@ pub fn parse_range(header: Option<&str>, total_len: u64) -> Option<(u64, u64)> {
                 if n == 0 {
                     return None;
                 }
-                let start = total_len.checked_sub(n).unwrap_or(0);
+                let start = total_len.saturating_sub(n);
                 (start, total_len.saturating_sub(1))
             }
             // open-ended: bytes=N-

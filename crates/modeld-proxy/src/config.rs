@@ -77,11 +77,7 @@ impl Default for ProxyConfig {
 
 impl Default for NetworkConfig {
     fn default() -> Self {
-        Self {
-            allow_anonymous: true,
-            allowed_ips: Vec::new(),
-            denied_ips: Vec::new(),
-        }
+        Self { allow_anonymous: true, allowed_ips: Vec::new(), denied_ips: Vec::new() }
     }
 }
 
@@ -245,11 +241,7 @@ denied_ips = ["10.0.0.5"]
     fn test_other_tables_ignored() {
         // modeld.toml may have unrelated tables; [proxy] still parses.
         let mut f = NamedTempFile::new().unwrap();
-        writeln!(
-            f,
-            "[scan]\nextensions = ['.safetensors']\n\n[proxy]\nport = 8234\n"
-        )
-        .unwrap();
+        writeln!(f, "[scan]\nextensions = ['.safetensors']\n\n[proxy]\nport = 8234\n").unwrap();
         f.flush().unwrap();
 
         let cfg = ProxyConfig::load(f.path()).unwrap();
@@ -275,7 +267,13 @@ denied_ips = ["10.0.0.5"]
 
     #[test]
     fn test_bind_addr() {
-        let cfg = ProxyConfig::from_cli(Some(8234), Some("0.0.0.0".to_string()), PathBuf::from("."), None, true);
+        let cfg = ProxyConfig::from_cli(
+            Some(8234),
+            Some("0.0.0.0".to_string()),
+            PathBuf::from("."),
+            None,
+            true,
+        );
         assert_eq!(cfg.bind_addr(), "0.0.0.0:8234");
     }
 }

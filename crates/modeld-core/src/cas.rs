@@ -19,9 +19,7 @@ pub struct CasStore {
 impl CasStore {
     /// Create a new CAS store instance
     pub fn new(root: impl AsRef<Path>) -> Self {
-        Self {
-            root: root.as_ref().to_path_buf(),
-        }
+        Self { root: root.as_ref().to_path_buf() }
     }
 
     /// Initialize the CAS store directory structure
@@ -50,9 +48,7 @@ impl CasStore {
     /// Construct the path for a given hash
     pub fn path_for_hash(&self, hash: &Blake3Hash) -> PathBuf {
         let prefix = hash.prefix();
-        self.cas_root()
-            .join(prefix)
-            .join(hash.as_hex())
+        self.cas_root().join(prefix).join(hash.as_hex())
     }
 
     /// Check if a hash exists in the CAS
@@ -81,11 +77,7 @@ impl CasStore {
 
         // Copy file to CAS
         fs::copy(source, &dest).with_context(|| {
-            format!(
-                "Failed to copy {} to {}",
-                source.display(),
-                dest.display()
-            )
+            format!("Failed to copy {} to {}", source.display(), dest.display())
         })?;
 
         // Make file read-only (immutability enforcement)
@@ -159,7 +151,9 @@ mod tests {
         .unwrap();
 
         let path = store.path_for_hash(&hash);
-        let expected = temp_dir.path().join("cas/blake3/ab/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        let expected = temp_dir
+            .path()
+            .join("cas/blake3/ab/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
 
         assert_eq!(path, expected);
     }

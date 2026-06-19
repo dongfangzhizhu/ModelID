@@ -111,12 +111,7 @@ pub fn parse_workflow(path: &Path) -> Result<ParsedWorkflow> {
 
     let (resolved, unresolved): (Vec<_>, Vec<_>) = refs.into_iter().partition(|r| r.is_known);
 
-    Ok(ParsedWorkflow {
-        path: path.to_path_buf(),
-        title,
-        refs: resolved,
-        unresolved,
-    })
+    Ok(ParsedWorkflow { path: path.to_path_buf(), title, refs: resolved, unresolved })
 }
 
 fn extract_title(json: &Value) -> Option<String> {
@@ -185,25 +180,22 @@ fn extract_refs_from_node(node: &Value, refs: &mut Vec<ModelRef>) {
                 model_name: normalize_model_name(&name),
                 is_known: true,
             });
-            return;
         }
     }
     // Unknown node type — don't add, heuristic extraction would be too noisy
 }
 
 fn extract_from_inputs_array(node: &Value, input_key: &str) -> Option<String> {
-    node.get("inputs")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|item| {
-                if let Some(sub) = item.as_array() {
-                    if sub.first().and_then(|k| k.as_str()) == Some(input_key) {
-                        return sub.get(2).and_then(|v| v.as_str()).map(String::from);
-                    }
+    node.get("inputs").and_then(|v| v.as_array()).and_then(|arr| {
+        arr.iter().find_map(|item| {
+            if let Some(sub) = item.as_array() {
+                if sub.first().and_then(|k| k.as_str()) == Some(input_key) {
+                    return sub.get(2).and_then(|v| v.as_str()).map(String::from);
                 }
-                None
-            })
+            }
+            None
         })
+    })
 }
 
 fn extract_from_inputs_object(node: &Value, input_key: &str) -> Option<String> {
@@ -215,33 +207,23 @@ fn extract_from_inputs_object(node: &Value, input_key: &str) -> Option<String> {
 }
 
 fn extract_first_model_from_widgets(node: &Value) -> Option<String> {
-    node.get("widgets_values")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|v| {
-                v.as_str().and_then(|s| {
-                    let s = s.trim();
-                    if looks_like_model_filename(s) {
-                        Some(s.to_string())
-                    } else {
-                        None
-                    }
-                })
+    node.get("widgets_values").and_then(|v| v.as_array()).and_then(|arr| {
+        arr.iter().find_map(|v| {
+            v.as_str().and_then(|s| {
+                let s = s.trim();
+                if looks_like_model_filename(s) {
+                    Some(s.to_string())
+                } else {
+                    None
+                }
             })
         })
+    })
 }
 
 /// Heuristic: does this string look like a model filename?
 fn looks_like_model_filename(s: &str) -> bool {
-    const EXTS: &[&str] = &[
-        ".safetensors",
-        ".ckpt",
-        ".pt",
-        ".pth",
-        ".gguf",
-        ".bin",
-        ".pkl",
-    ];
+    const EXTS: &[&str] = &[".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin", ".pkl"];
     let lower = s.to_lowercase();
     EXTS.iter().any(|ext| lower.ends_with(ext))
 }
@@ -299,15 +281,9 @@ pub fn index_workflow(
     let path_str = path.to_string_lossy().to_string();
 
     // Compute file hash for change detection
-    let file_hash = crate::hash::hash_file(path)
-        .ok()
-        .map(|h| h.as_hex().to_string());
+    let file_hash = crate::hash::hash_file(path).ok().map(|h| h.as_hex().to_string());
 
-    let wf_id = db.upsert_workflow(
-        &path_str,
-        file_hash.as_deref(),
-        parsed.title.as_deref(),
-    )?;
+    let wf_id = db.upsert_workflow(&path_str, file_hash.as_deref(), parsed.title.as_deref())?;
 
     // Clear old refs and re-insert
     db.clear_workflow_refs(wf_id)?;
@@ -352,19 +328,17 @@ fn resolve_model_ref(
     }
 
     // Try basename match (strip subdir prefix)
-    let basename = model_name
-        .rsplit('/')
-        .next()
-        .unwrap_or(model_name);
+    let basename = model_name.rsplit('/').next().unwrap_or(model_name);
     if let Some(hash) = lookup.get(basename) {
         return (Some(hash.as_hex().to_string()), None, true);
     }
 
     // Try case-insensitive basename match
     let lower = basename.to_lowercase();
-    if let Some((_, hash)) = lookup.iter().find(|(k, _)| {
-        k.rsplit('/').next().map(|b| b.to_lowercase()) == Some(lower.clone())
-    }) {
+    if let Some((_, hash)) = lookup
+        .iter()
+        .find(|(k, _)| k.rsplit('/').next().map(|b| b.to_lowercase()) == Some(lower.clone()))
+    {
         return (Some(hash.as_hex().to_string()), None, true);
     }
 
@@ -514,7 +488,10 @@ mod tests {
 
     #[test]
     fn test_normalize_model_name() {
-        assert_eq!(normalize_model_name("models\\loras\\my_lora.safetensors"), "models/loras/my_lora.safetensors");
+        assert_eq!(
+            normalize_model_name("models\\loras\\my_lora.safetensors"),
+            "models/loras/my_lora.safetensors"
+        );
         assert_eq!(normalize_model_name("  checkpoint.safetensors  "), "checkpoint.safetensors");
     }
 
@@ -582,14 +559,8 @@ mod tests {
         // insert_or_update_model(hash, size, format, arch, category, base_model)
         // format = file extension/type like "safetensors"
         // To index by filename, we store it in format field
-        db.insert_or_update_model(
-            &hash,
-            1234,
-            Some("v1-5-pruned.safetensors"),
-            None,
-            None,
-            None,
-        ).unwrap();
+        db.insert_or_update_model(&hash, 1234, Some("v1-5-pruned.safetensors"), None, None, None)
+            .unwrap();
 
         let lookup = build_model_lookup(&db).unwrap();
         assert!(lookup.contains_key("v1-5-pruned.safetensors"));
@@ -606,15 +577,19 @@ mod tests {
         // Insert two models — format field stores the filename for lookup
         let hash1 = Blake3Hash::from_hex(&"a".repeat(64)).unwrap();
         let hash2 = Blake3Hash::from_hex(&"b".repeat(64)).unwrap();
-        db.insert_or_update_model(&hash1, 100, Some("model1.safetensors"), None, None, None).unwrap();
-        db.insert_or_update_model(&hash2, 200, Some("model2.safetensors"), None, None, None).unwrap();
+        db.insert_or_update_model(&hash1, 100, Some("model1.safetensors"), None, None, None)
+            .unwrap();
+        db.insert_or_update_model(&hash2, 200, Some("model2.safetensors"), None, None, None)
+            .unwrap();
 
         // Index a workflow that references only model1
-        let workflow_file = write_workflow(r#"{"nodes":[{
+        let workflow_file = write_workflow(
+            r#"{"nodes":[{
             "type":"CheckpointLoaderSimple",
             "inputs":{"ckpt_name":"model1.safetensors"},
             "widgets_values":[]
-        }]}"#);
+        }]}"#,
+        );
 
         let mut lookup = HashMap::new();
         lookup.insert("model1.safetensors".to_string(), hash1.clone());

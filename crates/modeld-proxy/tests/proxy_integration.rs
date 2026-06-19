@@ -62,12 +62,7 @@ impl TestProxy {
         // Give the listener a moment to be ready.
         thread::sleep(std::time::Duration::from_millis(100));
 
-        Self {
-            url,
-            _store: store,
-            _shutdown: shutdown,
-            store_path,
-        }
+        Self { url, _store: store, _shutdown: shutdown, store_path }
     }
 
     fn client(&self) -> ModeldClient {
@@ -86,15 +81,7 @@ fn seed_blob(store_path: &std::path::Path, contents: &[u8]) -> (String, u64) {
     cas.store(&src, &hash).unwrap();
 
     let mut db = Database::open(&store_path.join("modeld.db")).unwrap();
-    db.insert_or_update_model(
-        &hash,
-        contents.len() as i64,
-        None,
-        None,
-        None,
-        None,
-    )
-    .unwrap();
+    db.insert_or_update_model(&hash, contents.len() as i64, None, None, None, None).unwrap();
     // cleanup temp source
     let _ = std::fs::remove_file(&src);
     (hash.as_hex().to_string(), contents.len() as u64)
@@ -153,18 +140,13 @@ fn test_blob_range_request() {
 
     // Request bytes 10-29 via raw ureq (Range header).
     let url = format!("{}/v1/blobs/{}", proxy.url, hash);
-    let resp = ureq::get(&url)
-        .set("Range", "bytes=10-29")
-        .call()
-        .unwrap();
+    let resp = ureq::get(&url).set("Range", "bytes=10-29").call().unwrap();
     assert_eq!(resp.status(), 206);
     let content_range = resp.header("Content-Range").unwrap().to_string();
     assert_eq!(content_range, format!("bytes 10-29/{}", payload.len()));
 
     let mut body = String::new();
-    resp.into_reader()
-        .read_to_string(&mut body)
-        .unwrap();
+    resp.into_reader().read_to_string(&mut body).unwrap();
     let got: Vec<u8> = body.bytes().collect();
     assert_eq!(got, &payload[10..30]);
 }
@@ -246,8 +228,7 @@ fn test_hf_proxy_hit_from_fake_cache() {
     cas.store(&src, &hash).unwrap();
 
     let mut db = Database::open(&proxy.store_path.join("modeld.db")).unwrap();
-    db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None)
-        .unwrap();
+    db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None).unwrap();
 
     // Build a fake HF cache entry pointing at this CAS object.
     let sha256 = "a".repeat(64);
@@ -263,10 +244,7 @@ fn test_hf_proxy_hit_from_fake_cache() {
         .unwrap();
 
     // Hit the HF-proxy endpoint for that revision/file.
-    let url = format!(
-        "{}/v1/hf-proxy/org/model/resolve/mainrev/model.safetensors",
-        proxy.url
-    );
+    let url = format!("{}/v1/hf-proxy/org/model/resolve/mainrev/model.safetensors", proxy.url);
     let resp = ureq::get(&url).call().unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.header("X-Modeld-Cache").unwrap(), "hit");
