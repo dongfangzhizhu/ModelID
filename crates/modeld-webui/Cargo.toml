@@ -1,0 +1,38 @@
+[package]
+name = "modeld-webui"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embedded Web UI server for modeld daemon"
+
+[[bin]]
+name = "modeld-webui"
+path = "src/main.rs"
+
+[dependencies]
+modeld-core = { path = "../modeld-core" }
+
+# Async
+tokio = { workspace = true }
+
+# Web server
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+clap = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
