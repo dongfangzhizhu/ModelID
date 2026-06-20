@@ -1,18 +1,18 @@
 // pages/refs.js — Reference graph: models × frontends
 import { api } from '../api.js';
-import { fmtBytes } from '../main.js';
+import { fmtBytes, t } from '../main.js';
 
 export function render(container) {
   container.innerHTML = `
     <div class="page-header">
-      <h1 class="page-title">引用图</h1>
-      <p class="page-subtitle">模型与前端（ComfyUI、WebUI Forge 等）的引用关系</p>
+      <h1 class="page-title">${t('refs.title')}</h1>
+      <p class="page-subtitle">${t('refs.subtitle')}</p>
     </div>
     <div class="page-body">
       <div class="toolbar">
-        <input class="input" id="refs-search" placeholder="搜索模型名或路径..." style="max-width:280px">
+        <input class="input" id="refs-search" placeholder="${t('refs.search')}" style="max-width:280px">
         <select class="select" id="refs-frontend" style="width:auto">
-          <option value="">所有前端</option>
+          <option value="">${t('refs.fe.all')}</option>
         </select>
         <div style="flex:1"></div>
         <span id="refs-count" style="font-size:12px;color:var(--text-muted)"></span>
@@ -20,7 +20,7 @@ export function render(container) {
 
       <div class="card" style="overflow:hidden">
         <div id="refs-table-wrap">
-          <div class="loading-state"><div class="spinner"></div><p>加载中...</p></div>
+          <div class="loading-state"><div class="spinner"></div><p>${t('common.loading')}</p></div>
         </div>
       </div>
     </div>
@@ -33,7 +33,6 @@ export function render(container) {
       const data = await api.models({ per_page: 200 });
       allModels = data.items;
 
-      // Collect frontends
       const frontends = [...new Set(allModels.flatMap(m => m.frontends))].sort();
       const select = document.getElementById('refs-frontend');
       frontends.forEach(f => {
@@ -58,12 +57,15 @@ export function render(container) {
     if (q)  items = items.filter(m => m.name.toLowerCase().includes(q) || m.paths.some(p => p.toLowerCase().includes(q)));
     if (fe) items = items.filter(m => m.frontends.includes(fe));
 
-    document.getElementById('refs-count').textContent = `${items.length} 个模型`;
+    document.getElementById('refs-count').textContent = t('refs.count', { n: items.length });
 
     const wrap = document.getElementById('refs-table-wrap');
 
     if (items.length === 0) {
-      wrap.innerHTML = `<div class="empty-state"><div class="empty-icon">◉</div><p class="empty-title">没有匹配的引用</p></div>`;
+      wrap.innerHTML = `<div class="empty-state">
+        <div class="empty-icon">◉</div>
+        <p class="empty-title">${t('refs.empty')}</p>
+      </div>`;
       return;
     }
 
@@ -71,11 +73,11 @@ export function render(container) {
       <table class="data-table">
         <thead>
           <tr>
-            <th>模型名</th>
-            <th>大小</th>
-            <th>前端</th>
-            <th>引用数</th>
-            <th>孤儿</th>
+            <th>${t('refs.col.model')}</th>
+            <th>${t('refs.col.size')}</th>
+            <th>${t('refs.col.fe')}</th>
+            <th>${t('refs.col.refs')}</th>
+            <th>${t('refs.col.orphan')}</th>
           </tr>
         </thead>
         <tbody>
@@ -87,10 +89,15 @@ export function render(container) {
               </td>
               <td>${fmtBytes(m.size_bytes)}</td>
               <td>
-                ${[...new Set(m.frontends)].map(f => `<span class="badge badge-blue" style="margin-right:3px">${escHtml(f)}</span>`).join('')}
+                ${[...new Set(m.frontends)].map(f =>
+                  `<span class="badge badge-blue" style="margin-right:3px">${escHtml(f)}</span>`
+                ).join('')}
               </td>
               <td>${m.ref_count}</td>
-              <td>${m.is_orphan ? '<span class="badge badge-red">是</span>' : '<span class="badge badge-green">否</span>'}</td>
+              <td>${m.is_orphan
+                ? `<span class="badge badge-red">${t('common.yes')}</span>`
+                : `<span class="badge badge-green">${t('common.no')}</span>`}
+              </td>
             </tr>
           `).join('')}
         </tbody>

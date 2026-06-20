@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>modeld — AI 模型管理器</title>
-  <meta name="description" content="modeld 本地 Web UI：管理 AI 模型、消除重复文件、追踪引用图谱">
+  <title>modeld</title>
+  <meta name="description" content="modeld local Web UI: manage AI models, deduplicate files, track reference graphs">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -12,54 +12,21 @@
 </head>
 <body>
   <div class="app-shell">
-    <!-- Sidebar navigation -->
+    <!-- Sidebar navigation (labels injected by main.js after i18n init) -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-brand">
         <div class="brand-icon">⬡</div>
         <div class="brand-text">
           <span class="brand-name">modeld</span>
-          <span class="brand-sub">模型管理器</span>
+          <span class="brand-sub"></span>
         </div>
       </div>
 
-      <nav class="sidebar-nav">
-        <a href="#/dashboard" class="nav-item" data-route="/dashboard" id="nav-dashboard">
-          <span class="nav-icon">◈</span>
-          <span class="nav-label">仪表板</span>
-        </a>
-        <a href="#/dupes" class="nav-item" data-route="/dupes" id="nav-dupes">
-          <span class="nav-icon">⊕</span>
-          <span class="nav-label">重复文件</span>
-          <span class="nav-badge" id="badge-dupes" style="display:none"></span>
-        </a>
-        <a href="#/library" class="nav-item" data-route="/library" id="nav-library">
-          <span class="nav-icon">◫</span>
-          <span class="nav-label">模型库</span>
-        </a>
-        <a href="#/downloads" class="nav-item" data-route="/downloads" id="nav-downloads">
-          <span class="nav-icon">⬇</span>
-          <span class="nav-label">下载器</span>
-        </a>
-        <a href="#/refs" class="nav-item" data-route="/refs" id="nav-refs">
-          <span class="nav-icon">◉</span>
-          <span class="nav-label">引用图</span>
-        </a>
-        <a href="#/proxy" class="nav-item" data-route="/proxy" id="nav-proxy">
-          <span class="nav-icon">⟳</span>
-          <span class="nav-label">局域网代理</span>
-        </a>
-        <a href="#/settings" class="nav-item" data-route="/settings" id="nav-settings">
-          <span class="nav-icon">⚙</span>
-          <span class="nav-label">设置</span>
-        </a>
-      </nav>
+      <!-- Nav items built programmatically by main.js (supports i18n) -->
+      <nav class="sidebar-nav" id="sidebar-nav"></nav>
 
-      <div class="sidebar-footer">
-        <div class="ws-indicator" id="ws-indicator" title="WebSocket 连接状态">
-          <span class="ws-dot"></span>
-          <span class="ws-text">连接中...</span>
-        </div>
-      </div>
+      <!-- Footer: WS indicator + language toggle (built by main.js) -->
+      <div class="sidebar-footer" id="sidebar-footer"></div>
     </aside>
 
     <!-- Main content area -->
@@ -68,15 +35,15 @@
     </main>
   </div>
 
-  <!-- Global dialog -->
+  <!-- Global confirm dialog -->
   <dialog id="confirm-dialog" class="modal-dialog">
     <div class="modal-header">
-      <h3 id="dialog-title">确认操作</h3>
+      <h3 id="dialog-title">Confirm</h3>
     </div>
     <div class="modal-body" id="dialog-body"></div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" id="dialog-cancel">取消</button>
-      <button class="btn btn-danger" id="dialog-confirm">确认</button>
+      <button class="btn btn-ghost" id="dialog-cancel">Cancel</button>
+      <button class="btn btn-danger" id="dialog-confirm">Confirm</button>
     </div>
   </dialog>
 
