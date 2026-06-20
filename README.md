@@ -161,7 +161,42 @@ A Rust client SDK (`modeld-client`) provides health checks, model listing, and
 resumable blob/HF downloads. See the [proxy setup guide](docs/proxy-setup.md)
 and [HTTP API reference](docs/proxy-api.md).
 
+## Web UI (`modeld-webui`)
+
+A standalone browser-based dashboard for managing your modeld store visually,
+built with an embedded Axum HTTP server + vanilla JS frontend (no Node.js required).
+
+```bash
+# Start the Web UI (default: http://127.0.0.1:8234)
+modeld-webui --store .modeld
+
+# Bind to all interfaces for LAN access, auto-open browser
+modeld-webui --store .modeld --host 0.0.0.0 --port 9000 --open
+```
+
+### Pages
+
+| Page | Description |
+|------|-------------|
+| **Dashboard** | Live stats (unique models, duplicate waste, total size, last scan time); per-frontend breakdown table; one-click scan with real-time progress bar; quick GC trigger |
+| **Duplicates** | Duplicate group list with wasted bytes; one-click deduplication with confirmation dialog |
+| **Library** | Full model inventory — search, filter, copy hash, view aliases |
+| **Downloads** | HuggingFace download history with status (pending / downloading / done / failed) |
+| **Refs** | Workflow reference graph — orphaned models list, workflow-to-model dependency view |
+| **Proxy** | Local proxy server status and configuration |
+| **Settings** | Store path, GC quarantine TTL, auto-scan, incremental scan, UI host/port settings |
+
+### Technical features
+
+- **REST API** (`/api/v1/*`) — stats, models, dupes, dedup, downloads, scan, GC preview/run, settings GET/PUT
+- **WebSocket** (`/ws`) — real-time push events: scan progress (phase, file count, path), dedup progress, daemon status; auto-reconnect on disconnect
+- **Embedded static files** — UI assets compiled into the binary via `rust-embed`; zero external dependencies at runtime
+- **i18n** — English / Chinese (Simplified) language toggle, persisted across sessions
+- **Confirmation dialogs** — modal-based confirm before destructive GC operations
+- **Toast notifications** — non-blocking success/error/info feedback
+
 ## Store layout
+
 
 ```
 $MODELD_STORE/          (default: .modeld/)
@@ -188,13 +223,17 @@ $MODELD_STORE/          (default: .modeld/)
 | 3 | HuggingFace interception — fake HF cache, resumable downloader, Python hook | ✅ Complete |
 | 4 | Workflow reference graph — ComfyUI parser, dependency graph, safe GC | ✅ Complete |
 | 5 | Local registry & proxy — LAN HF mirror, mDNS discovery, Range requests, auth | ✅ Complete |
+| — | Web UI (`modeld-webui`) — embedded dashboard with REST API + WebSocket | ✅ Complete |
 
 ## Building
 
 ```bash
 cargo build --release
-# Binary: target/release/modeld  (+ target/release/modeld-webui)
+# Produces two binaries:
+#   target/release/modeld         — CLI tool (all Phase 1–5 commands)
+#   target/release/modeld-webui   — Web UI server (browser dashboard)
 ```
+
 
 ## Testing
 
