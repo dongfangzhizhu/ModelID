@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+# ---------------------------------------------------------------------------
+# Build matrix
+# ---------------------------------------------------------------------------
+# Each entry produces two binaries: modeld + modeld-webui
+# ---------------------------------------------------------------------------
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux x86-64 (glibc, most common servers/desktops) ──────────
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact_suffix: ''
+            archive_ext: tar.gz
+
+          # ── Linux ARM64 (Raspberry Pi 4/5, Apple M-series via Rosetta) ──
+          - name: linux-aarch64
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            artifact_suffix: ''
+            archive_ext: tar.gz
+            cross: true          # uses cross-rs for cross-compilation
+
+          # ── macOS x86-64 (Intel Mac) ────────────────────────────────────
+          - name: macos-x86_64
+            os: macos-13          # last Intel runner
+            target: x86_64-apple-darwin
+            artifact_suffix: ''
+            archive_ext: tar.gz
+
+          # ── macOS ARM64 (Apple Silicon, M1/M2/M3) ───────────────────────
+          - name: macos-aarch64
+            os: macos-14          # ARM runner (M1)
+            target: aarch64-apple-darwin
+            artifact_suffix: ''
+            archive_ext: tar.gz
+
+          # ── Windows x86-64 ───────────────────────────────────────────────
+          - name: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            artifact_suffix: '.exe'
+            archive_ext: zip
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Rust toolchain ────────────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # ── Rust cache (speeds up subsequent runs significantly) ──────────────
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # ── cross-rs (Linux ARM64 only) ───────────────────────────────────────
+      - name: Install cross (ARM cross-compilation)
+        if: matrix.cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      # ── Linux system deps (native x86-64 only; cross uses a Docker image) ─
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux' && matrix.cross != true
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libssl-dev pkg-config
+
+      # ── Build ─────────────────────────────────────────────────────────────
+      - name: Build (native)
+        if: matrix.cross != true
+        run: >
+          cargo build --release --locked
+          --target ${{ matrix.target }}
+          --bin modeld
+          --bin modeld-webui
+
+      - name: Build (cross — ARM64 Linux)
+        if: matrix.cross == true
+        run: >
+          cross build --release --locked
+          --target ${{ matrix.target }}
+          --bin modeld
+          --bin modeld-webui
+
+      # ── Determine release tag ─────────────────────────────────────────────
+      - name: Determine tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Package (Linux / macOS → tar.gz) ─────────────────────────────────
+      - name: Package (tar.gz)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          PKG="modeld-${TAG}-${{ matrix.name }}"
+          mkdir -p "dist/${PKG}"
+
+          cp "target/${{ matrix.target }}/release/modeld"        "dist/${PKG}/modeld"
+          cp "target/${{ matrix.target }}/release/modeld-webui"  "dist/${PKG}/modeld-webui"
+          cp LICENSE README.md                                    "dist/${PKG}/"
+
+          cd dist
+          tar -czf "${PKG}.tar.gz" "${PKG}"
+          echo "ASSET=dist/${PKG}.tar.gz" >> "$GITHUB_ENV"
+          echo "ASSET_NAME=${PKG}.tar.gz" >> "$GITHUB_ENV"
+
+      # ── Package (Windows → zip) ───────────────────────────────────────────
+      - name: Package (zip)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $tag  = "${{ steps.tag.outputs.value }}"
+          $pkg  = "modeld-${tag}-${{ matrix.name }}"
+          $dest = "dist\$pkg"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+
+          Copy-Item "target\${{ matrix.target }}\release\modeld.exe"        "$dest\"
+          Copy-Item "target\${{ matrix.target }}\release\modeld-webui.exe"  "$dest\"
+          Copy-Item LICENSE, README.md                                        "$dest\"
+
+          Compress-Archive -Path "$dest\*" -DestinationPath "dist\${pkg}.zip"
+          "ASSET=dist\${pkg}.zip"       | Out-File -Append $Env:GITHUB_ENV
+          "ASSET_NAME=${pkg}.zip"       | Out-File -Append $Env:GITHUB_ENV
+
+      # ── Upload artifact (for inspection before release) ───────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+      # ── Attach to GitHub Release (tag push only) ──────────────────────────
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.value, '-') }}
+          generate_release_notes: true

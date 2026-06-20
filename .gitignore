@@ -1,32 +1,93 @@
+# ============================================================
 # Rust
+# ============================================================
 /target/
 **/*.rs.bk
-Cargo.lock
+# NOTE: Cargo.lock is intentionally tracked for this binary crate
+# to guarantee reproducible builds.
 
-# IDE
+# ============================================================
+# Python — build & cache artifacts
+# ============================================================
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+python/dist/
+python/build/
+python/.eggs/
+*.egg-info/
+*.whl
+*.tar.gz
+
+# ============================================================
+# Python — virtual environments
+# ============================================================
+.venv/
+venv/
+env/
+.env
+.env.local
+
+# ============================================================
+# Node / JavaScript (not core to this project)
+# ============================================================
+node_modules/
+package-lock.json
+package.json
+
+# ============================================================
+# IDE & Editor
+# ============================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
+# Kiro IDE specs (AI-assisted dev tool internals, not for publishing)
+.kiro/
+
+# ============================================================
 # OS
+# ============================================================
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# modeld specific
+# ============================================================
+# modeld — local dev / test artifacts
+# ============================================================
 /test-store/
 /.modeld-test/
+/.modeld/
 
-# Python build artifacts
-__pycache__/
-*.py[cod]
-python/dist/
-python/build/
-*.egg-info/
-.venv/
-venv/
+# ============================================================
+# Secrets & credentials
+# ============================================================
+.pypirc
+pypirc
+*.pem
+*.key
 
-# Node (not part of this project; ignore stray manifests)
-node_modules/
-package-lock.json
+# ============================================================
+# Local development planning docs (internal, not for publishing)
+# These files live in the repo root during development but
+# should not clutter the public-facing repository.
+# Move them under docs/dev/ before the first public release.
+# ============================================================
+DEVELOPMENT_PLAN.md
+PHASE1_PLAN.md
+PHASE1_SUMMARY.md
+PHASE2_PLAN.md
+PHASE3_PLAN.md
+PHASE4_PLAN.md
+PHASE5_PLAN.md
+PHASE6_PLAN.md
+WebUIPlan.md
+modeld-project-plan.md
+PUBLISH_SUMMARY.md
+QUICK_PUBLISH.md
+RELEASE_WORKFLOW_COMPLETE.md
+BUILD_RELEASE_GUIDE.md
+.gitignore.publish
