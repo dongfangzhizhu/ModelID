@@ -6,7 +6,7 @@
 //! - Progress tracking
 
 use crate::hash::{hash_file, Blake3Hash};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -25,21 +25,35 @@ pub struct ScannedFile {
 pub struct Scanner {
     /// Extensions to scan for
     extensions: Vec<String>,
+    /// Absolute paths that must not be scanned (e.g. the modeld store itself)
+    excluded_dirs: Vec<PathBuf>,
 }
 
 impl Scanner {
-    /// Create a new scanner with default extensions
     pub fn new() -> Self {
-        Self { extensions: MODEL_EXTENSIONS.iter().map(|s| s.to_string()).collect() }
+        Self {
+            extensions: MODEL_EXTENSIONS.iter().map(|s| s.to_string()).collect(),
+            excluded_dirs: Vec::new(),
+        }
     }
 
-    /// Set custom extensions to scan for
     pub fn with_extensions(mut self, extensions: Vec<String>) -> Self {
         self.extensions = extensions;
         self
     }
 
-    /// Scan a directory recursively
+    /// Exclude specific directories from scanning (e.g. the modeld store).
+    pub fn with_excluded_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.excluded_dirs = dirs;
+        self
+    }
+
+    /// Scan a directory recursively.
+    ///
+    /// Individual file errors (permission denied, locked by another process,
+    /// etc.) are logged to stderr and skipped rather than aborting the whole
+    /// scan.  The outer `Result` is only `Err` if the directory itself cannot
+    /// be read.
     pub fn scan<F>(&self, root: &Path, mut progress_callback: F) -> Result<Vec<ScannedFile>>
     where
         F: FnMut(&Path, u64),
@@ -51,29 +65,41 @@ impl Scanner {
             .into_iter()
             .filter_entry(|e| !self.is_excluded(e.path()))
         {
-            let entry =
-                entry.with_context(|| format!("Failed to read entry in {}", root.display()))?;
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("scan: skipping entry ({e})");
+                    continue;
+                }
+            };
 
-            // Skip directories
             if entry.file_type().is_dir() {
                 continue;
             }
 
             let path = entry.path();
 
-            // Check if file matches our extensions
             if !self.matches_extension(path) {
                 continue;
             }
 
-            // Get file size
-            let metadata = entry.metadata()?;
-            let size = metadata.len();
+            let size = match entry.metadata() {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    eprintln!("scan: skipping {} (metadata: {e})", path.display());
+                    continue;
+                }
+            };
 
-            // Compute hash
             progress_callback(path, size);
-            let hash =
-                hash_file(path).with_context(|| format!("Failed to hash {}", path.display()))?;
+
+            let hash = match hash_file(path) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("scan: skipping {} (hash error: {e})", path.display());
+                    continue;
+                }
+            };
 
             results.push(ScannedFile { path: path.to_path_buf(), size, hash });
         }
@@ -81,23 +107,26 @@ impl Scanner {
         Ok(results)
     }
 
-    /// Check if path should be excluded
+    /// Check if path should be excluded from scanning.
     fn is_excluded(&self, path: &Path) -> bool {
-        // Check each path component
+        // Explicit caller-supplied exclusion list (e.g. the modeld store dir)
+        for excl in &self.excluded_dirs {
+            if path.starts_with(excl) {
+                return true;
+            }
+        }
+
+        // Component-level exclusions
         for component in path.components() {
             if let Some(name) = component.as_os_str().to_str() {
-                // Exclude common non-model directories
-                if name == "node_modules" || name == "venv" || name == "__pycache__" {
+                if matches!(name, "node_modules" | "venv" | "__pycache__") {
                     return true;
                 }
-                // Exclude hidden directories that start with dot but are actual directory names
-                // (not .tmp* which is used by tempfile crate)
+                // Hidden directories (dot-prefixed) other than "." / ".."
                 if name.starts_with('.')
                     && !name.starts_with(".tmp")
                     && name != "."
                     && name != ".."
-                    && name != ".git"
-                // Keep .git for now in case
                 {
                     return true;
                 }

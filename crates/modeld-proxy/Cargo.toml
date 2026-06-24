@@ -23,4 +23,5 @@ futures-util = "0.3"
 [dev-dependencies]
 tempfile.workspace = true
 ureq.workspace = true
+sha2.workspace = true
 modeld-client = { path = "../modeld-client" }

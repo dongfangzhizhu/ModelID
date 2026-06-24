@@ -66,7 +66,15 @@ fn start_mock_hf(body: Vec<u8>, sha256: String) -> String {
 fn test_hf_proxy_miss_then_hit() {
     // --- Set up a mock HuggingFace server on an ephemeral port. ---
     let payload = b"mock model bytes for hf proxy miss test 0123456789".to_vec();
-    let mock_sha256 = "b".repeat(64);
+    // Compute the real SHA256 of the payload so the downloader's integrity
+    // check passes (previously a fake "bbbb..." hash was used, but the
+    // downloader now actually verifies the hash).
+    let mock_sha256 = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&payload);
+        format!("{:x}", h.finalize())
+    };
     let mock_hf_url = start_mock_hf(payload.clone(), mock_sha256.clone());
 
     // --- Point the proxy at the mock HF via the env var. ---

@@ -11,6 +11,46 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Row-parsing helpers (avoid .unwrap() panics when reading DB data)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse an RFC-3339 string into UTC DateTime.  Falls back to `Utc::now()` on
+/// parse error so that a single malformed row does not crash the whole query.
+fn parse_dt(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+/// Parse a BLAKE3 hex string into `Blake3Hash`, returning a rusqlite error on
+/// failure so query_map can propagate it gracefully.
+fn parse_blake3(s: &str) -> std::result::Result<Blake3Hash, rusqlite::Error> {
+    Blake3Hash::from_hex(s)
+        .map_err(|e| rusqlite::Error::InvalidParameterName(format!("blake3: {}", e)))
+}
+
+/// Parse a `Frontend` discriminant, returning a rusqlite error on unknown values.
+fn parse_frontend(s: &str) -> std::result::Result<Frontend, rusqlite::Error> {
+    Frontend::from_db_value(s).ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName(format!("unknown frontend: {}", s))
+    })
+}
+
+/// Parse an `AliasType` discriminant, returning a rusqlite error on unknown values.
+fn parse_alias_type(s: &str) -> std::result::Result<AliasType, rusqlite::Error> {
+    AliasType::from_db_value(s).ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName(format!("unknown alias_type: {}", s))
+    })
+}
+
+/// Parse a `TransactionStatus` discriminant.
+fn parse_tx_status(s: &str) -> std::result::Result<TransactionStatus, rusqlite::Error> {
+    TransactionStatus::from_db_value(s).ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName(format!("unknown tx_status: {}", s))
+    })
+}
+
 /// Model metadata stored in database
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -162,6 +202,10 @@ impl Database {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Wait up to 5 s when another connection holds a write lock (prevents
+        // immediate "database is locked" errors when CLI and webui/proxy run
+        // concurrently).
+        conn.pragma_update(None, "busy_timeout", 5000i64)?;
 
         let mut db = Self { conn };
         db.init_schema()?;
@@ -356,23 +400,21 @@ impl Database {
 
         let model = stmt
             .query_row(params![hash.as_hex()], |row| {
+                let h: String = row.get(1)?;
+                let created: String = row.get(7)?;
+                let last: String = row.get(8)?;
+                let qat: Option<String> = row.get(9)?;
                 Ok(Model {
                     id: row.get(0)?,
-                    blake3_hash: Blake3Hash::from_hex(&row.get::<_, String>(1)?).unwrap(),
+                    blake3_hash: parse_blake3(&h)?,
                     size_bytes: row.get(2)?,
                     format: row.get(3)?,
                     arch: row.get(4)?,
                     category: row.get(5)?,
                     base_model: row.get(6)?,
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    last_seen: DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    quarantined_at: row
-                        .get::<_, Option<String>>(9)?
-                        .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc)),
+                    created_at: parse_dt(&created),
+                    last_seen: parse_dt(&last),
+                    quarantined_at: qat.as_deref().map(parse_dt),
                 })
             })
             .optional()?;
@@ -418,23 +460,21 @@ impl Database {
         let mut stmt = self.conn.prepare(&sql)?;
         let models = stmt
             .query_map([], |row| {
+                let h: String = row.get(1)?;
+                let created: String = row.get(7)?;
+                let last: String = row.get(8)?;
+                let qat: Option<String> = row.get(9)?;
                 Ok(Model {
                     id: row.get(0)?,
-                    blake3_hash: Blake3Hash::from_hex(&row.get::<_, String>(1)?).unwrap(),
+                    blake3_hash: parse_blake3(&h)?,
                     size_bytes: row.get(2)?,
                     format: row.get(3)?,
                     arch: row.get(4)?,
                     category: row.get(5)?,
                     base_model: row.get(6)?,
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    last_seen: DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    quarantined_at: row
-                        .get::<_, Option<String>>(9)?
-                        .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc)),
+                    created_at: parse_dt(&created),
+                    last_seen: parse_dt(&last),
+                    quarantined_at: qat.as_deref().map(parse_dt),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -475,15 +515,17 @@ impl Database {
 
         let alias = stmt
             .query_row(params![path], |row| {
+                let h: String = row.get(1)?;
+                let fe: String = row.get(3)?;
+                let at: String = row.get(4)?;
+                let dt: String = row.get(5)?;
                 Ok(Alias {
                     id: row.get(0)?,
-                    model_hash: Blake3Hash::from_hex(&row.get::<_, String>(1)?).unwrap(),
+                    model_hash: parse_blake3(&h)?,
                     path: row.get(2)?,
-                    frontend: Frontend::from_db_value(&row.get::<_, String>(3)?).unwrap(),
-                    alias_type: AliasType::from_db_value(&row.get::<_, String>(4)?).unwrap(),
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    frontend: parse_frontend(&fe)?,
+                    alias_type: parse_alias_type(&at)?,
+                    created_at: parse_dt(&dt),
                 })
             })
             .optional()?;
@@ -504,15 +546,17 @@ impl Database {
 
         let aliases = stmt
             .query_map(params![model_hash.as_hex()], |row| {
+                let h: String = row.get(1)?;
+                let fe: String = row.get(3)?;
+                let at: String = row.get(4)?;
+                let dt: String = row.get(5)?;
                 Ok(Alias {
                     id: row.get(0)?,
-                    model_hash: Blake3Hash::from_hex(&row.get::<_, String>(1)?).unwrap(),
+                    model_hash: parse_blake3(&h)?,
                     path: row.get(2)?,
-                    frontend: Frontend::from_db_value(&row.get::<_, String>(3)?).unwrap(),
-                    alias_type: AliasType::from_db_value(&row.get::<_, String>(4)?).unwrap(),
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    frontend: parse_frontend(&fe)?,
+                    alias_type: parse_alias_type(&at)?,
+                    created_at: parse_dt(&dt),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -585,20 +629,19 @@ impl Database {
 
         let tx = stmt
             .query_row(params![tx_id], |row| {
+                let st: String = row.get(3)?;
+                let c: String = row.get(7)?;
+                let u: String = row.get(8)?;
                 Ok(WalTransaction {
                     id: row.get(0)?,
                     tx_id: row.get(1)?,
                     operation: row.get(2)?,
-                    status: TransactionStatus::from_db_value(&row.get::<_, String>(3)?).unwrap(),
+                    status: parse_tx_status(&st)?,
                     source_path: row.get(4)?,
                     target_hash: row.get(5)?,
                     metadata: row.get(6)?,
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    created_at: parse_dt(&c),
+                    updated_at: parse_dt(&u),
                 })
             })
             .optional()?;
@@ -620,20 +663,19 @@ impl Database {
 
         let transactions = stmt
             .query_map([], |row| {
+                let st: String = row.get(3)?;
+                let c: String = row.get(7)?;
+                let u: String = row.get(8)?;
                 Ok(WalTransaction {
                     id: row.get(0)?,
                     tx_id: row.get(1)?,
                     operation: row.get(2)?,
-                    status: TransactionStatus::from_db_value(&row.get::<_, String>(3)?).unwrap(),
+                    status: parse_tx_status(&st)?,
                     source_path: row.get(4)?,
                     target_hash: row.get(5)?,
                     metadata: row.get(6)?,
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    created_at: parse_dt(&c),
+                    updated_at: parse_dt(&u),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -646,7 +688,58 @@ impl Database {
         self.conn.execute("DELETE FROM wal_transactions WHERE tx_id = ?1", params![tx_id])?;
         Ok(())
     }
-}
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GC helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Mark a model as quarantined (sets `quarantined_at` timestamp).
+    pub fn quarantine_model(&mut self, hash: &Blake3Hash, at: DateTime<Utc>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE models SET quarantined_at = ?1 WHERE blake3_hash = ?2",
+            params![at.to_rfc3339(), hash.as_hex()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete all aliases for a model (call after quarantine so aliases
+    /// no longer point at a non-existent file).
+    pub fn delete_aliases_for_model(&mut self, hash: &Blake3Hash) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM aliases WHERE model_hash = ?1",
+            params![hash.as_hex()],
+        )?;
+        Ok(n)
+    }
+
+    /// Return every alias in the table (used by workflow lookup and fsck).
+    pub fn list_all_aliases(&self) -> Result<Vec<Alias>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, model_hash, path, frontend, alias_type, created_at
+            FROM aliases
+            ORDER BY model_hash, created_at ASC
+            "#,
+        )?;
+        let aliases = stmt
+            .query_map([], |row| {
+                let h: String = row.get(1)?;
+                let fe: String = row.get(3)?;
+                let at: String = row.get(4)?;
+                let dt: String = row.get(5)?;
+                Ok(Alias {
+                    id: row.get(0)?,
+                    model_hash: parse_blake3(&h)?,
+                    path: row.get(2)?,
+                    frontend: parse_frontend(&fe)?,
+                    alias_type: parse_alias_type(&at)?,
+                    created_at: parse_dt(&dt),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(aliases)
+    }
+} // impl Database (model/alias/WAL/GC block)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Download record types (Phase 3 — HF interception)

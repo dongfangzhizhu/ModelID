@@ -249,6 +249,11 @@ enum QuarantineAction {
     List,
     /// Clean up expired quarantine entries (>30 days)
     Cleanup,
+    /// Restore a quarantined file to its original location
+    Restore {
+        /// Full path to the quarantined file (shown by `quarantine list`)
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -354,8 +359,12 @@ fn init_command(path: Option<PathBuf>) -> Result<()> {
 fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
     println!("{}", tf("scan.scanning", &[("path", &scan_path.display())]).cyan().bold());
 
+    // Exclude the store directory from scanning to prevent CAS objects,
+    // quarantine files, and staging temps from being re-ingested (audit 5.8).
+    let store_canonical = std::fs::canonicalize(&store_path).unwrap_or(store_path.clone());
+    let scanner = Scanner::new().with_excluded_dirs(vec![store_canonical]);
+
     // Quick count first
-    let scanner = Scanner::new();
     let (file_count, total_size) = scanner.count_files(&scan_path)?;
 
     if file_count == 0 {
@@ -369,10 +378,20 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
         tf("scan.found", &[("count", &file_count), ("gb", &gb)]).bold()
     );
 
+    // Auto-initialize the store if it doesn't exist yet (so users don't need
+    // to run `modeld init` before their first scan).
+    std::fs::create_dir_all(&store_path)
+        .with_context(|| format!("Failed to create store directory: {}", store_path.display()))?;
+
     // Initialize components
     let cas = CasStore::new(&store_path);
+    cas.init()?;
     let db_path = store_path.join("modeld.db");
     let mut db = Database::open(&db_path)?;
+
+    // Initialize quarantine directory
+    let qm = QuarantineManager::new(&store_path);
+    qm.init()?;
 
     // Create progress bar
     let pb = ProgressBar::new(file_count as u64);
@@ -728,8 +747,8 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool) -
     } else if auto {
         DedupMode::Auto
     } else {
-        // Default: interactive (currently runs like auto with confirmation display)
-        DedupMode::Auto
+        // Default: safe dry-run preview. Pass --auto to actually modify files.
+        DedupMode::DryRun
     };
 
     let mode_label = match mode {
@@ -796,6 +815,22 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool) -
         return Ok(());
     }
 
+    // Executing for real: require explicit y/N confirmation to prevent
+    // accidental data-modifying runs (audit item 1.6).
+    println!(
+        "\n{}",
+        "⚠  This will replace duplicate files with hard/symlinks on disk.".yellow().bold()
+    );
+    println!("{}", "   The operation is not easily reversible.".yellow());
+    print!("{}", "   Proceed? [y/N]: ".bold());
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !answer.trim().eq_ignore_ascii_case("y") {
+        println!("{}", t("dedup.aborted").yellow());
+        return Ok(());
+    }
+
     // Execute deduplication with progress
     println!("\n{}", t("dedup.executing").cyan().bold());
 
@@ -812,7 +847,7 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool) -
             "progress.processing",
             &[("prefix", &hash_prefix), ("current", &current), ("total", &total)],
         ));
-        pb.set_position(current as u64 - 1);
+        pb.set_position((current as u64).saturating_sub(1));
     })?;
 
     pb.finish_with_message(t("progress.done"));
@@ -903,6 +938,16 @@ fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Result<(
                     tf("quarantine.cleanup.done", &[("count", &cleaned)]).bold()
                 );
             }
+        }
+
+        QuarantineAction::Restore { path } => {
+            let restored = qm.restore(&path)?;
+            println!(
+                "{} {}",
+                "✓".green().bold(),
+                tf("quarantine.restore.done", &[("path", &restored.display().to_string())])
+                    .bold()
+            );
         }
     }
 
@@ -1361,8 +1406,8 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result
         anyhow::bail!("{}", t("store.not_initialized_exit"));
     }
 
-    let db = Database::open(&db_path)?;
-    let gc = GcEngine::new(&db, &store);
+    let mut db = Database::open(&db_path)?;
+    let mut gc = GcEngine::new(&mut db, &store);
 
     if preview {
         let plan = gc.preview()?;

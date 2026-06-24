@@ -13,7 +13,7 @@ version = "0.1.0"
 authors = ["modeld contributors"]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/your-org/modeld"
+repository = "https://github.com/dongfangzhizhu/modeld"
 
 [workspace.dependencies]
 # Core dependencies
@@ -33,6 +33,7 @@ thiserror = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4"] }
 ureq = "2.9"
+sha2 = "0.10"
 sys-locale = "0.3"
 
 # CLI

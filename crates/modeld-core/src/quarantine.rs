@@ -144,11 +144,8 @@ impl QuarantineManager {
                 continue;
             }
 
-            // Read corresponding metadata
-            let meta_path = path
-                .with_extension("")
-                .with_extension("")
-                .with_file_name(format!("{}.meta", path.file_name().unwrap().to_string_lossy()));
+            // Read corresponding metadata using the canonical helper
+            let meta_path = self.meta_path_for(&path);
 
             if meta_path.exists() {
                 if let Ok(meta_content) = std::fs::read_to_string(&meta_path) {
@@ -216,9 +213,24 @@ impl QuarantineManager {
         Ok(original_path)
     }
 
-    /// Delete a quarantined file permanently (no restore)
+    /// Delete a quarantined file permanently (no restore possible).
+    ///
+    /// On Windows, CAS objects are marked read-only.  `remove_file` on a
+    /// read-only file returns `PermissionDenied`, so we clear the flag first.
     pub fn delete_permanent(&self, quarantine_path: &Path) -> Result<()> {
         let meta_path = self.meta_path_for(quarantine_path);
+
+        // Clear read-only attribute before removal (Windows compatibility)
+        #[cfg(windows)]
+        {
+            if let Ok(meta) = std::fs::metadata(quarantine_path) {
+                let mut perms = meta.permissions();
+                if perms.readonly() {
+                    perms.set_readonly(false);
+                    let _ = std::fs::set_permissions(quarantine_path, perms);
+                }
+            }
+        }
 
         std::fs::remove_file(quarantine_path).with_context(|| {
             format!("Failed to remove quarantined file: {}", quarantine_path.display())

@@ -345,25 +345,53 @@ fn resolve_model_ref(
     (None, None, false)
 }
 
-/// Build a lookup map from alias paths → blake3 hash for use in workflow resolution.
-/// Queries the database aliases table.
+/// Build a lookup map: model name (or alias basename) → BLAKE3 hash.
+///
+/// Used by `index_workflow` to resolve raw model names from workflow JSON to
+/// their CAS entries.
+///
+/// ## Fix (audit 2.2)
+///
+/// The previous implementation only indexed by `model.format` (which is almost
+/// always `None` because `scan` never parses filenames into that field).  This
+/// meant every workflow model reference was "unresolved".
+///
+/// The fix reads the `aliases` table and indexes by **basename of each alias
+/// path** — that is the value that workflow JSON files actually reference
+/// (e.g. `"v1-5-pruned.safetensors"`).
 pub fn build_model_lookup(db: &Database) -> Result<HashMap<String, Blake3Hash>> {
     let mut map = HashMap::new();
 
-    // From aliases
+    // 1. Index by the raw BLAKE3 hash string (for direct hash lookups)
     let models = db.list_models(None)?;
     for model in &models {
-        // Index by blake3 hash itself
-        if let Ok(h) = Blake3Hash::from_hex(model.blake3_hash.as_hex()) {
-            map.insert(model.blake3_hash.as_hex().to_string(), h.clone());
+        map.insert(model.blake3_hash.as_hex().to_string(), model.blake3_hash.clone());
 
-            // Index by format (filename) if present
-            if let Some(ref fmt) = model.format {
-                map.insert(fmt.clone(), h.clone());
-                if let Some(base) = std::path::Path::new(fmt).file_name() {
-                    map.insert(base.to_string_lossy().to_string(), h.clone());
-                }
+        // Fallback: format field when present (may hold a filename-like string)
+        if let Some(ref fmt) = model.format {
+            map.entry(fmt.clone()).or_insert_with(|| model.blake3_hash.clone());
+            if let Some(base) = std::path::Path::new(fmt).file_name() {
+                map.entry(base.to_string_lossy().to_string())
+                    .or_insert_with(|| model.blake3_hash.clone());
             }
+        }
+    }
+
+    // 2. Primary source: index by basename of every alias path.
+    //    Workflow JSON typically references model files by filename only
+    //    (e.g. "v1-5-pruned.safetensors"), which matches the last component
+    //    of whatever alias path `scan` recorded.
+    let aliases = db.list_all_aliases()?;
+    for alias in &aliases {
+        let path = std::path::Path::new(&alias.path);
+
+        // Full path → hash (exact match)
+        map.entry(alias.path.clone()).or_insert_with(|| alias.model_hash.clone());
+
+        // Basename → hash (most common workflow reference style)
+        if let Some(fname) = path.file_name() {
+            let name = fname.to_string_lossy().to_string();
+            map.entry(name).or_insert_with(|| alias.model_hash.clone());
         }
     }
 

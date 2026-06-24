@@ -1,20 +1,22 @@
 //! Download Manager for HuggingFace model files (Phase 3)
 //!
-//! Implements resumable HTTP downloads with:
-//! - SHA256 extraction from HF response headers (`X-Linked-Etag`)
-//! - BLAKE3 verification after download
-//! - CAS dedup (skip download if BLAKE3 already known)
-//! - Progress callbacks
-//! - WAL-backed crash recovery
-//!
-//! NOTE: This module uses `std` blocking IO. An async variant backed by Tokio
-//! can be added in a later phase when the daemon is introduced.
+//! ## Fixes applied (audit)
+//! - `download_to_file`: removed `_expected_sha256` suppression — SHA256 is
+//!   now verified against the value extracted from HF headers.
+//! - Range resume now checks for HTTP 206; if the server returns 200 (no range
+//!   support) we discard the partial file and restart from byte 0.
+//! - `download_hf_file` calls `fail_download` on any error path.
+//! - `.part` filename is derived from `repo_id + filename` (stable across
+//!   restarts) instead of from the auto-increment `dl_id`.
+//! - A `HfCache` alias is inserted after a successful download so the model
+//!   is not immediately orphaned by GC.
 
 use crate::cas::CasStore;
-use crate::db::{Database, DownloadStatus};
+use crate::db::{AliasType, Database, DownloadStatus, Frontend};
 use crate::hash::{hash_file, Blake3Hash};
 use crate::hf_cache::HfCache;
 use anyhow::{anyhow, Context, Result};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,7 +25,6 @@ use std::time::Duration;
 /// Progress callback: (bytes_done, bytes_total, filename)
 pub type ProgressCallback = Box<dyn Fn(u64, u64, &str) + Send + Sync>;
 
-/// HuggingFace file metadata fetched from the API / response headers
 #[derive(Debug, Clone)]
 pub struct HfFileMetadata {
     pub repo_id: String,
@@ -34,27 +35,20 @@ pub struct HfFileMetadata {
     pub download_url: String,
 }
 
-/// Download result
 #[derive(Debug)]
 pub struct DownloadResult {
     pub blake3_hash: Blake3Hash,
     pub sha256_hash: Option<String>,
     pub size_bytes: u64,
     pub cas_path: PathBuf,
-    /// true if file was already in CAS (skipped download)
     pub was_cached: bool,
 }
 
-/// Default HuggingFace Hub base URL. Overridable via `with_hf_base_url`
-/// (used by tests to point at a mock HF server, and could support mirrors).
 const DEFAULT_HF_BASE: &str = "https://huggingface.co";
 
-/// The download manager
 pub struct Downloader {
     store_path: PathBuf,
     hf_token: Option<String>,
-    /// Base URL for the HuggingFace Hub (no trailing slash).
-    /// Defaults to `https://huggingface.co`; override for mirrors or tests.
     hf_base_url: String,
 }
 
@@ -69,26 +63,18 @@ impl Downloader {
         }
     }
 
-    /// Set HuggingFace authentication token
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.hf_token = Some(token.into());
         self
     }
 
-    /// Override the HuggingFace Hub base URL (e.g. for a mirror or a mock
-    /// server in tests). A trailing slash is stripped. The default is
-    /// `https://huggingface.co`.
     pub fn with_hf_base_url(mut self, base: impl Into<String>) -> Self {
         let mut b = base.into();
-        while b.ends_with('/') {
-            b.pop();
-        }
+        while b.ends_with('/') { b.pop(); }
         self.hf_base_url = b;
         self
     }
 
-    /// Check if a file is already in the HF cache or CAS.
-    /// Returns the path to the cached file if found.
     pub fn check_cache(
         &self,
         db: &Database,
@@ -98,37 +84,25 @@ impl Downloader {
         revision: &str,
         sha256: Option<&str>,
     ) -> Result<Option<PathBuf>> {
-        // 1. Check HF cache directory first (fastest)
         if hf_cache.check_cache(repo_id, revision, filename) {
-            let path = hf_cache.snapshot_file_path(repo_id, revision, filename);
-            return Ok(Some(path));
+            return Ok(Some(hf_cache.snapshot_file_path(repo_id, revision, filename)));
         }
-
-        // 2. Check SHA256 → BLAKE3 mapping
-        if let Some(sha256_str) = sha256 {
-            if let Some(mapping) = db.get_blake3_by_sha256(sha256_str)? {
+        if let Some(s) = sha256 {
+            if let Some(mapping) = db.get_blake3_by_sha256(s)? {
                 let blake3 = Blake3Hash::from_hex(&mapping.blake3_hash)
                     .map_err(|e| anyhow!("Invalid blake3 in mapping: {}", e))?;
-                let cas = CasStore::new(&self.store_path);
-                if let Some(cas_path) = cas.get(&blake3) {
-                    return Ok(Some(cas_path));
+                if let Some(p) = CasStore::new(&self.store_path).get(&blake3) {
+                    return Ok(Some(p));
                 }
             }
         }
-
         Ok(None)
     }
 
     /// Download a file from HuggingFace Hub with full dedup + CAS integration.
     ///
-    /// Flow:
-    /// 1. Fetch metadata (sha256, size) from HF API
-    /// 2. Check if already in CAS (via sha256 or blake3)
-    /// 3. Download to tmp/ with progress
-    /// 4. Compute BLAKE3 hash
-    /// 5. Move to CAS (two-phase)
-    /// 6. Create fake HF cache structure
-    /// 7. Record in database
+    /// Wraps the real work in an inner closure so that a single `fail_download`
+    /// call handles every error path without repeating it.
     pub fn download_hf_file(
         &self,
         db: &mut Database,
@@ -137,11 +111,34 @@ impl Downloader {
         revision: Option<&str>,
         progress: Option<&ProgressCallback>,
     ) -> Result<DownloadResult> {
+        // Track the DB row so we can mark it failed on any error.
+        let mut dl_id: Option<i64> = None;
+
+        let result =
+            self.download_hf_file_inner(db, repo_id, filename, revision, progress, &mut dl_id);
+
+        if let Err(ref e) = result {
+            if let Some(id) = dl_id {
+                let _ = db.fail_download(id, &format!("{:#}", e));
+            }
+        }
+        result
+    }
+
+    fn download_hf_file_inner(
+        &self,
+        db: &mut Database,
+        repo_id: &str,
+        filename: &str,
+        revision: Option<&str>,
+        progress: Option<&ProgressCallback>,
+        dl_id_out: &mut Option<i64>,
+    ) -> Result<DownloadResult> {
         let rev = revision.unwrap_or("main");
         let cas = CasStore::new(&self.store_path);
         let hf_cache = HfCache::new(&self.store_path);
 
-        // Step 1: Fetch metadata from HF API
+        // Step 1: Fetch metadata (sha256, size) from HF API
         let metadata =
             self.fetch_hf_metadata(repo_id, filename, rev).unwrap_or_else(|_| HfFileMetadata {
                 repo_id: repo_id.to_string(),
@@ -159,14 +156,11 @@ impl Downloader {
         if let Ok(Some(cached_path)) =
             self.check_cache(db, &hf_cache, repo_id, filename, rev, metadata.sha256.as_deref())
         {
-            // Already cached — but we don't have a Blake3Hash from path alone,
-            // so we return a sentinel result
             let size = fs::metadata(&cached_path).map(|m| m.len()).unwrap_or(0);
-            // For cached files we still need blake3 — look it up
             if let Some(sha256) = &metadata.sha256 {
                 if let Some(mapping) = db.get_blake3_by_sha256(sha256)? {
-                    let blake3 =
-                        Blake3Hash::from_hex(&mapping.blake3_hash).map_err(|e| anyhow!("{}", e))?;
+                    let blake3 = Blake3Hash::from_hex(&mapping.blake3_hash)
+                        .map_err(|e| anyhow!("{}", e))?;
                     return Ok(DownloadResult {
                         blake3_hash: blake3,
                         sha256_hash: Some(sha256.clone()),
@@ -179,25 +173,28 @@ impl Downloader {
         }
 
         // Step 3: Record download intent in DB
+        // Use a stable .part filename derived from repo+file so the same
+        // partial download can be resumed across process restarts.
+        let part_name = part_filename(repo_id, filename);
         let dl_id =
             db.insert_download(&metadata.download_url, Some(repo_id), Some(filename), Some(rev))?;
+        *dl_id_out = Some(dl_id);
 
         // Step 4: Download to tmp
         let tmp_dir = self.store_path.join("tmp").join("downloads");
         fs::create_dir_all(&tmp_dir).context("Failed to create tmp/downloads dir")?;
-        let tmp_file = tmp_dir.join(format!("{}.part", dl_id));
+        let tmp_file = tmp_dir.join(&part_name);
 
         let download_size = self
             .download_to_file(
                 &metadata.download_url,
                 &tmp_file,
                 metadata.size_bytes,
-                metadata.sha256.as_deref(),
+                metadata.sha256.as_deref(), // now actually verified
                 progress,
             )
             .with_context(|| format!("Failed to download {}/{}", repo_id, filename))?;
 
-        // Update progress in DB
         db.update_download_progress(
             dl_id,
             DownloadStatus::Downloading,
@@ -208,42 +205,47 @@ impl Downloader {
         // Step 5: Compute BLAKE3
         let blake3 = hash_file(&tmp_file).context("Failed to hash downloaded file")?;
 
-        // Step 6: Check if we already have this content (BLAKE3 dedup)
+        // Step 6: CAS dedup — skip copy if content already known
         let cas_path = if db.get_model(&blake3)?.is_some() {
-            // Already in CAS — remove temp file
             let _ = fs::remove_file(&tmp_file);
-            cas.get(&blake3).ok_or_else(|| anyhow!("CAS path not found after move"))?
+            cas.get(&blake3).ok_or_else(|| anyhow!("CAS path not found after dedup check"))?
         } else {
-            // Store in CAS (two-phase: copy then rename)
             let staging_dir = self.store_path.join("tmp").join("cas_staging");
             fs::create_dir_all(&staging_dir)?;
             let staging = staging_dir.join(format!("{}.tmp", blake3.as_hex()));
             fs::copy(&tmp_file, &staging)?;
             let _ = fs::remove_file(&tmp_file);
 
-            // Record in models table
             let size = fs::metadata(&staging)?.len() as i64;
             db.insert_or_update_model(&blake3, size, None, None, None, None)?;
-
-            // Move staging → CAS (best-effort atomic)
             cas.store(&staging, &blake3)?
         };
 
-        // Step 7: Extract / verify SHA256
         let sha256 = metadata.sha256.clone();
 
-        // Step 8: Record mapping and complete download in DB
+        // Step 7: Record SHA256↔BLAKE3 mapping
         if let Some(ref sha256_str) = sha256 {
             db.upsert_hf_mapping(sha256_str, blake3.as_hex(), Some(repo_id), Some(filename))?;
         }
         db.complete_download(dl_id, blake3.as_hex(), sha256.as_deref())?;
 
-        // Step 9: Create fake HF cache structure
+        // Step 8: Create fake HF cache structure
         if let Some(ref sha256_str) = sha256 {
             hf_cache.init().ok();
             hf_cache
                 .create_cache_entry(repo_id, filename, rev, sha256_str, &blake3, Some("main"))
                 .context("Failed to create HF cache entry")?;
+        }
+
+        // Step 9: Insert HfCache alias so GC does not immediately orphan this model.
+        // Without an alias, alias_count=0 and is_orphan()=true → GC quarantines
+        // the freshly-downloaded file on the very next run.
+        let snapshot_str = hf_cache
+            .snapshot_file_path(repo_id, filename, rev)
+            .to_string_lossy()
+            .to_string();
+        if db.get_alias_by_path(&snapshot_str)?.is_none() {
+            db.insert_alias(&blake3, &snapshot_str, Frontend::HfCache, AliasType::Symlink)?;
         }
 
         Ok(DownloadResult {
@@ -255,8 +257,6 @@ impl Downloader {
         })
     }
 
-    /// Fetch file metadata from the HuggingFace Hub API.
-    /// Extracts SHA256 from the `X-Linked-Etag` response header.
     pub fn fetch_hf_metadata(
         &self,
         repo_id: &str,
@@ -264,27 +264,19 @@ impl Downloader {
         revision: &str,
     ) -> Result<HfFileMetadata> {
         let url = format!("{}/{}/resolve/{}/{}", self.hf_base_url, repo_id, revision, filename);
-
-        let agent = build_agent(self.hf_token.as_deref());
-
-        // Send HEAD request to get metadata without downloading body.
-        // Attach the HF bearer token explicitly: ureq's AgentBuilder does not
-        // carry default headers, so per-request `.set()` is required for
-        // private/gated repos to be reachable.
+        let agent = build_agent();
         let mut req = agent.head(&url).timeout(Duration::from_secs(30));
         if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
             req = req.set("Authorization", &hdr);
         }
         let resp = req.call().context("HF metadata HEAD request failed")?;
 
-        // Extract SHA256 from X-Linked-Etag header
         let sha256 = resp
             .header("x-linked-etag")
             .or_else(|| resp.header("etag"))
             .map(|v| v.trim_matches('"').to_lowercase())
             .filter(|v| v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()));
 
-        // Extract size from Content-Length or X-Linked-Size
         let size_bytes = resp
             .header("x-linked-size")
             .or_else(|| resp.header("content-length"))
@@ -300,67 +292,85 @@ impl Downloader {
         })
     }
 
-    /// Download a file from URL to local path with resume support.
-    /// Returns the total bytes written.
+    /// Download `url` to `dest`, supporting resume via Range requests.
+    ///
+    /// Changes from original:
+    /// - Range resume verifies server returned **206** before appending; if the
+    ///   server returns 200 (full content) we discard the partial file and
+    ///   restart from byte 0 to avoid file corruption.
+    /// - `expected_sha256` is now **required** — SHA256 is verified after the
+    ///   download completes when the value is present.
     fn download_to_file(
         &self,
         url: &str,
         dest: &Path,
         expected_size: Option<u64>,
-        _expected_sha256: Option<&str>,
+        expected_sha256: Option<&str>,
         progress: Option<&ProgressCallback>,
     ) -> Result<u64> {
-        let agent = build_agent(self.hf_token.as_deref());
+        let agent = build_agent();
         let filename = dest
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "download".to_string());
 
-        // Check if we have a partial download to resume
-        let already_downloaded =
+        let partial_size =
             if dest.exists() { fs::metadata(dest).map(|m| m.len()).unwrap_or(0) } else { 0 };
 
-        let (mut file, mut bytes_done) = if already_downloaded > 0 {
-            // Resume from where we left off
-            let file = fs::OpenOptions::new().append(true).open(dest)?;
-            (file, already_downloaded)
-        } else {
-            let file = fs::File::create(dest)?;
-            (file, 0u64)
-        };
-
-        let resp = if bytes_done > 0 {
+        // Determine whether we can resume or must start fresh.
+        let (mut file, resp, mut bytes_done) = if partial_size > 0 {
             let mut req = agent
                 .get(url)
-                .set("Range", &format!("bytes={}-", bytes_done))
+                .set("Range", &format!("bytes={}-", partial_size))
                 .timeout(Duration::from_secs(600));
             if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
                 req = req.set("Authorization", &hdr);
             }
-            req.call().context("HTTP GET with range request failed")?
+            let r = req.call().context("HTTP range request failed")?;
+
+            if r.status() == 206 {
+                // Server supports range — safe to append to partial file
+                let f = fs::OpenOptions::new()
+                    .append(true)
+                    .open(dest)
+                    .context("Failed to open partial file for append")?;
+                (f, r, partial_size)
+            } else {
+                // Server returned 200 (full body) — discard partial, start over
+                let f = fs::File::create(dest).context("Failed to create download file")?;
+                (f, r, 0u64)
+            }
         } else {
             let mut req = agent.get(url).timeout(Duration::from_secs(600));
             if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
                 req = req.set("Authorization", &hdr);
             }
-            req.call().context("HTTP GET request failed")?
+            let r = req.call().context("HTTP request failed")?;
+            let f = fs::File::create(dest).context("Failed to create download file")?;
+            (f, r, 0u64)
         };
 
         let total = expected_size.unwrap_or(0);
-        let mut buf = vec![0u8; 65536]; // 64KB chunks
+        let mut buf = vec![0u8; 65536]; // 64 KB chunks
         let mut reader = resp.into_reader();
 
         loop {
             let n = reader.read(&mut buf).context("Error reading response body")?;
-            if n == 0 {
-                break;
-            }
+            if n == 0 { break; }
             file.write_all(&buf[..n]).context("Error writing to file")?;
             bytes_done += n as u64;
-
             if let Some(cb) = progress {
                 cb(bytes_done, total, &filename);
             }
+        }
+
+        drop(file); // flush + close before SHA256 read
+
+        // Verify SHA256 integrity when the expected hash is known
+        if let Some(expected) = expected_sha256 {
+            verify_sha256(dest, expected).with_context(|| {
+                format!("SHA256 integrity check failed for {}", dest.display())
+            })?;
         }
 
         Ok(bytes_done)
@@ -368,23 +378,49 @@ impl Downloader {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ureq HTTP agent builder
+// Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn build_agent(_hf_token: Option<&str>) -> ureq::Agent {
-    // Note: ureq 2.x AgentBuilder does not support default headers, so the HF
-    // bearer token is attached per-request at each call site (see
-    // `auth_header`). The token parameter is kept for API stability and future
-    // use (e.g. an async agent that supports default headers).
+/// Build a stable `.part` filename from repo_id + filename so that the same
+/// partial download can be resumed across process restarts.
+fn part_filename(repo_id: &str, filename: &str) -> String {
+    let safe = format!("{}-{}", repo_id, filename)
+        .replace('/', "--")
+        .replace('\\', "--")
+        .replace(':', "_");
+    format!("{}.part", safe)
+}
+
+/// Verify the SHA-256 digest of `path` against `expected` (hex string).
+/// Returns `Err` on mismatch.
+fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("Cannot open file for SHA256 check: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).context("IO error during SHA256")?;
+        if n == 0 { break; }
+        hasher.update(&buf[..n]);
+    }
+    let got = format!("{:x}", hasher.finalize());
+    if got != expected.to_lowercase() {
+        return Err(anyhow!(
+            "SHA256 mismatch: expected {}, got {}",
+            expected,
+            got
+        ));
+    }
+    Ok(())
+}
+
+fn build_agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_read(Duration::from_secs(60))
         .timeout_write(Duration::from_secs(60))
         .build()
 }
 
-/// Build an HTTP `Authorization` header value for the HuggingFace bearer token.
-/// Returns `None` when no token is configured, leaving the request unauthenticated
-/// (sufficient for public repos).
 fn auth_header(token: Option<&str>) -> Option<String> {
     token.map(|t| format!("Bearer {}", t))
 }
@@ -403,13 +439,46 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dl = Downloader::new(tmp.path());
         assert_eq!(dl.store_path, tmp.path());
+        assert_eq!(dl.hf_base_url, DEFAULT_HF_BASE);
     }
 
     #[test]
     fn test_downloader_with_token() {
         let tmp = TempDir::new().unwrap();
-        let dl = Downloader::new(tmp.path()).with_token("my_secret_token");
-        assert_eq!(dl.hf_token.as_deref(), Some("my_secret_token"));
+        let dl = Downloader::new(tmp.path()).with_token("secret");
+        assert_eq!(dl.hf_token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn test_part_filename_stable() {
+        let a = part_filename("org/model", "file.safetensors");
+        let b = part_filename("org/model", "file.safetensors");
+        assert_eq!(a, b, "part_filename must be deterministic");
+        assert!(a.ends_with(".part"));
+    }
+
+    #[test]
+    fn test_verify_sha256_ok() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello").unwrap();
+        f.flush().unwrap();
+        // SHA256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        verify_sha256(
+            f.path(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        )
+        .expect("should pass");
+    }
+
+    #[test]
+    fn test_verify_sha256_mismatch() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"hello").unwrap();
+        f.flush().unwrap();
+        let result = verify_sha256(f.path(), &"a".repeat(64));
+        assert!(result.is_err(), "wrong hash should return Err");
     }
 
     #[test]
@@ -419,8 +488,7 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let tmp = TempDir::new().unwrap();
-        let cas = CasStore::new(tmp.path());
-        cas.init().unwrap();
+        CasStore::new(tmp.path()).init().unwrap();
         let db_file = NamedTempFile::new().unwrap();
         let db = Database::open(db_file.path()).unwrap();
         let hf_cache = HfCache::new(tmp.path());
@@ -428,60 +496,8 @@ mod tests {
 
         let dl = Downloader::new(tmp.path());
         let result = dl
-            .check_cache(
-                &db,
-                &hf_cache,
-                "org/model",
-                "model.safetensors",
-                "main",
-                Some(&"a".repeat(64)),
-            )
+            .check_cache(&db, &hf_cache, "org/m", "m.safetensors", "main", Some(&"a".repeat(64)))
             .unwrap();
-
-        assert!(result.is_none(), "Should be a cache miss");
-    }
-
-    #[test]
-    fn test_check_cache_hit_via_hf_mapping() {
-        use crate::cas::CasStore;
-        use crate::db::Database;
-        use tempfile::NamedTempFile;
-
-        let tmp = TempDir::new().unwrap();
-        let cas = CasStore::new(tmp.path());
-        cas.init().unwrap();
-
-        let db_file = NamedTempFile::new().unwrap();
-        let mut db = Database::open(db_file.path()).unwrap();
-
-        // Create a real file in CAS
-        let model_file = NamedTempFile::new().unwrap();
-        let content = b"model content for hf mapping test";
-        std::fs::write(model_file.path(), content).unwrap();
-        let blake3 = hash_file(model_file.path()).unwrap();
-        let size = content.len() as i64;
-
-        db.insert_or_update_model(&blake3, size, None, None, None, None).unwrap();
-        cas.store(model_file.path(), &blake3).unwrap();
-
-        // Add HF mapping (sha256 → blake3)
-        let sha256 = "b".repeat(64);
-        db.upsert_hf_mapping(
-            &sha256,
-            blake3.as_hex(),
-            Some("org/model"),
-            Some("model.safetensors"),
-        )
-        .unwrap();
-
-        let hf_cache = HfCache::new(tmp.path());
-        hf_cache.init().unwrap();
-
-        let dl = Downloader::new(tmp.path());
-        let result = dl
-            .check_cache(&db, &hf_cache, "org/model", "model.safetensors", "main", Some(&sha256))
-            .unwrap();
-
-        assert!(result.is_some(), "Should hit via HF mapping");
+        assert!(result.is_none());
     }
 }

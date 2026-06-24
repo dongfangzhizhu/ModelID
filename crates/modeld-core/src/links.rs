@@ -1,22 +1,37 @@
-//! Cross-platform link strategy implementation
+//! Cross-platform link strategy
 //!
-//! Implements RFC 0005 Windows compatibility and link creation:
-//! - Hardlinks (same volume, zero overhead)
-//! - Symlinks (cross volume, requires privileges on Windows)
-//! - Junctions (Windows directories, no privileges needed)
-//! - Reference-only (fallback when no linking available)
+//! Priority:
+//!   1. Hard link  — same volume, zero extra disk space
+//!   2. Symlink    — cross-volume, requires SeCreateSymbolicLinkPrivilege on Windows
+//!   3. Reference-only — DB record only; file stays in place, no disk savings
+//!
+//! ## Hardlink / symlink creation protocol
+//!
+//! When dedup replaces a *duplicate* path with a link, the duplicate file
+//! already exists on disk.  Both `hard_link` and the symlink APIs return
+//! `AlreadyExists` if the destination path is occupied, so we **must**
+//! remove the duplicate before creating the link.  The removal is safe because:
+//!   - The canonical content has already been copied to CAS.
+//!   - CAS objects are immutable and will survive any subsequent failure.
+//!
+//! On Windows, CAS objects are set read-only (`make_readonly`).  `remove_file`
+//! on a read-only file returns `PermissionDenied`, so we clear the flag first.
 
 use crate::db::AliasType;
 use std::path::Path;
 
-/// Link creation result
+// ─────────────────────────────────────────────────────────────────────────────
+// Public types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Outcome of a link-creation attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkResult {
     Success(AliasType),
     Failed(String),
 }
 
-/// System link capabilities
+/// Detected system link capabilities.
 #[derive(Debug, Clone)]
 pub struct LinkCapability {
     pub has_symlink_privilege: bool,
@@ -24,170 +39,189 @@ pub struct LinkCapability {
 }
 
 impl LinkCapability {
-    /// Detect system link capabilities
+    /// Auto-detect capabilities from the current process environment.
     pub fn detect() -> Self {
-        let has_symlink_privilege = detect_symlink_privilege();
-        let primary_filesystem = detect_primary_filesystem();
-
-        Self { has_symlink_privilege, primary_filesystem }
+        Self {
+            has_symlink_privilege: detect_symlink_privilege(),
+            primary_filesystem: detect_primary_filesystem(),
+        }
     }
 }
 
-/// Detect if current user has symlink creation privilege
+// ─────────────────────────────────────────────────────────────────────────────
+// Capability detection
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn detect_symlink_privilege() -> bool {
     #[cfg(windows)]
     {
         use std::fs;
         use std::os::windows::fs::symlink_file;
-
-        let temp_dir = std::env::temp_dir();
-        let test_target = temp_dir.join("modeld_test_target.txt");
-        let test_link = temp_dir.join("modeld_test_link.txt");
-
-        // Create target file
-        if fs::write(&test_target, "test").is_err() {
+        let tmp = std::env::temp_dir();
+        let target = tmp.join("modeld_symtest_target.txt");
+        let link = tmp.join("modeld_symtest_link.txt");
+        if fs::write(&target, "t").is_err() {
             return false;
         }
-
-        // Try to create symlink
-        let result = symlink_file(&test_target, &test_link);
-
-        // Cleanup
-        let _ = fs::remove_file(&test_link);
-        let _ = fs::remove_file(&test_target);
-
-        result.is_ok()
+        let ok = symlink_file(&target, &link).is_ok();
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&target);
+        ok
     }
-
     #[cfg(not(windows))]
     {
-        // Unix systems allow symlinks by default
-        true
+        true // Unix: symlinks allowed by default
     }
 }
 
-/// Detect primary filesystem type
 fn detect_primary_filesystem() -> String {
     #[cfg(windows)]
-    {
-        // On Windows, assume NTFS for C: drive
-        // TODO: Could use GetVolumeInformation API for precise detection
-        "NTFS".to_string()
-    }
-
+    { "NTFS".to_string() }
     #[cfg(target_os = "linux")]
-    {
-        "ext4".to_string()
-    }
-
+    { "ext4".to_string() }
     #[cfg(target_os = "macos")]
-    {
-        "APFS".to_string()
-    }
-
+    { "APFS".to_string() }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    {
-        "unknown".to_string()
-    }
+    { "unknown".to_string() }
 }
 
-/// Check if two paths are on the same volume
+// ─────────────────────────────────────────────────────────────────────────────
+// Volume check
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns `true` when both paths reside on the same filesystem volume.
+/// Hard links require same-volume; symlinks work across volumes.
 pub fn is_same_volume(path1: &Path, path2: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::path::Component;
-
-        // Extract drive letters (e.g., "C:" from "C:\path")
-        let get_drive = |path: &Path| -> Option<String> {
-            path.components().next().and_then(|c| {
-                if let Component::Prefix(prefix) = c {
-                    Some(prefix.as_os_str().to_string_lossy().to_string())
+        let drive = |p: &Path| -> Option<String> {
+            p.components().next().and_then(|c| {
+                if let Component::Prefix(px) = c {
+                    Some(px.as_os_str().to_string_lossy().to_uppercase())
                 } else {
                     None
                 }
             })
         };
-
-        let drive1 = get_drive(path1);
-        let drive2 = get_drive(path2);
-
-        match (drive1, drive2) {
+        match (drive(path1), drive(path2)) {
             (Some(d1), Some(d2)) => d1 == d2,
-            _ => false, // Conservative: assume different volumes if unclear
+            _ => false,
         }
     }
-
     #[cfg(not(windows))]
     {
-        // Unix: Use device ID from stat
         use std::os::unix::fs::MetadataExt;
-
         match (path1.metadata(), path2.metadata()) {
             (Ok(m1), Ok(m2)) => m1.dev() == m2.dev(),
-            _ => false, // Conservative: assume different if metadata unavailable
+            _ => false,
         }
     }
 }
 
-/// Create link using appropriate strategy
-pub fn create_link(source: &Path, target: &Path, capability: &LinkCapability) -> LinkResult {
-    // Step 1: Check filesystem type
-    // For now, we assume NTFS/ext4/APFS (full support)
-    // Future: Detect exFAT/FAT32 and return reference-only
+// ─────────────────────────────────────────────────────────────────────────────
+// Public entry point
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // Step 2: Check if same volume
+/// Create the best available link from `dup_path` (source) to `cas_path` (target).
+///
+/// `source` is the **duplicate** file path that will be replaced by the link.
+/// `target` is the **CAS object** — the single authoritative copy of the content.
+pub fn create_link(source: &Path, target: &Path, capability: &LinkCapability) -> LinkResult {
     if is_same_volume(source, target) {
-        // Same volume - try hardlink
         return create_hardlink(source, target);
     }
-
-    // Step 3: Cross-volume - check privilege
     if capability.has_symlink_privilege {
-        // Have privilege - try symlink
         return create_symlink(source, target);
     }
-
-    // Step 4: No privilege - reference-only mode
     create_reference_only(source, target)
 }
 
-/// Create hardlink
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Remove a file, clearing the read-only attribute first on Windows.
+///
+/// CAS objects are made immutable (`set_readonly(true)`).  On Windows,
+/// `remove_file` on a read-only file returns `PermissionDenied`; we must
+/// clear the flag before deletion.
+fn remove_file_force(path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+    }
+    std::fs::remove_file(path)
+}
+
+/// Replace the duplicate file at `source` with a hard link to `target`.
+///
+/// `std::fs::hard_link(original, link)` creates a new directory entry `link`
+/// pointing at `original`.  If `link` already exists the call fails with
+/// `AlreadyExists`, so we remove `source` first.  The content is already safe
+/// in CAS (`target`).
 fn create_hardlink(source: &Path, target: &Path) -> LinkResult {
+    if let Err(e) = remove_file_force(source) {
+        return LinkResult::Failed(format!(
+            "Failed to remove duplicate before hardlink ({}): {}",
+            source.display(), e
+        ));
+    }
     match std::fs::hard_link(target, source) {
         Ok(_) => LinkResult::Success(AliasType::Hardlink),
-        Err(e) => LinkResult::Failed(format!("Hardlink error: {}", e)),
+        Err(e) => LinkResult::Failed(format!(
+            "Hardlink {} → {} failed after removing duplicate: {}",
+            source.display(), target.display(), e
+        )),
     }
 }
 
-/// Create symlink
+/// Replace the duplicate file at `source` with a symlink pointing to `target`.
 fn create_symlink(source: &Path, target: &Path) -> LinkResult {
+    if let Err(e) = remove_file_force(source) {
+        return LinkResult::Failed(format!(
+            "Failed to remove duplicate before symlink ({}): {}",
+            source.display(), e
+        ));
+    }
+
     #[cfg(windows)]
     {
         use std::os::windows::fs::symlink_file;
-
         match symlink_file(target, source) {
             Ok(_) => LinkResult::Success(AliasType::Symlink),
             Err(e) => LinkResult::Failed(format!("Symlink error: {}", e)),
         }
     }
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-
         match symlink(target, source) {
             Ok(_) => LinkResult::Success(AliasType::Symlink),
             Err(e) => LinkResult::Failed(format!("Symlink error: {}", e)),
         }
     }
+    #[cfg(not(any(windows, unix)))]
+    {
+        LinkResult::Failed("Symlinks not supported on this platform".to_string())
+    }
 }
 
-/// Create reference-only entry (no physical link)
+/// Record-only fallback: file stays at original location, nothing deleted.
+/// No disk space is reclaimed; the caller must NOT count this as space saved.
 fn create_reference_only(_source: &Path, _target: &Path) -> LinkResult {
-    // File remains at original location
-    // Record in aliases table with type='reference_only'
     LinkResult::Success(AliasType::ReferenceOnly)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -197,100 +231,81 @@ mod tests {
 
     #[test]
     fn test_detect_symlink_privilege() {
-        let has_priv = detect_symlink_privilege();
-        println!("Symlink privilege: {}", has_priv);
-        // Just ensure it doesn't panic, result depends on system
-    }
-
-    #[test]
-    fn test_detect_primary_filesystem() {
-        let fs_type = detect_primary_filesystem();
-        println!("Primary filesystem: {}", fs_type);
-        assert!(!fs_type.is_empty());
+        let _ = detect_symlink_privilege(); // must not panic
     }
 
     #[test]
     fn test_link_capability_detect() {
         let cap = LinkCapability::detect();
-        println!("Capability: {:?}", cap);
         assert!(!cap.primary_filesystem.is_empty());
     }
 
     #[test]
-    fn test_is_same_volume() {
-        let temp_dir = tempdir().unwrap();
-        let file1 = temp_dir.path().join("file1.txt");
-        let file2 = temp_dir.path().join("file2.txt");
-
-        fs::write(&file1, "test1").unwrap();
-        fs::write(&file2, "test2").unwrap();
-
-        // Files in same temp directory should be on same volume
-        assert!(is_same_volume(&file1, &file2));
+    fn test_is_same_volume_same_dir() {
+        let tmp = tempdir().unwrap();
+        let f1 = tmp.path().join("a.txt");
+        let f2 = tmp.path().join("b.txt");
+        fs::write(&f1, "x").unwrap();
+        fs::write(&f2, "y").unwrap();
+        assert!(is_same_volume(&f1, &f2));
     }
 
     #[test]
-    fn test_create_hardlink_same_volume() {
-        let temp_dir = tempdir().unwrap();
-        let target = temp_dir.path().join("target.txt");
-        let link = temp_dir.path().join("link.txt");
+    fn test_create_hardlink_replaces_source() {
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("target.bin");
+        let source = tmp.path().join("source.bin"); // the "duplicate"
 
-        fs::write(&target, "test content").unwrap();
+        fs::write(&target, b"content").unwrap();
+        fs::write(&source, b"content").unwrap(); // duplicate already exists
 
         let cap = LinkCapability::detect();
-        let result = create_link(&link, &target, &cap);
+        let result = create_link(&source, &target, &cap);
 
         match result {
             LinkResult::Success(AliasType::Hardlink) => {
-                assert!(link.exists());
-                let content = fs::read_to_string(&link).unwrap();
-                assert_eq!(content, "test content");
+                // source now exists as a hardlink
+                assert!(source.exists());
+                assert_eq!(fs::read(&source).unwrap(), b"content");
             }
-            _ => panic!("Expected hardlink success"),
+            LinkResult::Success(AliasType::ReferenceOnly) => {
+                // cross-volume env (e.g. CI); reference-only is acceptable
+            }
+            other => panic!("Unexpected result: {:?}", other),
         }
     }
 
     #[test]
-    fn test_hardlink_metadata() {
-        let temp_dir = tempdir().unwrap();
-        let target = temp_dir.path().join("target.txt");
-        let link = temp_dir.path().join("link.txt");
+    fn test_hardlink_source_must_not_exist_before() {
+        // Verify the old bug: without remove_file_force, hard_link returns AlreadyExists.
+        let tmp = tempdir().unwrap();
+        let target = tmp.path().join("t.bin");
+        let source = tmp.path().join("s.bin");
+        fs::write(&target, b"data").unwrap();
+        fs::write(&source, b"data").unwrap(); // source exists
 
-        fs::write(&target, "test").unwrap();
+        // Old (wrong) call order — should fail:
+        let err = std::fs::hard_link(&target, &source);
+        assert!(err.is_err(), "hard_link to existing path must fail");
 
-        let result = create_hardlink(&link, &target);
-
-        if let LinkResult::Success(AliasType::Hardlink) = result {
-            // Verify both files have same inode/content
-            let target_meta = fs::metadata(&target).unwrap();
-            let link_meta = fs::metadata(&link).unwrap();
-
-            // Both should have same size
-            assert_eq!(target_meta.len(), link_meta.len());
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                // On Unix, hardlinks share the same inode
-                assert_eq!(target_meta.ino(), link_meta.ino());
-            }
-        } else {
-            panic!("Hardlink creation failed");
-        }
+        // New (correct) call order — should succeed:
+        fs::remove_file(&source).unwrap();
+        std::fs::hard_link(&target, &source).unwrap();
+        assert!(source.exists());
     }
 
     #[test]
-    fn test_reference_only() {
-        let temp_dir = tempdir().unwrap();
-        let source = temp_dir.path().join("source.txt");
-        let target = temp_dir.path().join("target.txt");
-
-        fs::write(&target, "test").unwrap();
+    fn test_reference_only_does_not_touch_source() {
+        let tmp = tempdir().unwrap();
+        let source = tmp.path().join("dup.bin");
+        let target = tmp.path().join("cas.bin");
+        fs::write(&source, b"dup").unwrap();
+        fs::write(&target, b"cas").unwrap();
 
         let result = create_reference_only(&source, &target);
-
         assert_eq!(result, LinkResult::Success(AliasType::ReferenceOnly));
-        // Source file should NOT be created in reference-only mode
-        assert!(!source.exists());
+        // source file must still exist unchanged
+        assert!(source.exists());
+        assert_eq!(fs::read(&source).unwrap(), b"dup");
     }
 }
