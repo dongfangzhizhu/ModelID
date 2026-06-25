@@ -89,7 +89,7 @@ fn seed_blob(store_path: &std::path::Path, contents: &[u8]) -> (String, u64) {
 
 #[test]
 fn test_health_endpoint() {
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let h = proxy.client().health().unwrap();
     assert_eq!(h.status, "ok");
     assert_eq!(h.version, env!("CARGO_PKG_VERSION"));
@@ -97,14 +97,14 @@ fn test_health_endpoint() {
 
 #[test]
 fn test_list_models_empty() {
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let models = proxy.client().list_models().unwrap();
     assert!(models.is_empty());
 }
 
 #[test]
 fn test_list_models_after_seed() {
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let (hash, size) = seed_blob(&proxy.store_path, b"hello modeld world");
     let models = proxy.client().list_models().unwrap();
     assert_eq!(models.len(), 1);
@@ -115,7 +115,7 @@ fn test_list_models_after_seed() {
 #[test]
 fn test_blob_download_full_and_verify_hash() {
     let payload = b"the quick brown fox jumps over the lazy dog 0123456789";
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let (hash, _size) = seed_blob(&proxy.store_path, payload);
 
     let dest = proxy.store_path.join("downloaded.bin");
@@ -135,7 +135,7 @@ fn test_blob_download_full_and_verify_hash() {
 fn test_blob_range_request() {
     // Build a payload with known bytes.
     let payload: Vec<u8> = (0..200u8).collect();
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let (hash, _size) = seed_blob(&proxy.store_path, &payload);
 
     // Request bytes 10-29 via raw ureq (Range header).
@@ -153,7 +153,7 @@ fn test_blob_range_request() {
 
 #[test]
 fn test_blob_404_for_unknown_hash() {
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let url = format!("{}/v1/blobs/{}", proxy.url, "f".repeat(64));
     let resp = ureq::get(&url).call();
     assert!(resp.is_err());
@@ -201,7 +201,7 @@ fn test_health_is_public_without_token() {
 
 #[test]
 fn test_unknown_route_returns_404() {
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let url = format!("{}/v1/nonexistent", proxy.url);
     let resp = ureq::get(&url).call();
     assert!(resp.is_err());
@@ -214,7 +214,7 @@ fn test_hf_proxy_hit_from_fake_cache() {
     // without touching the real HuggingFace network.
     use modeld_core::HfCache;
 
-    let proxy = TestProxy::start(ProxyConfig::default());
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let cas = CasStore::new(&proxy.store_path);
     cas.init().unwrap();
     let hf_cache = HfCache::new(&proxy.store_path);

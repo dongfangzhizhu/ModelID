@@ -101,29 +101,27 @@ impl DedupEngine {
         Self { db, store_path, link_capability }
     }
 
-    /// Find duplicate groups from the aliases table.
+    /// Find duplicate groups using a single batch DB query (avoids N+1).
     pub fn find_duplicates(&self) -> Result<Vec<DuplicateGroup>> {
-        let models = self.db.list_models(None)?;
+        let batch = self.db.find_duplicate_groups()?;
         let mut groups = Vec::new();
-        for model in models {
-            let aliases = self.db.get_aliases_for_model(&model.blake3_hash)?;
-            if aliases.len() >= 2 {
-                let mut files = Vec::new();
-                for alias in aliases {
-                    let p = PathBuf::from(&alias.path);
-                    if p.exists() {
-                        if let Ok(info) = FileInfo::from_path(&p) {
-                            files.push(info);
-                        }
+
+        for (hash, size_bytes, aliases) in batch {
+            let mut files = Vec::new();
+            for alias in &aliases {
+                let p = PathBuf::from(&alias.path);
+                if p.exists() {
+                    if let Ok(info) = FileInfo::from_path(&p) {
+                        files.push(info);
                     }
                 }
-                if files.len() >= 2 {
-                    groups.push(DuplicateGroup {
-                        hash: model.blake3_hash.clone(),
-                        files,
-                        total_size: model.size_bytes as u64,
-                    });
-                }
+            }
+            if files.len() >= 2 {
+                groups.push(DuplicateGroup {
+                    hash,
+                    files,
+                    total_size: size_bytes as u64,
+                });
             }
         }
         Ok(groups)
@@ -274,7 +272,14 @@ impl DedupEngine {
             let cas_dir = cas_path.parent().unwrap();
             std::fs::create_dir_all(cas_dir)?;
 
-            if std::fs::rename(&staging_path, &cas_path).is_err() {
+            if let Err(rename_err) = std::fs::rename(&staging_path, &cas_path) {
+                // Cross-volume moves fail with EXDEV / ERROR_NOT_SAME_DEVICE;
+                // log the reason and fall back to copy+delete.
+                eprintln!(
+                    "dedup: rename {} → {} failed ({rename_err}); using copy fallback",
+                    staging_path.display(),
+                    cas_path.display()
+                );
                 std::fs::copy(&staging_path, &cas_path).with_context(|| {
                     format!("Failed to copy staging to CAS: {}", cas_path.display())
                 })?;

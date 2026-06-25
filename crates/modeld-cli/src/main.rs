@@ -3,9 +3,9 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
-    build_model_lookup, find_workflow_files, hash_file, index_workflow, parse_workflow, t, tf,
-    CasStore, Database, DedupEngine, DedupMode, Downloader, GcEngine, HfCache, QuarantineManager,
-    Scanner,
+    build_model_lookup, find_workflow_files, hash_file, index_workflow, parse_workflow, run_fsck,
+    t, tf, unlink_path, CasStore, Database, DedupEngine, DedupMode, Downloader, GcEngine, HfCache,
+    QuarantineManager, Scanner,
 };
 use std::path::{Path, PathBuf};
 
@@ -195,6 +195,26 @@ enum Commands {
         /// Also clean up expired quarantine entries (>30 days)
         #[arg(long)]
         cleanup_quarantine: bool,
+        /// Also remove stale .part and .tmp files from the tmp directory
+        #[arg(long)]
+        cleanup_tmp: bool,
+    },
+    /// Verify store consistency: check CAS, aliases, and DB agree
+    Verify {
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a hardlinked/symlinked file to an independent physical copy
+    Unlink {
+        /// File path to restore (must have a hardlink/symlink alias in the DB)
+        path: PathBuf,
+        /// Store directory
+        #[arg(short = 's', long, default_value = ".modeld")]
+        store: PathBuf,
     },
     /// Local registry & proxy server (Phase 5)
     Proxy {
@@ -219,8 +239,8 @@ enum ProxyAction {
         /// Require a bearer token (set this to enable auth)
         #[arg(long)]
         token: Option<String>,
-        /// Allow anonymous (unauthenticated) access
-        #[arg(long, default_value = "true")]
+        /// Allow anonymous (unauthenticated) access (default: false for security)
+        #[arg(long, default_value = "false")]
         allow_anonymous: bool,
         /// Path to a modeld.toml config file
         #[arg(long)]
@@ -283,9 +303,11 @@ fn main() -> Result<()> {
         Commands::WorkflowScan { path, store } => workflow_scan_command(store, path)?,
         Commands::WorkflowDeps { file, store } => workflow_deps_command(store, file)?,
         Commands::RefsOrphans { store, json } => refs_orphans_command(store, json)?,
-        Commands::Gc { store, preview, cleanup_quarantine } => {
-            gc_command(store, preview, cleanup_quarantine)?
+        Commands::Gc { store, preview, cleanup_quarantine, cleanup_tmp } => {
+            gc_command(store, preview, cleanup_quarantine, cleanup_tmp)?
         }
+        Commands::Verify { store, json } => verify_command(store, json)?,
+        Commands::Unlink { path, store } => unlink_command(store, path)?,
         Commands::Proxy { action } => proxy_command(action)?,
     }
 
@@ -362,7 +384,26 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
     // Exclude the store directory from scanning to prevent CAS objects,
     // quarantine files, and staging temps from being re-ingested (audit 5.8).
     let store_canonical = std::fs::canonicalize(&store_path).unwrap_or(store_path.clone());
-    let scanner = Scanner::new().with_excluded_dirs(vec![store_canonical]);
+
+    // Auto-initialize the store so users don't need `modeld init` first.
+    std::fs::create_dir_all(&store_path)
+        .with_context(|| format!("Failed to create store directory: {}", store_path.display()))?;
+    let cas = CasStore::new(&store_path);
+    cas.init()?;
+    let db_path = store_path.join("modeld.db");
+    let mut db = Database::open(&db_path)?;
+    let qm = QuarantineManager::new(&store_path);
+    qm.init()?;
+
+    // Build incremental cache: path → (hash, size) for already-indexed files.
+    // scan() will skip re-hashing files whose on-disk size matches the cached
+    // size (audit 5.6).
+    let preindexed = db.get_all_indexed_paths().unwrap_or_default();
+    let cached_count = preindexed.len();
+
+    let scanner = Scanner::new()
+        .with_excluded_dirs(vec![store_canonical])
+        .with_preindexed(preindexed);
 
     // Quick count first
     let (file_count, total_size) = scanner.count_files(&scan_path)?;
@@ -377,21 +418,12 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
         "{}\n",
         tf("scan.found", &[("count", &file_count), ("gb", &gb)]).bold()
     );
-
-    // Auto-initialize the store if it doesn't exist yet (so users don't need
-    // to run `modeld init` before their first scan).
-    std::fs::create_dir_all(&store_path)
-        .with_context(|| format!("Failed to create store directory: {}", store_path.display()))?;
-
-    // Initialize components
-    let cas = CasStore::new(&store_path);
-    cas.init()?;
-    let db_path = store_path.join("modeld.db");
-    let mut db = Database::open(&db_path)?;
-
-    // Initialize quarantine directory
-    let qm = QuarantineManager::new(&store_path);
-    qm.init()?;
+    if cached_count > 0 {
+        println!(
+            "  {}",
+            tf("scan.incremental", &[("count", &cached_count)]).dimmed()
+        );
+    }
 
     // Create progress bar
     let pb = ProgressBar::new(file_count as u64);
@@ -402,7 +434,7 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
             .progress_chars("#>-"),
     );
 
-    // Scan and process
+    // Scan and process (hashing now runs in parallel via Rayon — audit 3.3)
     let results = scanner.scan(&scan_path, |path, size| {
         let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
         let mb = format!("{:.2}", size as f64 / 1_048_576.0);
@@ -1400,7 +1432,7 @@ fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result<()> {
+fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool, cleanup_tmp: bool) -> Result<()> {
     let db_path = store.join("modeld.db");
     if !db_path.exists() {
         anyhow::bail!("{}", t("store.not_initialized_exit"));
@@ -1523,6 +1555,118 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool) -> Result
         }
     }
 
+    if cleanup_tmp {
+        println!("\n{}", t("gc.cleanup_tmp_header").bold());
+        // Part files: keep for 7 days (in case a slow download can be resumed)
+        // Staging files: keep for 1 day (should be renamed to CAS quickly)
+        let removed = modeld_core::GcEngine::cleanup_tmp(&store, 7 * 24, 24)?;
+        if removed > 0 {
+            println!(
+                "  {}",
+                tf("gc.cleanup_tmp_done", &[("count", &removed)]).green().bold()
+            );
+        } else {
+            println!("  {}", t("gc.cleanup_tmp_none"));
+        }
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verify (fsck) command
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
+    let db_path = require_store_db(&store_path)?;
+    let db = Database::open(&db_path)?;
+
+    println!("{}", t("verify.running").cyan().bold());
+    let report = run_fsck(&db, &store_path)?;
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::json!({
+                "clean": report.is_clean(),
+                "total_issues": report.total_issues(),
+                "missing_cas": report.missing_cas.iter().map(|h| h.as_hex()).collect::<Vec<_>>(),
+                "dangling_aliases": report.dangling_aliases.iter().map(|a| &a.path).collect::<Vec<_>>(),
+                "size_mismatches": report.size_mismatches.iter().map(|s| {
+                    serde_json::json!({"hash": s.hash.as_hex(), "db_bytes": s.db_size, "disk_bytes": s.disk_size})
+                }).collect::<Vec<_>>(),
+                "orphan_cas_count": report.orphan_cas.len(),
+            })
+        );
+        return Ok(());
+    }
+
+    if report.is_clean() {
+        println!("{}", t("verify.clean").green().bold());
+        return Ok(());
+    }
+
+    println!(
+        "{} {}",
+        "⚠".yellow().bold(),
+        tf("verify.issues_found", &[("count", &report.total_issues())]).yellow().bold()
+    );
+    println!("{}", "─".repeat(50).yellow());
+
+    if !report.missing_cas.is_empty() {
+        println!("\n  {} {}", "✗".red(), tf("verify.missing_cas", &[("count", &report.missing_cas.len())]).red().bold());
+        for h in &report.missing_cas {
+            println!("    {}", h.as_hex()[..16].to_string().dimmed());
+        }
+    }
+
+    if !report.dangling_aliases.is_empty() {
+        println!("\n  {} {}", "✗".red(), tf("verify.dangling_aliases", &[("count", &report.dangling_aliases.len())]).red().bold());
+        for a in &report.dangling_aliases {
+            println!("    {}", a.path.dimmed());
+        }
+    }
+
+    if !report.size_mismatches.is_empty() {
+        println!("\n  {} {}", "⚠".yellow(), tf("verify.size_mismatches", &[("count", &report.size_mismatches.len())]).yellow().bold());
+        for s in &report.size_mismatches {
+            println!(
+                "    {} db={} disk={}",
+                s.hash.as_hex()[..16].to_string().dimmed(),
+                format_bytes(s.db_size as u64),
+                format_bytes(s.disk_size),
+            );
+        }
+    }
+
+    if !report.orphan_cas.is_empty() {
+        println!("\n  {} {}", "•".blue(), tf("verify.orphan_cas", &[("count", &report.orphan_cas.len())]).bold());
+    }
+
+    println!();
+    println!("{}", t("verify.fix_hint").dimmed());
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unlink (undo-dedup) command
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn unlink_command(store_path: PathBuf, path: PathBuf) -> Result<()> {
+    let db_path = require_store_db(&store_path)?;
+    let mut db = Database::open(&db_path)?;
+
+    println!("{}", tf("unlink.start", &[("path", &path.display())]).cyan());
+    let result = unlink_path(&mut db, &store_path, &path)?;
+
+    println!(
+        "{} {}",
+        "✓".green().bold(),
+        tf("unlink.done", &[("path", &result.path.display())]).bold()
+    );
+    let size = format_bytes(result.size_bytes);
+    println!("  {}", tf("unlink.was", &[("type", &result.previous_type.as_str())]).dimmed());
+    println!("  {}", tf("unlink.size", &[("size", &size)]).dimmed());
     Ok(())
 }
 

@@ -14,13 +14,14 @@
 //! tokens = []
 //!
 //! [proxy.network]
-//! allow_anonymous = true
+//! allow_anonymous = false   # default: require auth or explicit allow
 //! allowed_ips = ["192.168.1.0/24"]
 //! denied_ips = []
 //! ```
 //!
 //! Every field has a safe default, so a minimal `modeld.toml` (or none at all)
-//! starts an open-by-default server on port 8234.
+//! starts a **closed** server on port 8234 — anonymous requests return 401.
+//! To allow open access on a trusted LAN, set `allow_anonymous = true`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -66,18 +67,17 @@ impl Default for ProxyConfig {
             bind_address: "0.0.0.0".to_string(),
             store_path: PathBuf::from(".modeld"),
             auth: AuthConfig::default(),
-            network: NetworkConfig {
-                allow_anonymous: true,
-                allowed_ips: Vec::new(),
-                denied_ips: Vec::new(),
-            },
+            network: NetworkConfig::default(),
         }
     }
 }
 
 impl Default for NetworkConfig {
     fn default() -> Self {
-        Self { allow_anonymous: true, allowed_ips: Vec::new(), denied_ips: Vec::new() }
+        // Secure default: anonymous access is disabled.
+        // Enable it explicitly via `--allow-anonymous` on the CLI or via
+        // `[proxy.network] allow_anonymous = true` in modeld.toml.
+        Self { allow_anonymous: false, allowed_ips: Vec::new(), denied_ips: Vec::new() }
     }
 }
 
@@ -137,6 +137,15 @@ impl ProxyConfig {
     pub fn bind_addr(&self) -> String {
         format!("{}:{}", self.bind_address, self.port)
     }
+
+    /// Return a copy of this config with anonymous access enabled.
+    ///
+    /// Convenience for integration tests and trusted-LAN setups:
+    /// `ProxyConfig::default().with_open_access()`.
+    pub fn with_open_access(mut self) -> Self {
+        self.network.allow_anonymous = true;
+        self
+    }
 }
 
 /// Intermediate deserialization type so a missing `[proxy]` table yields full
@@ -180,7 +189,8 @@ mod tests {
         assert_eq!(cfg.port, 8234);
         assert_eq!(cfg.bind_address, "0.0.0.0");
         assert!(!cfg.auth.require_token);
-        assert!(cfg.network.allow_anonymous);
+        // Secure default: anonymous access is off
+        assert!(!cfg.network.allow_anonymous);
     }
 
     #[test]

@@ -93,7 +93,7 @@ fn test_hf_proxy_miss_then_hit() {
     let proxy_url = format!("http://{}", proxy_addr);
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let proxy = ProxyServer::new(ProxyConfig::default(), store_path.clone());
+    let proxy = ProxyServer::new(ProxyConfig::default().with_open_access(), store_path.clone());
     let shutdown_for_thread = shutdown.clone();
     let join = thread::spawn(move || {
         let _ = proxy.serve_on(server, shutdown_for_thread);

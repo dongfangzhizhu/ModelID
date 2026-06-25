@@ -90,19 +90,16 @@ impl<'a> GcEngine<'a> {
         }
     }
 
-    /// List all models with their protection status.
+    /// List all models with their protection status (single batch query).
     pub fn candidates(&self) -> Result<Vec<GcCandidate>> {
-        let models = self.db.list_models(None)?;
+        let rows = self.db.get_gc_candidate_counts()?;
         let mut candidates = Vec::new();
-        for model in models {
-            let hash_str = model.blake3_hash.as_hex().to_string();
-            let workflow_refs = self.db.get_workflows_for_model(&hash_str)?;
-            let aliases = self.db.get_aliases_for_model(&model.blake3_hash)?;
+        for (model, alias_count, workflow_ref_count) in rows {
             let cas_file_exists = self.cas.contains(&model.blake3_hash);
             candidates.push(GcCandidate {
                 savings_bytes: model.size_bytes,
-                workflow_ref_count: workflow_refs.len(),
-                alias_count: aliases.len(),
+                workflow_ref_count,
+                alias_count,
                 cas_file_exists,
                 model,
             });
@@ -234,6 +231,56 @@ impl<'a> GcEngine<'a> {
     /// Clean expired quarantine entries.
     pub fn cleanup_quarantine(&self) -> Result<usize> {
         self.quarantine.cleanup_expired()
+    }
+
+    /// Remove stale temporary files left by interrupted downloads or dedup
+    /// operations.
+    ///
+    /// - `{store}/tmp/downloads/*.part` older than `part_max_age_hours`
+    /// - `{store}/tmp/cas_staging/*.tmp` older than `staging_max_age_hours`
+    ///
+    /// Returns the number of files removed.
+    pub fn cleanup_tmp(store_path: &std::path::Path, part_max_age_hours: u64, staging_max_age_hours: u64) -> Result<usize> {
+        let mut removed = 0usize;
+        let now = std::time::SystemTime::now();
+
+        let cleanup_dir = |dir: &std::path::Path,
+                           ext: &str,
+                           max_age_secs: u64|
+         -> anyhow::Result<usize> {
+            if !dir.exists() {
+                return Ok(0);
+            }
+            let mut count = 0usize;
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                if !name.ends_with(ext) {
+                    continue;
+                }
+                let age_secs = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|mtime| now.duration_since(mtime).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if age_secs >= max_age_secs {
+                    if std::fs::remove_file(&path).is_ok() {
+                        count += 1;
+                    }
+                }
+            }
+            Ok(count)
+        };
+
+        let downloads_dir = store_path.join("tmp").join("downloads");
+        let staging_dir = store_path.join("tmp").join("cas_staging");
+
+        removed += cleanup_dir(&downloads_dir, ".part", part_max_age_hours * 3600)?;
+        removed += cleanup_dir(&staging_dir, ".tmp", staging_max_age_hours * 3600)?;
+
+        Ok(removed)
     }
 }
 

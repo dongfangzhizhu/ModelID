@@ -421,7 +421,35 @@ fn match_hf_proxy_url(url: &str) -> Option<HfProxyParts> {
     if org.is_empty() || repo.is_empty() || revision.is_empty() || file.is_empty() {
         return None;
     }
+    // Path-traversal guard (audit 4.2): reject any segment containing "..",
+    // null bytes, absolute-path markers, or backslashes.
+    if !is_safe_path_segment(&org)
+        || !is_safe_path_segment(&repo)
+        || !is_safe_path_segment(&revision)
+        || !is_safe_filename(&file)
+    {
+        return None;
+    }
     Some(HfProxyParts { org, repo, revision, file })
+}
+
+/// A single segment (org/repo/revision) must not contain traversal sequences.
+fn is_safe_path_segment(s: &str) -> bool {
+    !s.is_empty()
+        && s != ".."
+        && s != "."
+        && !s.contains('\0')
+        && !s.contains('/')
+        && !s.contains('\\')
+}
+
+/// A filename may contain `/`-separated sub-directories but every component
+/// must individually pass `is_safe_path_segment`.
+fn is_safe_filename(s: &str) -> bool {
+    if s.is_empty() || s.contains('\0') || s.starts_with('/') || s.starts_with('\\') {
+        return false;
+    }
+    s.split('/').all(is_safe_path_segment)
 }
 
 fn open_db(store_path: &std::path::Path) -> Result<Database> {
@@ -500,5 +528,38 @@ mod tests {
         assert!(match_hf_proxy_url("/v1/hf-proxy/org/model/main/file").is_none());
         assert!(match_hf_proxy_url("/v1/hf-proxy/org//resolve/main/file").is_none());
         assert!(match_hf_proxy_url("/v1/blobs/abc").is_none());
+    }
+
+    #[test]
+    fn test_path_traversal_rejected() {
+        // ".." in org or repo
+        assert!(match_hf_proxy_url("/v1/hf-proxy/../etc/resolve/main/file").is_none());
+        // ".." in filename
+        assert!(match_hf_proxy_url("/v1/hf-proxy/org/repo/resolve/main/../etc/passwd").is_none());
+        // ".." as the only filename component
+        assert!(match_hf_proxy_url("/v1/hf-proxy/org/repo/resolve/main/..").is_none());
+        // null byte
+        assert!(match_hf_proxy_url("/v1/hf-proxy/org/repo/resolve/main/file\0.bin").is_none());
+        // absolute path in file
+        assert!(match_hf_proxy_url("/v1/hf-proxy/org/repo/resolve/main//etc").is_none());
+    }
+
+    #[test]
+    fn test_safe_path_segment() {
+        assert!(is_safe_path_segment("stabilityai"));
+        assert!(is_safe_path_segment("sdxl-base-1.0"));
+        assert!(!is_safe_path_segment(".."));
+        assert!(!is_safe_path_segment("."));
+        assert!(!is_safe_path_segment("a/b"));
+        assert!(!is_safe_path_segment(""));
+    }
+
+    #[test]
+    fn test_safe_filename() {
+        assert!(is_safe_filename("model.safetensors"));
+        assert!(is_safe_filename("text_encoder/model.safetensors"));
+        assert!(!is_safe_filename("../etc/passwd"));
+        assert!(!is_safe_filename("/absolute"));
+        assert!(!is_safe_filename("a/../b"));
     }
 }

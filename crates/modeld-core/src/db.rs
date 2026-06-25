@@ -193,6 +193,9 @@ pub struct Database {
 }
 
 impl Database {
+    /// Current schema version.  Bump this whenever you add a migration below.
+    const SCHEMA_VERSION: i64 = 1;
+
     /// Open or create database at the given path
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)
@@ -213,9 +216,24 @@ impl Database {
         Ok(db)
     }
 
-    /// Initialize database schema
+    /// Initialize / migrate database schema.
+    ///
+    /// Uses `PRAGMA user_version` as a monotonically-increasing schema version
+    /// counter.  On a brand-new database `user_version` is 0; we run the full
+    /// initial schema and stamp it as version 1.  Future versions add
+    /// `if current_version < N { ... }` branches here before bumping the stamp.
     fn init_schema(&mut self) -> Result<()> {
-        self.conn.execute_batch(
+        // Temporarily disable FK enforcement so we can create tables in any order.
+        self.conn.pragma_update(None, "foreign_keys", "OFF")?;
+
+        let current_version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap_or(0);
+
+        if current_version < 1 {
+            // ── Initial schema (v0 → v1) ────────────────────────────────────
+            self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS models (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +371,13 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_workflow_refs_type ON workflow_refs(ref_type);
             "#,
         )?;
+            // Stamp the new version
+            self.conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
+        }
+
+        // Re-enable FK enforcement
+        self.conn.pragma_update(None, "foreign_keys", "ON")?;
+
 
         Ok(())
     }
@@ -740,6 +765,160 @@ impl Database {
         Ok(aliases)
     }
 } // impl Database (model/alias/WAL/GC block)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Batch query helpers (eliminate N+1 patterns — audit 3.5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl Database {
+    /// Return duplicate groups in a single JOIN query.
+    ///
+    /// Replaces the previous `list_models()` + per-model `get_aliases_for_model()`
+    /// loop (N+1 queries) with a single SQL pass.  Groups with fewer than 2
+    /// aliases are excluded by the HAVING clause.
+    pub fn find_duplicate_groups(&self) -> Result<Vec<(Blake3Hash, i64, Vec<Alias>)>> {
+        // Find all model hashes that have ≥ 2 aliases
+        let mut hash_stmt = self.conn.prepare(
+            r#"
+            SELECT m.blake3_hash, m.size_bytes
+            FROM models m
+            WHERE (SELECT COUNT(*) FROM aliases a WHERE a.model_hash = m.blake3_hash) >= 2
+            ORDER BY m.blake3_hash
+            "#,
+        )?;
+
+        let model_rows: Vec<(Blake3Hash, i64)> = hash_stmt
+            .query_map([], |row| {
+                let h: String = row.get(0)?;
+                Ok((parse_blake3(&h)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Fetch all aliases in one query and group in Rust
+        let mut alias_stmt = self.conn.prepare(
+            r#"
+            SELECT a.model_hash, a.id, a.path, a.frontend, a.alias_type, a.created_at
+            FROM aliases a
+            WHERE a.model_hash IN (
+                SELECT model_hash FROM aliases GROUP BY model_hash HAVING COUNT(*) >= 2
+            )
+            ORDER BY a.model_hash, a.created_at ASC
+            "#,
+        )?;
+
+        let alias_rows: Vec<Alias> = alias_stmt
+            .query_map([], |row| {
+                let mh: String = row.get(0)?;
+                let fe: String = row.get(3)?;
+                let at: String = row.get(4)?;
+                let dt: String = row.get(5)?;
+                Ok(Alias {
+                    id: row.get(1)?,
+                    model_hash: parse_blake3(&mh)?,
+                    path: row.get(2)?,
+                    frontend: parse_frontend(&fe)?,
+                    alias_type: parse_alias_type(&at)?,
+                    created_at: parse_dt(&dt),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Group aliases by model hash
+        use std::collections::HashMap;
+        let mut by_hash: HashMap<String, Vec<Alias>> = HashMap::new();
+        for alias in alias_rows {
+            by_hash.entry(alias.model_hash.as_hex().to_string()).or_default().push(alias);
+        }
+
+        let groups = model_rows
+            .into_iter()
+            .filter_map(|(hash, size)| {
+                by_hash
+                    .remove(hash.as_hex())
+                    .filter(|aliases| aliases.len() >= 2)
+                    .map(|aliases| (hash, size, aliases))
+            })
+            .collect();
+
+        Ok(groups)
+    }
+
+    /// Return GC candidate summary in a single GROUP-BY query.
+    ///
+    /// Each row contains: (model, alias_count, workflow_ref_count).
+    /// Replaces the previous 3N-query loop in `gc.candidates()`.
+    pub fn get_gc_candidate_counts(&self) -> Result<Vec<(Model, usize, usize)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                m.id, m.blake3_hash, m.size_bytes, m.format, m.arch,
+                m.category, m.base_model, m.created_at, m.last_seen, m.quarantined_at,
+                COUNT(DISTINCT a.id)  AS alias_count,
+                COUNT(DISTINCT wr.id) AS workflow_ref_count
+            FROM models m
+            LEFT JOIN aliases a  ON a.model_hash  = m.blake3_hash
+            LEFT JOIN workflow_refs wr ON wr.model_hash = m.blake3_hash
+            GROUP BY m.id
+            ORDER BY m.created_at DESC
+            "#,
+        )?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let h: String = row.get(1)?;
+                let created: String = row.get(7)?;
+                let last: String = row.get(8)?;
+                let qat: Option<String> = row.get(9)?;
+                let alias_count: i64 = row.get(10)?;
+                let wf_count: i64 = row.get(11)?;
+                Ok((
+                    Model {
+                        id: row.get(0)?,
+                        blake3_hash: parse_blake3(&h)?,
+                        size_bytes: row.get(2)?,
+                        format: row.get(3)?,
+                        arch: row.get(4)?,
+                        category: row.get(5)?,
+                        base_model: row.get(6)?,
+                        created_at: parse_dt(&created),
+                        last_seen: parse_dt(&last),
+                        quarantined_at: qat.as_deref().map(parse_dt),
+                    },
+                    alias_count as usize,
+                    wf_count as usize,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows)
+    }
+
+    /// Return all indexed (path, hash, size_bytes) pairs for incremental scan.
+    ///
+    /// The caller compares current file size against `size_bytes`; if they
+    /// match the file is assumed unchanged and re-hashing is skipped.
+    pub fn get_all_indexed_paths(&self) -> Result<std::collections::HashMap<String, (Blake3Hash, i64)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT a.path, a.model_hash, m.size_bytes
+            FROM aliases a
+            JOIN models m ON m.blake3_hash = a.model_hash
+            "#,
+        )?;
+        let mut map = std::collections::HashMap::new();
+        let rows = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let mh: String = row.get(1)?;
+            let size: i64 = row.get(2)?;
+            Ok((path, parse_blake3(&mh)?, size))
+        })?;
+        for row in rows {
+            let (path, hash, size) = row?;
+            map.insert(path, (hash, size));
+        }
+        Ok(map)
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Download record types (Phase 3 — HF interception)
