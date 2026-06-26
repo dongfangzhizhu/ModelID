@@ -539,7 +539,7 @@ impl DedupEngine {
                     self.db.delete_wal_transaction(&tx.tx_id)?;
                 }
 
-                TransactionStatus::Committed | TransactionStatus::Failed => {
+                TransactionStatus::Committed | TransactionStatus::Failed | TransactionStatus::RolledBack => {
                     self.db.delete_wal_transaction(&tx.tx_id)?;
                 }
             }

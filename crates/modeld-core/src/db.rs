@@ -150,6 +150,7 @@ pub enum TransactionStatus {
     Copied,
     Committed,
     Failed,
+    RolledBack,
 }
 
 impl TransactionStatus {
@@ -159,6 +160,7 @@ impl TransactionStatus {
             TransactionStatus::Copied => "copied",
             TransactionStatus::Committed => "committed",
             TransactionStatus::Failed => "failed",
+            TransactionStatus::RolledBack => "rolled_back",
         }
     }
 
@@ -168,12 +170,13 @@ impl TransactionStatus {
             "copied" => Some(TransactionStatus::Copied),
             "committed" => Some(TransactionStatus::Committed),
             "failed" => Some(TransactionStatus::Failed),
+            "rolled_back" => Some(TransactionStatus::RolledBack),
             _ => None,
         }
     }
 }
 
-/// WAL transaction record for crash recovery
+/// WAL transaction record for crash recovery (v2 schema)
 #[derive(Debug, Clone)]
 pub struct WalTransaction {
     pub id: i64,
@@ -185,16 +188,30 @@ pub struct WalTransaction {
     pub metadata: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // ── v2 extended fields ──────────────────────────────────────────────────
+    /// Fine-grained operation type (e.g. "dedup", "hf_download_commit", …)
+    pub op_type: Option<String>,
+    /// JSON array of paths affected by this transaction
+    pub affected_paths: Option<String>,
+    /// JSON rollback instructions (opaque to the DB layer)
+    pub rollback_plan: Option<String>,
+    /// RFC-3339 timestamp when the transaction ended (committed/failed/rolled-back)
+    pub end_time: Option<String>,
+    /// Human-readable error detail (only set when status is Failed)
+    pub error_message: Option<String>,
 }
 
 /// Database connection manager
 pub struct Database {
     conn: Connection,
+    /// Absolute path to the `.db` file (used during schema migration for backup).
+    db_path: std::path::PathBuf,
 }
 
 impl Database {
     /// Current schema version.  Bump this whenever you add a migration below.
-    const SCHEMA_VERSION: i64 = 1;
+    #[allow(dead_code)]
+    const SCHEMA_VERSION: i64 = 2;
 
     /// Open or create database at the given path
     pub fn open(path: &Path) -> Result<Self> {
@@ -210,7 +227,7 @@ impl Database {
         // concurrently).
         conn.pragma_update(None, "busy_timeout", 5000i64)?;
 
-        let mut db = Self { conn };
+        let mut db = Self { conn, db_path: path.to_path_buf() };
         db.init_schema()?;
 
         Ok(db)
@@ -219,9 +236,13 @@ impl Database {
     /// Initialize / migrate database schema.
     ///
     /// Uses `PRAGMA user_version` as a monotonically-increasing schema version
-    /// counter.  On a brand-new database `user_version` is 0; we run the full
-    /// initial schema and stamp it as version 1.  Future versions add
-    /// `if current_version < N { ... }` branches here before bumping the stamp.
+    /// counter.
+    ///
+    /// | DB state          | Action                                        |
+    /// |---|---|
+    /// | user_version == 0 | Create all tables at the current v2 schema    |
+    /// | user_version == 1 | Backup + run v1→v2 migration                  |
+    /// | user_version >= 2 | Nothing to do                                 |
     fn init_schema(&mut self) -> Result<()> {
         // Temporarily disable FK enforcement so we can create tables in any order.
         self.conn.pragma_update(None, "foreign_keys", "OFF")?;
@@ -231,8 +252,12 @@ impl Database {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap_or(0);
 
-        if current_version < 1 {
-            // ── Initial schema (v0 → v1) ────────────────────────────────────
+        if current_version == 0 {
+            // ── Fresh database: create schema at v2 directly ─────────────────
+            // The `wal_transactions` table is created WITHOUT the old
+            // `CHECK (operation IN ('dedup','download','gc'))` constraint and
+            // WITH the five v2 extra columns, so new databases never need
+            // to go through the rename-copy migration path.
             self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS models (
@@ -275,22 +300,27 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_aliases_type ON aliases(alias_type);
 
             CREATE TABLE IF NOT EXISTS wal_transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tx_id TEXT UNIQUE NOT NULL,
-                operation TEXT NOT NULL,
-                status TEXT NOT NULL,
-                source_path TEXT,
-                target_hash TEXT,
-                metadata TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                
-                CHECK (status IN ('pending', 'copied', 'committed', 'failed')),
-                CHECK (operation IN ('dedup', 'download', 'gc'))
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_id            TEXT    UNIQUE NOT NULL,
+                operation        TEXT    NOT NULL,
+                status           TEXT    NOT NULL,
+                source_path      TEXT,
+                target_hash      TEXT,
+                metadata         TEXT,
+                created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                updated_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                -- v2 additions
+                op_type          TEXT,
+                affected_paths   TEXT,
+                rollback_plan    TEXT,
+                end_time         TEXT,
+                error_message    TEXT,
+
+                CHECK (status IN ('pending', 'copied', 'committed', 'failed', 'rolled_back'))
             );
 
-            CREATE INDEX IF NOT EXISTS idx_wal_status ON wal_transactions(status);
-            CREATE INDEX IF NOT EXISTS idx_wal_created ON wal_transactions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_wal_status    ON wal_transactions(status);
+            CREATE INDEX IF NOT EXISTS idx_wal_created   ON wal_transactions(created_at);
             CREATE INDEX IF NOT EXISTS idx_wal_operation ON wal_transactions(operation);
 
             -- HuggingFace download records (Phase 3)
@@ -371,13 +401,108 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_workflow_refs_type ON workflow_refs(ref_type);
             "#,
         )?;
-            // Stamp the new version
-            self.conn.pragma_update(None, "user_version", Self::SCHEMA_VERSION)?;
+            // Brand-new database: stamp directly at v2 (no migration needed)
+            self.conn.pragma_update(None, "user_version", 2i64)?;
+        } else if current_version == 1 {
+            // ── Migration v1 → v2 ────────────────────────────────────────────
+            // Adds extended transaction metadata columns to `wal_transactions`
+            // and removes the restrictive `CHECK (operation IN (...))` so that
+            // new op types (StoreMigration, AliasRewrite, …) can be recorded.
+            //
+            // SQLite does not support ALTER TABLE DROP CONSTRAINT, so we use
+            // the recommended "rename → recreate → copy → drop" approach.
+            self.backup_before_migration(1)?;
+
+            self.conn.execute_batch(
+                r#"
+                -- Step 1: rename old table
+                ALTER TABLE wal_transactions RENAME TO wal_transactions_v1;
+
+                -- Step 2: create new table without the restrictive CHECK and with new columns
+                CREATE TABLE wal_transactions (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tx_id            TEXT    UNIQUE NOT NULL,
+                    operation        TEXT    NOT NULL,
+                    status           TEXT    NOT NULL,
+                    source_path      TEXT,
+                    target_hash      TEXT,
+                    metadata         TEXT,
+                    created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                    updated_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                    -- v2 additions
+                    op_type          TEXT,
+                    affected_paths   TEXT,
+                    rollback_plan    TEXT,
+                    end_time         TEXT,
+                    error_message    TEXT,
+
+                    CHECK (status IN ('pending', 'copied', 'committed', 'failed', 'rolled_back'))
+                );
+
+                -- Step 3: copy existing rows (new columns default to NULL)
+                INSERT INTO wal_transactions
+                    (id, tx_id, operation, status, source_path, target_hash,
+                     metadata, created_at, updated_at)
+                SELECT  id, tx_id, operation, status, source_path, target_hash,
+                        metadata, created_at, updated_at
+                FROM wal_transactions_v1;
+
+                -- Step 4: drop backup table
+                DROP TABLE wal_transactions_v1;
+
+                -- Recreate indexes on the new table
+                CREATE INDEX IF NOT EXISTS idx_wal_status    ON wal_transactions(status);
+                CREATE INDEX IF NOT EXISTS idx_wal_created   ON wal_transactions(created_at);
+                CREATE INDEX IF NOT EXISTS idx_wal_operation ON wal_transactions(operation);
+                "#,
+            )?;
+
+            self.conn.pragma_update(None, "user_version", 2i64)?;
         }
+        // current_version >= 2: schema is already up to date
 
         // Re-enable FK enforcement
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
 
+
+        Ok(())
+    }
+
+    /// Copy the database file to `<store>/backups/modeld_backup_v<from_version>_<ts>.db`
+    /// before running a migration.  The store root is derived as the parent of the
+    /// directory that contains the `.db` file (`<store>/modeld.db` → `<store>`).
+    ///
+    /// Uses SQLite's `VACUUM INTO` to create a consistent snapshot of the live
+    /// database without closing the connection (safe on all platforms).
+    fn backup_before_migration(&self, from_version: u32) -> Result<()> {
+        // Determine store root: the directory that contains the db file.
+        let store_root = self
+            .db_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine store root from DB path"))?;
+
+        let backups_dir = store_root.join("backups");
+        std::fs::create_dir_all(&backups_dir)
+            .with_context(|| format!("Failed to create backups dir: {}", backups_dir.display()))?;
+
+        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        let backup_name = format!("modeld_backup_v{}_{}.db", from_version, ts);
+        let backup_path = backups_dir.join(&backup_name);
+
+        // `VACUUM INTO` creates a compact, self-contained copy of the database
+        // without requiring the file to be closed — safe on Windows and Unix.
+        let backup_sql = format!(
+            "VACUUM INTO '{}'",
+            backup_path.to_string_lossy().replace('\'', "''")
+        );
+        self.conn
+            .execute_batch(&backup_sql)
+            .with_context(|| {
+                format!(
+                    "Failed to backup database to {}",
+                    backup_path.display()
+                )
+            })?;
 
         Ok(())
     }
@@ -645,8 +770,9 @@ impl Database {
     pub fn get_wal_transaction(&self, tx_id: &str) -> Result<Option<WalTransaction>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, tx_id, operation, status, source_path, target_hash, 
-                   metadata, created_at, updated_at
+            SELECT id, tx_id, operation, status, source_path, target_hash,
+                   metadata, created_at, updated_at,
+                   op_type, affected_paths, rollback_plan, end_time, error_message
             FROM wal_transactions
             WHERE tx_id = ?1
             "#,
@@ -667,6 +793,11 @@ impl Database {
                     metadata: row.get(6)?,
                     created_at: parse_dt(&c),
                     updated_at: parse_dt(&u),
+                    op_type: row.get(9)?,
+                    affected_paths: row.get(10)?,
+                    rollback_plan: row.get(11)?,
+                    end_time: row.get(12)?,
+                    error_message: row.get(13)?,
                 })
             })
             .optional()?;
@@ -678,8 +809,9 @@ impl Database {
     pub fn get_incomplete_wal_transactions(&self) -> Result<Vec<WalTransaction>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, tx_id, operation, status, source_path, target_hash, 
-                   metadata, created_at, updated_at
+            SELECT id, tx_id, operation, status, source_path, target_hash,
+                   metadata, created_at, updated_at,
+                   op_type, affected_paths, rollback_plan, end_time, error_message
             FROM wal_transactions
             WHERE status IN ('pending', 'copied')
             ORDER BY created_at ASC
@@ -701,6 +833,11 @@ impl Database {
                     metadata: row.get(6)?,
                     created_at: parse_dt(&c),
                     updated_at: parse_dt(&u),
+                    op_type: row.get(9)?,
+                    affected_paths: row.get(10)?,
+                    rollback_plan: row.get(11)?,
+                    end_time: row.get(12)?,
+                    error_message: row.get(13)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -712,6 +849,79 @@ impl Database {
     pub fn delete_wal_transaction(&mut self, tx_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM wal_transactions WHERE tx_id = ?1", params![tx_id])?;
         Ok(())
+    }
+
+    /// Update the v2 extended fields for a transaction.
+    ///
+    /// Pass `None` for any field you do not want to overwrite.
+    pub fn update_wal_extended(
+        &mut self,
+        tx_id: &str,
+        op_type: Option<&str>,
+        affected_paths: Option<&str>,
+        rollback_plan: Option<&str>,
+        end_time: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            UPDATE wal_transactions SET
+                op_type        = COALESCE(?2, op_type),
+                affected_paths = COALESCE(?3, affected_paths),
+                rollback_plan  = COALESCE(?4, rollback_plan),
+                end_time       = COALESCE(?5, end_time),
+                error_message  = COALESCE(?6, error_message),
+                updated_at     = ?7
+            WHERE tx_id = ?1
+            "#,
+            params![tx_id, op_type, affected_paths, rollback_plan, end_time, error_message, now],
+        )?;
+        Ok(())
+    }
+
+    /// List all WAL transactions ordered by creation time (newest first).
+    pub fn list_wal_transactions(&self) -> Result<Vec<WalTransaction>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, tx_id, operation, status, source_path, target_hash,
+                   metadata, created_at, updated_at,
+                   op_type, affected_paths, rollback_plan, end_time, error_message
+            FROM wal_transactions
+            ORDER BY created_at DESC
+            "#,
+        )?;
+
+        let transactions = stmt
+            .query_map([], |row| {
+                let st: String = row.get(3)?;
+                let c: String = row.get(7)?;
+                let u: String = row.get(8)?;
+                Ok(WalTransaction {
+                    id: row.get(0)?,
+                    tx_id: row.get(1)?,
+                    operation: row.get(2)?,
+                    status: parse_tx_status(&st)?,
+                    source_path: row.get(4)?,
+                    target_hash: row.get(5)?,
+                    metadata: row.get(6)?,
+                    created_at: parse_dt(&c),
+                    updated_at: parse_dt(&u),
+                    op_type: row.get(9)?,
+                    affected_paths: row.get(10)?,
+                    rollback_plan: row.get(11)?,
+                    end_time: row.get(12)?,
+                    error_message: row.get(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(transactions)
+    }
+
+    /// Return the current `PRAGMA user_version` (schema version).
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
