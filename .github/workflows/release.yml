@@ -155,7 +155,7 @@ jobs:
           "ASSET=dist\${pkg}.zip"       | Out-File -Append $Env:GITHUB_ENV
           "ASSET_NAME=${pkg}.zip"       | Out-File -Append $Env:GITHUB_ENV
 
-      # ── Upload artifact (for inspection before release) ───────────────────
+      # ── Upload artifact (for checksum job and inspection) ─────────────────
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -172,3 +172,152 @@ jobs:
           draft: false
           prerelease: ${{ contains(steps.tag.outputs.value, '-') }}
           generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # macOS universal binary (lipo of x86_64 + aarch64 → darwin-universal)
+  # ---------------------------------------------------------------------------
+  macos-universal:
+    name: Build macOS universal binary
+    runs-on: macos-14
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+
+      - name: Build x86_64
+        run: >
+          cargo build --release --locked
+          --target x86_64-apple-darwin
+          --bin modeld
+          --bin modeld-webui
+
+      - name: Build aarch64
+        run: >
+          cargo build --release --locked
+          --target aarch64-apple-darwin
+          --bin modeld
+          --bin modeld-webui
+
+      - name: Create universal binaries with lipo
+        run: |
+          mkdir -p universal/bin
+          lipo -create \
+            target/x86_64-apple-darwin/release/modeld \
+            target/aarch64-apple-darwin/release/modeld \
+            -output universal/bin/modeld
+          lipo -create \
+            target/x86_64-apple-darwin/release/modeld-webui \
+            target/aarch64-apple-darwin/release/modeld-webui \
+            -output universal/bin/modeld-webui
+          lipo -info universal/bin/modeld
+          lipo -info universal/bin/modeld-webui
+
+      - name: Determine tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package universal binary
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          PKG="modeld-${TAG}-macos-universal"
+          mkdir -p "dist/${PKG}"
+
+          cp universal/bin/modeld        "dist/${PKG}/modeld"
+          cp universal/bin/modeld-webui  "dist/${PKG}/modeld-webui"
+          cp LICENSE README.md           "dist/${PKG}/"
+
+          cd dist
+          tar -czf "${PKG}.tar.gz" "${PKG}"
+          echo "ASSET=dist/${PKG}.tar.gz"   >> "$GITHUB_ENV"
+          echo "ASSET_NAME=${PKG}.tar.gz"   >> "$GITHUB_ENV"
+
+      - name: Upload universal artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET_NAME }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.value, '-') }}
+
+  # ---------------------------------------------------------------------------
+  # SHA-256 checksums — runs after all platform builds + universal
+  # ---------------------------------------------------------------------------
+  checksums:
+    name: Generate SHA-256 checksums
+    runs-on: ubuntu-22.04
+    needs: [build, macos-universal]
+
+    steps:
+      - name: Determine tag
+        id: tag
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Download all platform artifacts
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      # Generate SHA-256 for every archive
+      - name: Compute SHA-256 checksums
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          CHECKSUM_FILE="modeld-${TAG}-SHA256SUMS.txt"
+
+          cd dist
+          # Each artifact was uploaded into its own sub-directory by upload-artifact@v4
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort | while read -r f; do
+            sha256sum "$f" | sed 's|  \./[^/]*/|  |' >> "../${CHECKSUM_FILE}"
+          done
+          cd ..
+
+          echo "Generated checksums:"
+          cat "${CHECKSUM_FILE}"
+          echo "CHECKSUM_FILE=${CHECKSUM_FILE}" >> "$GITHUB_ENV"
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CHECKSUM_FILE }}
+          path: ${{ env.CHECKSUM_FILE }}
+          if-no-files-found: error
+
+      - name: Upload checksums to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.CHECKSUM_FILE }}
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.value, '-') }}
