@@ -51,7 +51,7 @@ fn parse_tx_status(s: &str) -> std::result::Result<TransactionStatus, rusqlite::
     })
 }
 
-/// Model metadata stored in database
+/// Model metadata stored in database (v3 schema)
 #[derive(Debug, Clone)]
 pub struct Model {
     pub id: i64,
@@ -64,6 +64,19 @@ pub struct Model {
     pub created_at: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub quarantined_at: Option<DateTime<Utc>>,
+    // ── v3 governance fields ───────────────────────────────────────────────
+    pub note: Option<String>,
+    pub pinned: bool,
+    pub favorited: bool,
+    pub source_type: Option<String>,
+    pub hf_repo_id: Option<String>,
+    pub revision: Option<String>,
+    pub download_url: Option<String>,
+    pub license: Option<String>,
+    pub downloaded_by: Option<String>,
+    pub downloaded_at: Option<DateTime<Utc>>,
+    pub original_filename: Option<String>,
+    pub model_card_url: Option<String>,
 }
 
 /// Alias type for filesystem links
@@ -211,7 +224,7 @@ pub struct Database {
 impl Database {
     /// Current schema version.  Bump this whenever you add a migration below.
     #[allow(dead_code)]
-    const SCHEMA_VERSION: i64 = 2;
+    const SCHEMA_VERSION: i64 = 3;
 
     /// Open or create database at the given path
     pub fn open(path: &Path) -> Result<Self> {
@@ -238,11 +251,12 @@ impl Database {
     /// Uses `PRAGMA user_version` as a monotonically-increasing schema version
     /// counter.
     ///
-    /// | DB state          | Action                                        |
+    /// | DB state          | Action                                         |
     /// |---|---|
-    /// | user_version == 0 | Create all tables at the current v2 schema    |
-    /// | user_version == 1 | Backup + run v1→v2 migration                  |
-    /// | user_version >= 2 | Nothing to do                                 |
+    /// | user_version == 0 | Create all tables at the current v3 schema     |
+    /// | user_version == 1 | Backup + run v1→v2 migration, then v2→v3       |
+    /// | user_version == 2 | Backup + run v2→v3 migration                   |
+    /// | user_version >= 3 | Nothing to do                                  |
     fn init_schema(&mut self) -> Result<()> {
         // Temporarily disable FK enforcement so we can create tables in any order.
         self.conn.pragma_update(None, "foreign_keys", "OFF")?;
@@ -253,11 +267,7 @@ impl Database {
             .unwrap_or(0);
 
         if current_version == 0 {
-            // ── Fresh database: create schema at v2 directly ─────────────────
-            // The `wal_transactions` table is created WITHOUT the old
-            // `CHECK (operation IN ('dedup','download','gc'))` constraint and
-            // WITH the five v2 extra columns, so new databases never need
-            // to go through the rename-copy migration path.
+            // ── Fresh database: create schema at v3 directly ─────────────────
             self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS models (
@@ -271,7 +281,20 @@ impl Database {
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 last_seen TEXT NOT NULL DEFAULT (datetime('now')),
                 quarantined_at TEXT DEFAULT NULL,
-                
+                -- v3 governance fields
+                note TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                favorited INTEGER NOT NULL DEFAULT 0,
+                source_type TEXT DEFAULT 'local',
+                hf_repo_id TEXT,
+                revision TEXT,
+                download_url TEXT,
+                license TEXT,
+                downloaded_by TEXT,
+                downloaded_at TEXT,
+                original_filename TEXT,
+                model_card_url TEXT,
+
                 CHECK (length(blake3_hash) = 64)
             );
 
@@ -280,6 +303,9 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_models_arch ON models(arch);
             CREATE INDEX IF NOT EXISTS idx_models_category ON models(category);
             CREATE INDEX IF NOT EXISTS idx_models_quarantined ON models(quarantined_at);
+            CREATE INDEX IF NOT EXISTS idx_models_pinned ON models(pinned);
+            CREATE INDEX IF NOT EXISTS idx_models_favorited ON models(favorited);
+            CREATE INDEX IF NOT EXISTS idx_models_source_type ON models(source_type);
 
             CREATE TABLE IF NOT EXISTS aliases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,10 +425,23 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_workflow_refs_workflow ON workflow_refs(workflow_id);
             CREATE INDEX IF NOT EXISTS idx_workflow_refs_model ON workflow_refs(model_hash);
             CREATE INDEX IF NOT EXISTS idx_workflow_refs_type ON workflow_refs(ref_type);
+
+            -- v3: Tags table
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_hash TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (model_hash) REFERENCES models(blake3_hash),
+                UNIQUE (model_hash, tag)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tags_model_hash ON tags(model_hash);
+            CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
             "#,
         )?;
-            // Brand-new database: stamp directly at v2 (no migration needed)
-            self.conn.pragma_update(None, "user_version", 2i64)?;
+            // Brand-new database: stamp directly at v3 (no migration needed)
+            self.conn.pragma_update(None, "user_version", 3i64)?;
         } else if current_version == 1 {
             // ── Migration v1 → v2 ────────────────────────────────────────────
             // Adds extended transaction metadata columns to `wal_transactions`
@@ -459,7 +498,56 @@ impl Database {
 
             self.conn.pragma_update(None, "user_version", 2i64)?;
         }
-        // current_version >= 2: schema is already up to date
+
+        // ── Migration v2 → v3 ────────────────────────────────────────────────
+        // Re-check after v1→v2 may have just set it to 2.
+        let current_version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap_or(0);
+
+        if current_version == 2 {
+            self.backup_before_migration(2)?;
+
+            self.conn.execute_batch(
+                r#"
+                -- Add governance columns to models (SQLite supports ADD COLUMN)
+                ALTER TABLE models ADD COLUMN note TEXT;
+                ALTER TABLE models ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE models ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE models ADD COLUMN source_type TEXT DEFAULT 'local';
+                ALTER TABLE models ADD COLUMN hf_repo_id TEXT;
+                ALTER TABLE models ADD COLUMN revision TEXT;
+                ALTER TABLE models ADD COLUMN download_url TEXT;
+                ALTER TABLE models ADD COLUMN license TEXT;
+                ALTER TABLE models ADD COLUMN downloaded_by TEXT;
+                ALTER TABLE models ADD COLUMN downloaded_at TEXT;
+                ALTER TABLE models ADD COLUMN original_filename TEXT;
+                ALTER TABLE models ADD COLUMN model_card_url TEXT;
+
+                -- New index for governance queries
+                CREATE INDEX IF NOT EXISTS idx_models_pinned ON models(pinned);
+                CREATE INDEX IF NOT EXISTS idx_models_favorited ON models(favorited);
+                CREATE INDEX IF NOT EXISTS idx_models_source_type ON models(source_type);
+
+                -- Tags table
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    model_hash TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (model_hash) REFERENCES models(blake3_hash),
+                    UNIQUE (model_hash, tag)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tags_model_hash ON tags(model_hash);
+                CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+                "#,
+            )?;
+
+            self.conn.pragma_update(None, "user_version", 3i64)?;
+        }
+        // current_version >= 3: schema is already up to date
 
         // Re-enable FK enforcement
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -542,7 +630,10 @@ impl Database {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT id, blake3_hash, size_bytes, format, arch, category, base_model,
-                   created_at, last_seen, quarantined_at
+                   created_at, last_seen, quarantined_at,
+                   note, pinned, favorited, source_type, hf_repo_id, revision,
+                   download_url, license, downloaded_by, downloaded_at,
+                   original_filename, model_card_url
             FROM models
             WHERE blake3_hash = ?1
             "#,
@@ -554,6 +645,7 @@ impl Database {
                 let created: String = row.get(7)?;
                 let last: String = row.get(8)?;
                 let qat: Option<String> = row.get(9)?;
+                let downloaded_at_str: Option<String> = row.get(19)?;
                 Ok(Model {
                     id: row.get(0)?,
                     blake3_hash: parse_blake3(&h)?,
@@ -565,6 +657,18 @@ impl Database {
                     created_at: parse_dt(&created),
                     last_seen: parse_dt(&last),
                     quarantined_at: qat.as_deref().map(parse_dt),
+                    note: row.get(10)?,
+                    pinned: row.get::<_, i64>(11)? != 0,
+                    favorited: row.get::<_, i64>(12)? != 0,
+                    source_type: row.get(13)?,
+                    hf_repo_id: row.get(14)?,
+                    revision: row.get(15)?,
+                    download_url: row.get(16)?,
+                    license: row.get(17)?,
+                    downloaded_by: row.get(18)?,
+                    downloaded_at: downloaded_at_str.as_deref().map(parse_dt),
+                    original_filename: row.get(20)?,
+                    model_card_url: row.get(21)?,
                 })
             })
             .optional()?;
@@ -593,7 +697,10 @@ impl Database {
         let sql = if let Some(limit) = limit {
             format!(
                 "SELECT id, blake3_hash, size_bytes, format, arch, category, base_model,
-                        created_at, last_seen, quarantined_at
+                        created_at, last_seen, quarantined_at,
+                        note, pinned, favorited, source_type, hf_repo_id, revision,
+                        download_url, license, downloaded_by, downloaded_at,
+                        original_filename, model_card_url
                  FROM models
                  ORDER BY created_at DESC
                  LIMIT {}",
@@ -601,7 +708,10 @@ impl Database {
             )
         } else {
             "SELECT id, blake3_hash, size_bytes, format, arch, category, base_model,
-                    created_at, last_seen, quarantined_at
+                    created_at, last_seen, quarantined_at,
+                    note, pinned, favorited, source_type, hf_repo_id, revision,
+                    download_url, license, downloaded_by, downloaded_at,
+                    original_filename, model_card_url
              FROM models
              ORDER BY created_at DESC"
                 .to_string()
@@ -614,6 +724,7 @@ impl Database {
                 let created: String = row.get(7)?;
                 let last: String = row.get(8)?;
                 let qat: Option<String> = row.get(9)?;
+                let downloaded_at_str: Option<String> = row.get(19)?;
                 Ok(Model {
                     id: row.get(0)?,
                     blake3_hash: parse_blake3(&h)?,
@@ -625,11 +736,151 @@ impl Database {
                     created_at: parse_dt(&created),
                     last_seen: parse_dt(&last),
                     quarantined_at: qat.as_deref().map(parse_dt),
+                    note: row.get(10)?,
+                    pinned: row.get::<_, i64>(11)? != 0,
+                    favorited: row.get::<_, i64>(12)? != 0,
+                    source_type: row.get(13)?,
+                    hf_repo_id: row.get(14)?,
+                    revision: row.get(15)?,
+                    download_url: row.get(16)?,
+                    license: row.get(17)?,
+                    downloaded_by: row.get(18)?,
+                    downloaded_at: downloaded_at_str.as_deref().map(parse_dt),
+                    original_filename: row.get(20)?,
+                    model_card_url: row.get(21)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(models)
+    }
+
+    // ── v3 governance CRUD ───────────────────────────────────────────────────
+
+    /// Set or clear the freeform note for a model.
+    pub fn set_model_note(&mut self, hash: &Blake3Hash, note: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE models SET note = ?1 WHERE blake3_hash = ?2",
+            params![note, hash.as_hex()],
+        )?;
+        Ok(())
+    }
+
+    /// Pin or unpin a model.
+    pub fn pin_model(&mut self, hash: &Blake3Hash, pinned: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE models SET pinned = ?1 WHERE blake3_hash = ?2",
+            params![pinned as i64, hash.as_hex()],
+        )?;
+        Ok(())
+    }
+
+    /// Favorite or unfavorite a model.
+    pub fn favorite_model(&mut self, hash: &Blake3Hash, favorited: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE models SET favorited = ?1 WHERE blake3_hash = ?2",
+            params![favorited as i64, hash.as_hex()],
+        )?;
+        Ok(())
+    }
+
+    /// Record provenance metadata for a model (source type, HF origin, etc.).
+    ///
+    /// Any `None` argument leaves the existing value in the database unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_model_provenance(
+        &mut self,
+        hash: &Blake3Hash,
+        source_type: Option<&str>,
+        hf_repo_id: Option<&str>,
+        revision: Option<&str>,
+        download_url: Option<&str>,
+        license: Option<&str>,
+        downloaded_by: Option<&str>,
+        downloaded_at: Option<&str>,  // RFC-3339 string or NULL
+        original_filename: Option<&str>,
+        model_card_url: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE models SET
+                source_type       = COALESCE(?2, source_type),
+                hf_repo_id        = COALESCE(?3, hf_repo_id),
+                revision          = COALESCE(?4, revision),
+                download_url      = COALESCE(?5, download_url),
+                license           = COALESCE(?6, license),
+                downloaded_by     = COALESCE(?7, downloaded_by),
+                downloaded_at     = COALESCE(?8, downloaded_at),
+                original_filename = COALESCE(?9, original_filename),
+                model_card_url    = COALESCE(?10, model_card_url)
+            WHERE blake3_hash = ?1
+            "#,
+            params![
+                hash.as_hex(),
+                source_type,
+                hf_repo_id,
+                revision,
+                download_url,
+                license,
+                downloaded_by,
+                downloaded_at,
+                original_filename,
+                model_card_url,
+            ],
+        )?;
+        Ok(())
+    }
+
+    // ── Tag management ───────────────────────────────────────────────────────
+
+    /// Add a tag to a model.  Silently ignores duplicate (model_hash, tag) pairs.
+    pub fn add_tag(&mut self, hash: &Blake3Hash, tag: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            INSERT OR IGNORE INTO tags (model_hash, tag, created_at)
+            VALUES (?1, ?2, ?3)
+            "#,
+            params![hash.as_hex(), tag, now],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a tag from a model.  No-op if the tag does not exist.
+    pub fn remove_tag(&mut self, hash: &Blake3Hash, tag: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM tags WHERE model_hash = ?1 AND tag = ?2",
+            params![hash.as_hex(), tag],
+        )?;
+        Ok(())
+    }
+
+    /// Return all tags attached to a model, ordered alphabetically.
+    pub fn get_tags(&self, hash: &Blake3Hash) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tag FROM tags WHERE model_hash = ?1 ORDER BY tag ASC",
+        )?;
+        let tags = stmt
+            .query_map(params![hash.as_hex()], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(tags)
+    }
+
+    /// Return all tags across all models together with their usage counts,
+    /// ordered by count descending.
+    pub fn list_all_tags(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT tag, COUNT(*) AS cnt
+            FROM tags
+            GROUP BY tag
+            ORDER BY cnt DESC, tag ASC
+            "#,
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Insert a new alias
@@ -1064,7 +1315,10 @@ impl Database {
                 m.id, m.blake3_hash, m.size_bytes, m.format, m.arch,
                 m.category, m.base_model, m.created_at, m.last_seen, m.quarantined_at,
                 COUNT(DISTINCT a.id)  AS alias_count,
-                COUNT(DISTINCT wr.id) AS workflow_ref_count
+                COUNT(DISTINCT wr.id) AS workflow_ref_count,
+                m.note, m.pinned, m.favorited, m.source_type, m.hf_repo_id, m.revision,
+                m.download_url, m.license, m.downloaded_by, m.downloaded_at,
+                m.original_filename, m.model_card_url
             FROM models m
             LEFT JOIN aliases a  ON a.model_hash  = m.blake3_hash
             LEFT JOIN workflow_refs wr ON wr.model_hash = m.blake3_hash
@@ -1081,6 +1335,7 @@ impl Database {
                 let qat: Option<String> = row.get(9)?;
                 let alias_count: i64 = row.get(10)?;
                 let wf_count: i64 = row.get(11)?;
+                let downloaded_at_str: Option<String> = row.get(21)?;
                 Ok((
                     Model {
                         id: row.get(0)?,
@@ -1093,6 +1348,18 @@ impl Database {
                         created_at: parse_dt(&created),
                         last_seen: parse_dt(&last),
                         quarantined_at: qat.as_deref().map(parse_dt),
+                        note: row.get(12)?,
+                        pinned: row.get::<_, i64>(13)? != 0,
+                        favorited: row.get::<_, i64>(14)? != 0,
+                        source_type: row.get(15)?,
+                        hf_repo_id: row.get(16)?,
+                        revision: row.get(17)?,
+                        download_url: row.get(18)?,
+                        license: row.get(19)?,
+                        downloaded_by: row.get(20)?,
+                        downloaded_at: downloaded_at_str.as_deref().map(parse_dt),
+                        original_filename: row.get(22)?,
+                        model_card_url: row.get(23)?,
                     },
                     alias_count as usize,
                     wf_count as usize,
@@ -1619,7 +1886,10 @@ impl Database {
     pub fn orphan_models(&self) -> Result<Vec<Model>> {
         let mut stmt = self.conn.prepare(
             r#"SELECT m.id, m.blake3_hash, m.size_bytes, m.format,
-                      m.arch, m.category, m.base_model, m.created_at, m.last_seen, m.quarantined_at
+                      m.arch, m.category, m.base_model, m.created_at, m.last_seen, m.quarantined_at,
+                      m.note, m.pinned, m.favorited, m.source_type, m.hf_repo_id, m.revision,
+                      m.download_url, m.license, m.downloaded_by, m.downloaded_at,
+                      m.original_filename, m.model_card_url
                FROM models m
                WHERE NOT EXISTS (
                    SELECT 1 FROM workflow_refs wr WHERE wr.model_hash = m.blake3_hash
@@ -1627,6 +1897,7 @@ impl Database {
                ORDER BY m.size_bytes DESC"#,
         )?;
         let rows = stmt.query_map([], |r| {
+            let downloaded_at_str: Option<String> = r.get(19)?;
             Ok(Model {
                 id: r.get(0)?,
                 blake3_hash: Blake3Hash::from_hex(&r.get::<_, String>(1)?).unwrap(),
@@ -1644,6 +1915,18 @@ impl Database {
                 quarantined_at: r
                     .get::<_, Option<String>>(9)?
                     .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc)),
+                note: r.get(10)?,
+                pinned: r.get::<_, i64>(11)? != 0,
+                favorited: r.get::<_, i64>(12)? != 0,
+                source_type: r.get(13)?,
+                hf_repo_id: r.get(14)?,
+                revision: r.get(15)?,
+                download_url: r.get(16)?,
+                license: r.get(17)?,
+                downloaded_by: r.get(18)?,
+                downloaded_at: downloaded_at_str.as_deref().map(parse_dt),
+                original_filename: r.get(20)?,
+                model_card_url: r.get(21)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)

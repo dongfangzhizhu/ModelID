@@ -308,6 +308,18 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             quarantined_at: None,
+            note: None,
+            pinned: false,
+            favorited: false,
+            source_type: None,
+            hf_repo_id: None,
+            revision: None,
+            download_url: None,
+            license: None,
+            downloaded_by: None,
+            downloaded_at: None,
+            original_filename: None,
+            model_card_url: None,
         };
 
         let hard = GcCandidate {
