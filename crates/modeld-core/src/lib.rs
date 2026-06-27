@@ -14,6 +14,7 @@ pub mod cas;
 pub mod config;
 pub mod db;
 pub mod dedup;
+pub mod doctor;
 pub mod downloader;
 pub mod fsck;
 pub mod gc;
@@ -37,6 +38,7 @@ pub use config::{
 pub use db::{Database, Download, DownloadStatus, HfMapping, Model, TransactionStatus,
     WalTransaction, WorkflowRecord, WorkflowRef};
 pub use dedup::{DedupEngine, DedupMode, DedupStats, DuplicateGroup};
+pub use doctor::{run_doctor, CheckStatus, DoctorCheck, DoctorReport};
 pub use downloader::{DownloadResult, Downloader, HfFileMetadata};
 pub use fsck::{
     run_fsck, run_verify, run_repair,

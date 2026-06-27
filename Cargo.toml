@@ -35,6 +35,7 @@ uuid = { version = "1.6", features = ["v4"] }
 ureq = "2.9"
 sha2 = "0.10"
 sys-locale = "0.3"
+libc = "0.2"
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
