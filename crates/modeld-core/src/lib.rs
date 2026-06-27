@@ -39,7 +39,8 @@ pub use db::{Database, Download, DownloadStatus, HfMapping, Model, TransactionSt
     WalTransaction, WorkflowRecord, WorkflowRef};
 pub use dedup::{DedupEngine, DedupMode, DedupStats, DuplicateGroup};
 pub use doctor::{run_doctor, CheckStatus, DoctorCheck, DoctorReport};
-pub use downloader::{DownloadResult, Downloader, HfFileMetadata};
+pub use downloader::{DownloadResult, Downloader, HfFileMetadata, Provenance,
+    token_set, token_get, token_remove, token_status};
 pub use fsck::{
     run_fsck, run_verify, run_repair,
     DanglingAlias, FsckReport, SizeMismatch,

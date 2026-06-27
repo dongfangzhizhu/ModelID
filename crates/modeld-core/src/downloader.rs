@@ -10,6 +10,16 @@
 //!   restarts) instead of from the auto-increment `dl_id`.
 //! - A `HfCache` alias is inserted after a successful download so the model
 //!   is not immediately orphaned by GC.
+//!
+//! ## v7.1 additions
+//! - `Provenance` struct records download origin metadata.
+//! - `DownloadResult.provenance` carries provenance for each successful download.
+//! - Token helpers: `token_set`, `token_get`, `token_remove`, `token_status`
+//!   store the HF token securely in `<store>/hf_token` (Unix: mode 0o600).
+//! - `download_hf_file` warns when a `--token` argument is used instead of the
+//!   `HF_TOKEN` environment variable.
+//! - Gated/private repo 403 errors show a friendly prompt to set a token.
+//! - Token values are never written to any log output.
 
 use crate::cas::CasStore;
 use crate::db::{AliasType, Database, DownloadStatus, Frontend};
@@ -24,6 +34,29 @@ use std::time::Duration;
 
 /// Progress callback: (bytes_done, bytes_total, filename)
 pub type ProgressCallback = Box<dyn Fn(u64, u64, &str) + Send + Sync>;
+
+/// Provenance records the origin of a downloaded model file.
+///
+/// All fields are optional because not every download channel provides them.
+#[derive(Debug, Clone)]
+pub struct Provenance {
+    /// Channel: `"hf"` | `"url"` | `"local"` | `"imported"`
+    pub source_type: String,
+    /// HuggingFace repository ID, e.g. `"stabilityai/stable-diffusion-xl-base-1.0"`
+    pub hf_repo_id: Option<String>,
+    /// HuggingFace revision (branch / tag / commit), e.g. `"main"`
+    pub revision: Option<String>,
+    /// Full download URL
+    pub download_url: Option<String>,
+    /// License identifier from the model card (if available)
+    pub license: Option<String>,
+    /// UTC timestamp when the download finished
+    pub downloaded_at: chrono::DateTime<chrono::Utc>,
+    /// Original filename in the HF repository
+    pub original_filename: Option<String>,
+    /// URL to the model card page
+    pub model_card_url: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct HfFileMetadata {
@@ -42,6 +75,8 @@ pub struct DownloadResult {
     pub size_bytes: u64,
     pub cas_path: PathBuf,
     pub was_cached: bool,
+    /// Provenance metadata captured at download time.
+    pub provenance: Option<Provenance>,
 }
 
 const DEFAULT_HF_BASE: &str = "https://huggingface.co";
@@ -50,6 +85,9 @@ pub struct Downloader {
     store_path: PathBuf,
     hf_token: Option<String>,
     hf_base_url: String,
+    /// True when the token was supplied via `.with_token()` (CLI `--token` flag).
+    /// Used to emit the "use HF_TOKEN env var instead" warning.
+    token_from_cli: bool,
 }
 
 impl Downloader {
@@ -60,11 +98,17 @@ impl Downloader {
                 .ok()
                 .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok()),
             hf_base_url: DEFAULT_HF_BASE.to_string(),
+            token_from_cli: false,
         }
     }
 
+    /// Supply a HuggingFace access token programmatically (e.g. from `--token` CLI flag).
+    ///
+    /// When this path is used, `download_hf_file` will print a warning recommending
+    /// the `HF_TOKEN` environment variable instead.
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.hf_token = Some(token.into());
+        self.token_from_cli = true;
         self
     }
 
@@ -103,6 +147,10 @@ impl Downloader {
     ///
     /// Wraps the real work in an inner closure so that a single `fail_download`
     /// call handles every error path without repeating it.
+    ///
+    /// If the downloader was configured via `.with_token()` (i.e. the token came
+    /// from a CLI `--token` flag), a warning is printed recommending the
+    /// `HF_TOKEN` environment variable instead.
     pub fn download_hf_file(
         &self,
         db: &mut Database,
@@ -111,6 +159,16 @@ impl Downloader {
         revision: Option<&str>,
         progress: Option<&ProgressCallback>,
     ) -> Result<DownloadResult> {
+        // Warn when a CLI-supplied token is used instead of the env var.
+        // Token value is never printed.
+        if self.token_from_cli {
+            eprintln!(
+                "warning: --token flag detected. For security, prefer setting the \
+                 HF_TOKEN environment variable instead of passing the token on the \
+                 command line (it may appear in shell history and process listings)."
+            );
+        }
+
         // Track the DB row so we can mark it failed on any error.
         let mut dl_id: Option<i64> = None;
 
@@ -167,6 +225,16 @@ impl Downloader {
                         size_bytes: size,
                         cas_path: cached_path,
                         was_cached: true,
+                        provenance: Some(Provenance {
+                            source_type: "hf".to_string(),
+                            hf_repo_id: Some(repo_id.to_string()),
+                            revision: Some(rev.to_string()),
+                            download_url: Some(metadata.download_url.clone()),
+                            license: None,
+                            downloaded_at: chrono::Utc::now(),
+                            original_filename: Some(filename.to_string()),
+                            model_card_url: Some(format!("{}/{}", self.hf_base_url, repo_id)),
+                        }),
                     });
                 }
             }
@@ -248,12 +316,25 @@ impl Downloader {
             db.insert_alias(&blake3, &snapshot_str, Frontend::HfCache, AliasType::Symlink)?;
         }
 
+        // Build provenance
+        let provenance = Some(Provenance {
+            source_type: "hf".to_string(),
+            hf_repo_id: Some(repo_id.to_string()),
+            revision: Some(rev.to_string()),
+            download_url: Some(metadata.download_url.clone()),
+            license: None, // fetched from model card in future enhancement
+            downloaded_at: chrono::Utc::now(),
+            original_filename: Some(filename.to_string()),
+            model_card_url: Some(format!("{}/{}", self.hf_base_url, repo_id)),
+        });
+
         Ok(DownloadResult {
             blake3_hash: blake3,
             sha256_hash: sha256,
             size_bytes: download_size,
             cas_path,
             was_cached: false,
+            provenance,
         })
     }
 
@@ -326,7 +407,7 @@ impl Downloader {
             if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
                 req = req.set("Authorization", &hdr);
             }
-            let r = req.call().context("HTTP range request failed")?;
+            let r = req.call().map_err(|e| friendly_http_error(e, url))?;
 
             if r.status() == 206 {
                 // Server supports range — safe to append to partial file
@@ -345,7 +426,7 @@ impl Downloader {
             if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
                 req = req.set("Authorization", &hdr);
             }
-            let r = req.call().context("HTTP request failed")?;
+            let r = req.call().map_err(|e| friendly_http_error(e, url))?;
             let f = fs::File::create(dest).context("Failed to create download file")?;
             (f, r, 0u64)
         };
@@ -374,6 +455,82 @@ impl Downloader {
         }
 
         Ok(bytes_done)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Token helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Path to the on-disk token file.
+fn token_file_path(store: &Path) -> PathBuf {
+    store.join("hf_token")
+}
+
+/// Store a HuggingFace access token to `<store>/hf_token`.
+///
+/// On Unix the file is created with mode `0o600` (owner read/write only).
+/// On Windows a plain file is written (no OS-level ACLs are set by this helper).
+///
+/// The token value is never logged or printed.
+pub fn token_set(store: &Path, token: &str) -> Result<()> {
+    let path = token_file_path(store);
+    // Write to a temp file, then rename atomically
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, token.as_bytes())
+        .with_context(|| format!("Cannot write token to {}", tmp.display()))?;
+
+    // Set restrictive permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&tmp, perms)
+            .with_context(|| format!("Cannot set permissions on {}", tmp.display()))?;
+    }
+
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("Cannot rename token file to {}", path.display()))?;
+
+    Ok(())
+}
+
+/// Read the stored HuggingFace token from `<store>/hf_token`.
+///
+/// Returns `Ok(None)` when no token file exists.
+pub fn token_get(store: &Path) -> Result<Option<String>> {
+    let path = token_file_path(store);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("Cannot read token from {}", path.display()))?;
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed))
+}
+
+/// Delete the stored HuggingFace token file.  No-op when no file exists.
+pub fn token_remove(store: &Path) -> Result<()> {
+    let path = token_file_path(store);
+    if path.exists() {
+        fs::remove_file(&path)
+            .with_context(|| format!("Cannot delete token file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Return a human-readable token status string.
+///
+/// Returns one of:
+/// - `"set (file)"` — token is stored in `<store>/hf_token`
+/// - `"not set"` — no token file exists
+pub fn token_status(store: &Path) -> Result<String> {
+    match token_get(store)? {
+        Some(_) => Ok("set (file)".to_string()),
+        None => Ok("not set".to_string()),
     }
 }
 
@@ -423,6 +580,26 @@ fn build_agent() -> ureq::Agent {
 
 fn auth_header(token: Option<&str>) -> Option<String> {
     token.map(|t| format!("Bearer {}", t))
+}
+
+/// Convert a ureq HTTP error into a user-friendly `anyhow::Error`.
+///
+/// 403 responses get a special message prompting the user to set a token.
+fn friendly_http_error(err: ureq::Error, url: &str) -> anyhow::Error {
+    match err {
+        ureq::Error::Status(403, _) => anyhow!(
+            "Access denied (HTTP 403) for {}.\n\
+             This repository may be gated or private. To access it:\n\
+             1. Accept the model license on huggingface.co\n\
+             2. Set HF_TOKEN=<your_token> in your environment, or run:\n\
+             \x20\x20 modeld hf token set",
+            url
+        ),
+        ureq::Error::Status(code, resp) => {
+            anyhow!("HTTP {} error for {}: {}", code, url, resp.status_text())
+        }
+        other => anyhow!("HTTP request failed for {}: {}", url, other),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
