@@ -4,8 +4,9 @@ use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
     build_model_lookup, find_workflow_files, hash_file, index_workflow, parse_workflow, run_fsck,
-    t, tf, unlink_path, CasStore, Database, DedupEngine, DedupMode, Downloader, GcEngine, HfCache,
-    QuarantineManager, Scanner,
+    run_doctor, load_config, save_config, resolve_store_path,
+    t, tf, unlink_path, CasStore, CheckStatus, Database, DedupEngine, DedupMode, Downloader,
+    GcEngine, HfCache, QuarantineManager, Scanner,
 };
 use std::path::{Path, PathBuf};
 
@@ -22,35 +23,38 @@ struct Cli {
 enum Commands {
     /// Initialize a new modeld store
     Init {
-        /// Store directory (default: ~/.local/share/modeld)
+        /// Store directory (default: platform data dir, or $MODELD_STORE)
         #[arg(short, long)]
         path: Option<PathBuf>,
+        /// Interactive setup wizard (prompts for all options)
+        #[arg(long)]
+        interactive: bool,
     },
     /// Scan a directory for model files
     Scan {
         /// Directory to scan
         path: PathBuf,
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Show store statistics
     Status {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Show store statistics and duplicate-space summary
     Stats {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Report duplicate model files
     Dupes {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         /// Minimum duplicate file size to include, e.g. 100MB, 2GB
         #[arg(long)]
         min_size: Option<String>,
@@ -61,8 +65,8 @@ enum Commands {
     /// List indexed models
     List {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         /// Maximum number of models to show
         #[arg(short, long)]
         limit: Option<i64>,
@@ -75,8 +79,8 @@ enum Commands {
         /// Full 64-character BLAKE3 hash
         hash: String,
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         /// Output result as JSON
         #[arg(long)]
         json: bool,
@@ -89,8 +93,8 @@ enum Commands {
     /// Deduplicate model files
     Dedup {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         /// Preview mode - show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
@@ -104,8 +108,8 @@ enum Commands {
     /// Manage quarantine
     Quarantine {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         #[command(subcommand)]
         action: QuarantineAction,
     },
@@ -122,8 +126,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Download a file from HuggingFace via modeld CAS
     HfDownload {
@@ -141,8 +145,8 @@ enum Commands {
         #[arg(long)]
         json: bool,
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Configure HF_HOME to point to the modeld HF cache
     HfSetup {
@@ -150,36 +154,36 @@ enum Commands {
         #[arg(long)]
         print_path: bool,
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Show HuggingFace cache statistics
     HfStatus {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Scan workflow files and index model dependencies
     WorkflowScan {
         /// Directory containing workflow JSON files
         path: PathBuf,
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Show model dependencies of a single workflow file
     WorkflowDeps {
         /// Workflow JSON file
         file: PathBuf,
         /// Store directory (optional, for resolved hash lookup)
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// List models with no workflow references (orphans)
     RefsOrphans {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -187,8 +191,8 @@ enum Commands {
     /// Safe garbage collection: quarantine unreferenced models
     Gc {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         /// Preview what would be collected without making changes
         #[arg(long)]
         preview: bool,
@@ -202,8 +206,8 @@ enum Commands {
     /// Verify store consistency: check CAS, aliases, and DB agree
     Verify {
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
         /// Output result as JSON
         #[arg(long)]
         json: bool,
@@ -213,13 +217,32 @@ enum Commands {
         /// File path to restore (must have a hardlink/symlink alias in the DB)
         path: PathBuf,
         /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
     },
     /// Local registry & proxy server (Phase 5)
     Proxy {
         #[command(subcommand)]
         action: ProxyAction,
+    },
+    /// Run environment diagnostics
+    Doctor {
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Manage the modeld store
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
+    },
+    /// Read or write modeld.toml configuration
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
 }
 
@@ -264,6 +287,62 @@ enum ProxyAction {
 }
 
 #[derive(Subcommand)]
+enum StoreAction {
+    /// Print the resolved store path
+    Locate {
+        /// Store directory (if set, just prints this path)
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Initialize the store (same as `modeld init`)
+    Init {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Verify store consistency
+    Verify {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Migrate store from one location to another
+    Migrate {
+        /// Source store path
+        #[arg(long)]
+        from: PathBuf,
+        /// Destination store path
+        #[arg(long)]
+        to: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Read a configuration key from modeld.toml
+    Get {
+        /// Key in dot notation, e.g. store.path, serve.port
+        key: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Write a configuration value to modeld.toml
+    Set {
+        /// Key in dot notation, e.g. serve.port
+        key: String,
+        /// New value
+        value: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum QuarantineAction {
     /// List quarantined files
     List,
@@ -280,38 +359,48 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { path } => init_command(path)?,
-        Commands::Scan { path, store } => scan_command(path, store)?,
-        Commands::Status { store } => status_command(store)?,
-        Commands::Stats { store } => stats_command(store)?,
-        Commands::Dupes { store, min_size, json } => dupes_command(store, min_size, json)?,
-        Commands::List { store, limit, json } => list_command(store, limit, json)?,
-        Commands::Info { hash, store, json } => info_command(store, &hash, json)?,
+        Commands::Init { path, interactive } => init_command(path, interactive)?,
+        Commands::Scan { path, store } => scan_command(path, resolve_store(store))?,
+        Commands::Status { store } => status_command(resolve_store(store))?,
+        Commands::Stats { store } => stats_command(resolve_store(store))?,
+        Commands::Dupes { store, min_size, json } => dupes_command(resolve_store(store), min_size, json)?,
+        Commands::List { store, limit, json } => list_command(resolve_store(store), limit, json)?,
+        Commands::Info { hash, store, json } => info_command(resolve_store(store), &hash, json)?,
         Commands::Hash { file } => hash_command(file)?,
         Commands::Dedup { store, dry_run, auto, report } => {
-            dedup_command(store, dry_run, auto, report)?
+            dedup_command(resolve_store(store), dry_run, auto, report)?
         }
-        Commands::Quarantine { store, action } => quarantine_command(store, action)?,
+        Commands::Quarantine { store, action } => quarantine_command(resolve_store(store), action)?,
         Commands::HfCheck { repo_id, filename, revision, json, store } => {
-            hf_check_command(store, &repo_id, &filename, &revision, json)?
+            hf_check_command(resolve_store(store), &repo_id, &filename, &revision, json)?
         }
         Commands::HfDownload { repo_id, filename, revision, token, json, store } => {
-            hf_download_command(store, &repo_id, &filename, &revision, token, json)?
+            hf_download_command(resolve_store(store), &repo_id, &filename, &revision, token, json)?
         }
-        Commands::HfSetup { print_path, store } => hf_setup_command(store, print_path)?,
-        Commands::HfStatus { store } => hf_status_command(store)?,
-        Commands::WorkflowScan { path, store } => workflow_scan_command(store, path)?,
-        Commands::WorkflowDeps { file, store } => workflow_deps_command(store, file)?,
-        Commands::RefsOrphans { store, json } => refs_orphans_command(store, json)?,
+        Commands::HfSetup { print_path, store } => hf_setup_command(resolve_store(store), print_path)?,
+        Commands::HfStatus { store } => hf_status_command(resolve_store(store))?,
+        Commands::WorkflowScan { path, store } => workflow_scan_command(resolve_store(store), path)?,
+        Commands::WorkflowDeps { file, store } => workflow_deps_command(resolve_store(store), file)?,
+        Commands::RefsOrphans { store, json } => refs_orphans_command(resolve_store(store), json)?,
         Commands::Gc { store, preview, cleanup_quarantine, cleanup_tmp } => {
-            gc_command(store, preview, cleanup_quarantine, cleanup_tmp)?
+            gc_command(resolve_store(store), preview, cleanup_quarantine, cleanup_tmp)?
         }
-        Commands::Verify { store, json } => verify_command(store, json)?,
-        Commands::Unlink { path, store } => unlink_command(store, path)?,
+        Commands::Verify { store, json } => verify_command(resolve_store(store), json)?,
+        Commands::Unlink { path, store } => unlink_command(resolve_store(store), path)?,
         Commands::Proxy { action } => proxy_command(action)?,
+        Commands::Doctor { json, store } => doctor_command(resolve_store(store), json)?,
+        Commands::Store { action } => store_command(action)?,
+        Commands::Config { action } => config_command(action)?,
     }
 
     Ok(())
+}
+
+/// Resolve an optional CLI store override to a concrete PathBuf.
+///
+/// Priority: `--store <path>` > `MODELD_STORE` env > `modeld.toml` > platform default.
+fn resolve_store(store: Option<PathBuf>) -> PathBuf {
+    resolve_store_path(store.as_deref())
 }
 
 fn require_store_db(store_path: &Path) -> Result<PathBuf> {
@@ -344,18 +433,72 @@ fn parse_size(input: &str) -> Result<u64> {
     Ok((value * multiplier) as u64)
 }
 
-fn init_command(path: Option<PathBuf>) -> Result<()> {
-    let store_path = path.unwrap_or_else(|| {
-        let home = std::env::var("HOME")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .expect("Could not determine home directory");
-        PathBuf::from(home).join(".local").join("share").join("modeld")
-    });
+fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<()> {
+    // Resolve store path: CLI arg > MODELD_STORE env > platform default
+    let store_path = resolve_store_path(path.as_deref());
+
+    // Warn if the store already exists
+    let already_exists = store_path.join("modeld.db").exists();
+    if already_exists {
+        println!(
+            "{}",
+            format!("⚠  Store already exists at: {}", store_path.display()).yellow()
+        );
+        println!("{}", "   Re-initializing will add missing components but won't delete data.".dimmed());
+        println!();
+    }
 
     println!(
         "{}",
         tf("init.at", &[("path", &store_path.display())]).green().bold()
     );
+
+    // Gather settings — interactive mode asks the user, otherwise use defaults.
+    let mut config = if already_exists {
+        load_config(&store_path).unwrap_or_default()
+    } else {
+        modeld_core::ModeldConfig::default()
+    };
+
+    if interactive {
+        println!();
+        println!("{}", "Interactive setup wizard".cyan().bold());
+        println!("{}", "─".repeat(40).cyan());
+
+        // 1. Store path
+        println!(
+            "{}",
+            format!("Store path [{}]: ", store_path.display()).bold()
+        );
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        if !input.is_empty() {
+            config.store.path = Some(input.to_string());
+        }
+
+        // 2. Dedup strategy
+        println!("{}", "Dedup strategy (hardlink/symlink/copy_to_cas) [hardlink]: ".bold());
+        let mut strategy = String::new();
+        std::io::stdin().read_line(&mut strategy)?;
+        let strategy = strategy.trim();
+        if !strategy.is_empty() {
+            config.dedup.strategy = strategy.to_string();
+        }
+
+        // 3. Quarantine TTL
+        println!("{}", "Quarantine TTL in days [30]: ".bold());
+        let mut ttl = String::new();
+        std::io::stdin().read_line(&mut ttl)?;
+        let ttl = ttl.trim();
+        if !ttl.is_empty() {
+            if let Ok(days) = ttl.parse::<u32>() {
+                config.gc.quarantine_ttl_days = days;
+            }
+        }
+
+        println!();
+    }
 
     // Initialize CAS
     let cas = CasStore::new(&store_path);
@@ -368,6 +511,9 @@ fn init_command(path: Option<PathBuf>) -> Result<()> {
     // Initialize quarantine directory
     let qm = QuarantineManager::new(&store_path);
     qm.init()?;
+
+    // Write config
+    save_config(&store_path, &config)?;
 
     println!("{}", t("init.success").green());
     println!("\n{}", t("init.next_steps"));
@@ -1812,5 +1958,260 @@ fn proxy_status_command(url: &str, token: Option<String>) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// doctor command
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn doctor_command(store_path: PathBuf, json_output: bool) -> Result<()> {
+    let report = run_doctor(&store_path)?;
+
+    if json_output {
+        let checks_json: Vec<serde_json::Value> = report
+            .checks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "status": c.status.label(),
+                    "message": c.message,
+                    "fix": c.fix,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": report.version,
+                "build_target": report.build_target,
+                "store_path": report.store_path.display().to_string(),
+                "pass": report.pass_count(),
+                "warn": report.warn_count(),
+                "fail": report.fail_count(),
+                "checks": checks_json,
+            })
+        );
+        return Ok(());
+    }
+
+    // Human-readable output
+    println!("{}", "modeld doctor".cyan().bold());
+    println!("{}", "─".repeat(50).cyan());
+    println!(
+        "  version      : {}",
+        report.version
+    );
+    let git_hash = option_env!("GIT_HASH").unwrap_or("unknown");
+    println!("  git hash     : {}", git_hash);
+    println!("  build target : {}", report.build_target);
+    println!("  store path   : {}", report.store_path.display());
+    println!("{}", "─".repeat(50).cyan());
+    println!();
+
+    for check in &report.checks {
+        let (icon, colored_name) = match check.status {
+            CheckStatus::Pass => ("✓".green().bold(), check.name.green()),
+            CheckStatus::Warn => ("⚠".yellow().bold(), check.name.yellow()),
+            CheckStatus::Fail => ("✗".red().bold(), check.name.red().bold()),
+        };
+        println!("  {} {} — {}", icon, colored_name, check.message);
+        if let Some(fix) = &check.fix {
+            println!("      {} {}", "→".dimmed(), fix.dimmed());
+        }
+    }
+
+    println!();
+    println!("{}", "─".repeat(50).cyan());
+    let summary = format!(
+        "Summary: {} pass  {} warn  {} fail",
+        report.pass_count(),
+        report.warn_count(),
+        report.fail_count(),
+    );
+    if report.fail_count() > 0 {
+        println!("  {}", summary.red().bold());
+    } else if report.warn_count() > 0 {
+        println!("  {}", summary.yellow().bold());
+    } else {
+        println!("  {}", summary.green().bold());
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// store command
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn store_command(action: StoreAction) -> Result<()> {
+    match action {
+        StoreAction::Locate { store } => {
+            let path = resolve_store(store);
+            println!("{}", path.display());
+            Ok(())
+        }
+        StoreAction::Init { store } => {
+            let path = resolve_store(store);
+            init_command(Some(path), false)
+        }
+        StoreAction::Verify { store, json } => {
+            let path = resolve_store(store);
+            verify_command(path, json)
+        }
+        StoreAction::Migrate { from, to } => {
+            store_migrate_command(from, to)
+        }
+    }
+}
+
+fn store_migrate_command(from: PathBuf, to: PathBuf) -> Result<()> {
+    if !from.exists() {
+        anyhow::bail!("Source store not found: {}", from.display());
+    }
+
+    println!(
+        "{}",
+        format!("Migrating store from {} to {}", from.display(), to.display()).cyan().bold()
+    );
+
+    // Simple migration: copy the entire store directory tree
+    std::fs::create_dir_all(&to)
+        .with_context(|| format!("Failed to create destination: {}", to.display()))?;
+
+    copy_dir_all(&from, &to)?;
+
+    println!("{}", "✓ Migration complete.".green().bold());
+    println!(
+        "  {}",
+        format!("New store: {}", to.display()).dimmed()
+    );
+    println!(
+        "  {}",
+        "You can now update your MODELD_STORE or modeld.toml to point to the new location.".dimmed()
+    );
+
+    Ok(())
+}
+
+/// Recursively copy a directory tree (best-effort; skips CAS read-only files on Windows).
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src)
+        .with_context(|| format!("Failed to read directory: {}", src.display()))?
+    {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+
+        if ty.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            copy_dir_all(&entry.path(), &dst_path)?;
+        } else if ty.is_file() {
+            // CAS objects are read-only; copy with overwrite
+            if let Err(e) = std::fs::copy(entry.path(), &dst_path) {
+                eprintln!(
+                    "  {} skipping {}: {}",
+                    "⚠".yellow(),
+                    entry.path().display(),
+                    e
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// config command
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn config_command(action: ConfigAction) -> Result<()> {
+    match action {
+        ConfigAction::Get { key, store } => {
+            let store_path = resolve_store(store);
+            let config = load_config(&store_path)?;
+            let value = config_get_value(&config, &key)?;
+            println!("{}", value);
+            Ok(())
+        }
+        ConfigAction::Set { key, value, store } => {
+            let store_path = resolve_store(store);
+            let mut config = load_config(&store_path)?;
+            config_set_value(&mut config, &key, &value)?;
+            save_config(&store_path, &config)?;
+            println!(
+                "{} {} = {}",
+                "✓".green().bold(),
+                key.bold(),
+                value
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Read a config value by dotted key.
+///
+/// Supported keys:
+/// - `store.path`
+/// - `serve.host`, `serve.port`
+/// - `dedup.strategy`
+/// - `gc.quarantine_ttl_days`
+fn config_get_value(config: &modeld_core::ModeldConfig, key: &str) -> Result<String> {
+    match key {
+        "store.path" => Ok(config
+            .store
+            .path
+            .as_deref()
+            .unwrap_or("<not set>")
+            .to_string()),
+        "serve.host" => Ok(config.serve.host.clone()),
+        "serve.port" => Ok(config.serve.port.to_string()),
+        "dedup.strategy" => Ok(config.dedup.strategy.clone()),
+        "gc.quarantine_ttl_days" => Ok(config.gc.quarantine_ttl_days.to_string()),
+        other => anyhow::bail!("Unknown config key: '{}'. Supported keys: store.path, serve.host, serve.port, dedup.strategy, gc.quarantine_ttl_days", other),
+    }
+}
+
+/// Write a config value by dotted key.
+fn config_set_value(
+    config: &mut modeld_core::ModeldConfig,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    match key {
+        "store.path" => {
+            config.store.path = if value.is_empty() { None } else { Some(value.to_string()) };
+        }
+        "serve.host" => {
+            config.serve.host = value.to_string();
+        }
+        "serve.port" => {
+            config.serve.port = value
+                .parse::<u16>()
+                .with_context(|| format!("Invalid port number: {}", value))?;
+        }
+        "dedup.strategy" => {
+            match value {
+                "hardlink" | "symlink" | "copy_to_cas" | "virtual_alias" => {
+                    config.dedup.strategy = value.to_string();
+                }
+                other => anyhow::bail!(
+                    "Invalid dedup strategy '{}'. Valid: hardlink, symlink, copy_to_cas, virtual_alias",
+                    other
+                ),
+            }
+        }
+        "gc.quarantine_ttl_days" => {
+            config.gc.quarantine_ttl_days = value
+                .parse::<u32>()
+                .with_context(|| format!("Invalid TTL days: {}", value))?;
+        }
+        other => anyhow::bail!(
+            "Unknown config key: '{}'. Supported keys: store.path, serve.host, serve.port, dedup.strategy, gc.quarantine_ttl_days",
+            other
+        ),
+    }
     Ok(())
 }
