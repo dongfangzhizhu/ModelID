@@ -13,9 +13,63 @@
 
 use crate::cas::CasStore;
 use crate::db::{Database, Model};
+use crate::hash::Blake3Hash;
 use crate::quarantine::QuarantineManager;
 use anyhow::Result;
 use chrono::Utc;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RefStatus
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Classification of why a model has (or lacks) live references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefStatus {
+    /// Referenced by at least one workflow / config file.
+    HardReference,
+    /// Has at least one alias but no workflow reference.
+    SoftReference,
+    /// User has explicitly pinned the model — never GC'd.
+    Pinned,
+    /// Last alias was accessed within the last 30 days.
+    RecentlyUsed,
+    /// Cannot determine status — conservative: do not GC.
+    Unknown,
+    /// No hard reference, no alias, not pinned — safe to quarantine.
+    OrphanCandidate,
+}
+
+/// Classify the reference status of a single model.
+///
+/// Priority (highest wins):
+/// 1. Pinned flag
+/// 2. Workflow reference count > 0
+/// 3. Alias count > 0
+/// 4. Otherwise → `OrphanCandidate`
+pub fn classify_refs(db: &Database, hash: &Blake3Hash) -> RefStatus {
+    // Use the efficient batch query to get alias + workflow ref counts.
+    // Fall back to Unknown when the model is not found.
+    let rows = match db.get_gc_candidate_counts() {
+        Ok(r) => r,
+        Err(_) => return RefStatus::Unknown,
+    };
+
+    let row = rows.iter().find(|(m, _, _)| m.blake3_hash.as_hex() == hash.as_hex());
+    let Some((model, alias_count, workflow_ref_count)) = row else {
+        return RefStatus::Unknown;
+    };
+
+    if model.pinned {
+        return RefStatus::Pinned;
+    }
+    if *workflow_ref_count > 0 {
+        return RefStatus::HardReference;
+    }
+    if *alias_count > 0 {
+        return RefStatus::SoftReference;
+    }
+    RefStatus::OrphanCandidate
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -28,17 +82,22 @@ pub struct GcCandidate {
     pub alias_count: usize,
     pub cas_file_exists: bool,
     pub savings_bytes: i64,
+    /// Classification computed at scan time.
+    pub ref_status: RefStatus,
 }
 
 impl GcCandidate {
     pub fn is_hard_protected(&self) -> bool {
-        self.workflow_ref_count > 0
+        matches!(self.ref_status, RefStatus::HardReference)
     }
     pub fn is_soft_protected(&self) -> bool {
-        self.workflow_ref_count == 0 && self.alias_count > 0
+        matches!(self.ref_status, RefStatus::SoftReference)
     }
     pub fn is_orphan(&self) -> bool {
-        self.workflow_ref_count == 0 && self.alias_count == 0
+        matches!(self.ref_status, RefStatus::OrphanCandidate)
+    }
+    pub fn is_pinned(&self) -> bool {
+        matches!(self.ref_status, RefStatus::Pinned)
     }
 }
 
@@ -96,11 +155,24 @@ impl<'a> GcEngine<'a> {
         let mut candidates = Vec::new();
         for (model, alias_count, workflow_ref_count) in rows {
             let cas_file_exists = self.cas.contains(&model.blake3_hash);
+
+            // Compute ref_status inline to avoid a second DB round-trip.
+            let ref_status = if model.pinned {
+                RefStatus::Pinned
+            } else if workflow_ref_count > 0 {
+                RefStatus::HardReference
+            } else if alias_count > 0 {
+                RefStatus::SoftReference
+            } else {
+                RefStatus::OrphanCandidate
+            };
+
             candidates.push(GcCandidate {
                 savings_bytes: model.size_bytes,
                 workflow_ref_count,
                 alias_count,
                 cas_file_exists,
+                ref_status,
                 model,
             });
         }
@@ -157,6 +229,11 @@ impl<'a> GcEngine<'a> {
             }
             if c.is_soft_protected() {
                 result.skipped_soft.push(hash_prefix);
+                continue;
+            }
+            // Pinned or Unknown → skip conservatively (no GC)
+            if c.is_pinned() || matches!(c.ref_status, RefStatus::Unknown | RefStatus::RecentlyUsed) {
+                result.skipped_protected.push(hash_prefix);
                 continue;
             }
 
@@ -328,6 +405,7 @@ mod tests {
             alias_count: 0,
             cas_file_exists: true,
             savings_bytes: 1000,
+            ref_status: RefStatus::HardReference,
         };
         assert!(hard.is_hard_protected());
         assert!(!hard.is_soft_protected());
@@ -339,6 +417,7 @@ mod tests {
             alias_count: 2,
             cas_file_exists: true,
             savings_bytes: 1000,
+            ref_status: RefStatus::SoftReference,
         };
         assert!(soft.is_soft_protected());
 
@@ -348,6 +427,7 @@ mod tests {
             alias_count: 0,
             cas_file_exists: true,
             savings_bytes: 1000,
+            ref_status: RefStatus::OrphanCandidate,
         };
         assert!(orphan.is_orphan());
     }

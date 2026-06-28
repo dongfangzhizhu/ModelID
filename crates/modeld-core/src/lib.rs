@@ -20,12 +20,14 @@ pub mod doctor;
 pub mod downloader;
 pub mod fsck;
 pub mod gc;
+pub mod governance;
 pub mod hash;
 pub mod hf_cache;
 pub mod i18n;
 pub mod links;
 pub mod platform;
 pub mod quarantine;
+pub mod refs;
 pub mod scanner;
 pub mod store_path;
 pub mod tx;
@@ -49,7 +51,13 @@ pub use fsck::{
     DanglingAlias, FsckReport, SizeMismatch,
     HashMismatch, MissingCasObject, OrphanRecord, RepairResult, VerifyReport,
 };
-pub use gc::{GcCandidate, GcEngine, GcPreview, GcResult};
+pub use gc::{classify_refs, GcCandidate, GcEngine, GcPreview, GcResult, GcPreviewItem, RefStatus};
+pub use governance::{
+    add_tag, export_tags_json, favorite_model, get_note, get_provenance, get_tags_for_model,
+    import_tags_json, is_pinned, list_all_tags, list_pinned, pin_model, remove_tag, set_note,
+    set_provenance, unfavorite_model, unpin_model, ProvenanceInfo,
+};
+pub use refs::{explain_refs, list_orphans, scan_workflow_refs};
 pub use hash::{hash_file, Blake3Hash};
 pub use hf_cache::{HfCache, HfCacheStats};
 pub use i18n::{detect, t, tf, Lang};
