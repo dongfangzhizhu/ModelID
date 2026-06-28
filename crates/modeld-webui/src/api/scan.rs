@@ -1,12 +1,21 @@
+//! Scan API handler — POST /api/v1/scan
+
 use axum::{extract::State, response::Json};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiResult;
-use crate::state::AppState;
+use crate::state::{AppState, WsEvent};
 
+/// Request body for `POST /api/v1/scan`.
+///
+/// Both the legacy single-path format (`path`) and the new multi-path format
+/// (`paths`) are accepted for backward compatibility.
 #[derive(Deserialize, Default)]
 pub struct ScanRequest {
+    /// A single directory to scan (legacy field).
     pub path: Option<String>,
+    /// One or more directories to scan (new canonical field).
+    pub paths: Option<Vec<String>>,
     pub force_rehash: Option<bool>,
 }
 
@@ -14,6 +23,8 @@ pub struct ScanRequest {
 pub struct ScanResponse {
     pub scan_id: String,
     pub message: String,
+    /// Paths that will be scanned (resolved from request).
+    pub scan_paths: Vec<String>,
 }
 
 pub async fn trigger_scan(
@@ -23,80 +34,95 @@ pub async fn trigger_scan(
     let req = body.map(|b| b.0).unwrap_or_default();
     let scan_id = uuid::Uuid::new_v4().to_string();
 
+    // Resolve scan paths: prefer `paths`, fall back to `path`, then store root.
+    let mut scan_paths: Vec<std::path::PathBuf> = req
+        .paths
+        .as_deref()
+        .map(|ps| ps.iter().map(std::path::PathBuf::from).collect())
+        .or_else(|| req.path.as_deref().map(|p| vec![std::path::PathBuf::from(p)]))
+        .unwrap_or_else(|| vec![state.store_path.clone()]);
+
+    // De-duplicate
+    scan_paths.dedup();
+
+    let scan_paths_display: Vec<String> =
+        scan_paths.iter().map(|p| p.display().to_string()).collect();
+
     let db_arc = state.db.clone();
     let store_path = state.store_path.clone();
     let event_tx = state.event_tx.clone();
+    let sid = scan_id.clone();
 
     tokio::spawn(async move {
-        let scan_root = req
-            .path
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| store_path.clone());
+        for scan_root in scan_paths {
+            let _ = event_tx.send(WsEvent::ScanProgress {
+                path: scan_root.display().to_string(),
+                done: 0,
+                total: 0,
+            });
 
-        let _ = event_tx.send(crate::state::WsEvent::ScanProgress(
-            crate::state::ScanProgressPayload {
-                files_scanned: 0,
-                files_total: 0,
-                new_models_found: 0,
-                duplicates_found: 0,
-                phase: "walking".to_string(),
-                current_path: scan_root.display().to_string(),
-            },
-        ));
+            let db_arc2 = db_arc.clone();
+            let store_path2 = store_path.clone();
+            let event_tx2 = event_tx.clone();
+            let scan_root2 = scan_root.clone();
 
-        // Run blocking scan in a dedicated thread
-        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
-            let scanner = modeld_core::Scanner::new();
-            let scanned = scanner.scan(&scan_root, |_path, _size| {})?;
+            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+                let scanner = modeld_core::Scanner::new();
+                let scanned = scanner.scan(&scan_root2, |_path, _size| {})?;
 
-            // Store each scanned file into DB
-            let cas_path = store_path.join("cas");
-            std::fs::create_dir_all(&cas_path).ok();
+                let cas_path = store_path2.join("cas");
+                std::fs::create_dir_all(&cas_path).ok();
 
-            let mut db = db_arc.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?;
-            let mut count = 0usize;
+                let mut db = db_arc2.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?;
+                let mut count = 0usize;
 
-            for file in &scanned {
-                db.insert_or_update_model(
-                    &file.hash,
-                    file.size as i64,
-                    None,
-                    None,
-                    None,
-                    None,
-                )?;
-                // Try inserting alias; ignore duplicate errors
-                db.insert_alias(
-                    &file.hash,
-                    &file.path.to_string_lossy(),
-                    modeld_core::db::Frontend::User,
-                    modeld_core::db::AliasType::Original,
-                )
-                .ok();
-                count += 1;
-            }
-            Ok(count)
-        })
-        .await;
+                for file in &scanned {
+                    db.insert_or_update_model(
+                        &file.hash,
+                        file.size as i64,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )?;
+                    db.insert_alias(
+                        &file.hash,
+                        &file.path.to_string_lossy(),
+                        modeld_core::db::Frontend::User,
+                        modeld_core::db::AliasType::Original,
+                    )
+                    .ok();
+                    count += 1;
+                }
+                Ok(count)
+            })
+            .await;
 
-        let files_count = result
-            .as_ref()
-            .ok()
-            .and_then(|r| r.as_ref().ok())
-            .copied()
-            .unwrap_or(0) as u64;
+            let files_count = result
+                .as_ref()
+                .ok()
+                .and_then(|r| r.as_ref().ok())
+                .copied()
+                .unwrap_or(0) as u64;
 
-        let _ = event_tx.send(crate::state::WsEvent::ScanProgress(
-            crate::state::ScanProgressPayload {
-                files_scanned: files_count,
-                files_total: files_count,
-                new_models_found: files_count,
-                duplicates_found: 0,
-                phase: "done".to_string(),
-                current_path: String::new(),
-            },
-        ));
+            let _ = event_tx2.send(WsEvent::ScanProgress {
+                path: scan_root.display().to_string(),
+                done: files_count,
+                total: files_count,
+            });
+        }
+
+        // Signal all-paths complete
+        let _ = event_tx.send(WsEvent::OperationComplete {
+            operation: format!("scan:{}", sid),
+            success: true,
+            message: "Scan complete".to_string(),
+        });
     });
 
-    Ok(Json(ScanResponse { scan_id, message: "Scan started".to_string() }))
+    Ok(Json(ScanResponse {
+        scan_id,
+        message: "Scan started".to_string(),
+        scan_paths: scan_paths_display,
+    }))
 }

@@ -8,7 +8,28 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
 
-use crate::state::{AppState, WsEvent};
+use crate::state::{AppState, DaemonStatusPayload, WsEvent};
+
+/// Thin wrapper around the broadcast sender that provides a convenient
+/// fire-and-forget `send` method.
+#[derive(Clone)]
+pub struct WsBroadcaster {
+    tx: broadcast::Sender<WsEvent>,
+}
+
+impl WsBroadcaster {
+    /// Create a new broadcaster from an existing `broadcast::Sender`.
+    pub fn new(tx: broadcast::Sender<WsEvent>) -> Self {
+        Self { tx }
+    }
+
+    /// Broadcast `event` to all connected WebSocket clients.
+    ///
+    /// Silently ignores send errors (e.g. no active subscribers).
+    pub fn send(&self, event: WsEvent) {
+        let _ = self.tx.send(event);
+    }
+}
 
 /// WebSocket upgrade handler — each client gets a dedicated task.
 pub async fn ws_handler(
@@ -22,8 +43,8 @@ pub async fn ws_handler(
 async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) {
     let (mut sender, mut receiver) = socket.split();
 
-    // Send initial daemon status
-    let status_msg = WsEvent::DaemonStatus(crate::state::DaemonStatusPayload {
+    // Send initial daemon status snapshot on connect.
+    let status_msg = WsEvent::DaemonStatus(DaemonStatusPayload {
         scanning: false,
         deduping: false,
         uptime_secs: 0,
@@ -32,7 +53,7 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) 
         let _ = sender.send(Message::Text(json)).await;
     }
 
-    // Forward broadcast events to the WebSocket client
+    // Forward broadcast events to the WebSocket client.
     let forward_task = tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -49,7 +70,7 @@ async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) 
         }
     });
 
-    // Keep reading client messages (ping/pong or close)
+    // Keep reading client messages (ping/pong or close).
     while let Some(Ok(msg)) = receiver.next().await {
         if matches!(msg, Message::Close(_)) {
             break;
