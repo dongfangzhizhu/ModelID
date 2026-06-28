@@ -309,6 +309,12 @@ enum ProxyAction {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Rotate (regenerate) the bearer token stored in modeld.toml
+    TokenRotate {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2009,6 +2015,7 @@ fn proxy_command(action: ProxyAction) -> Result<()> {
         }
         ProxyAction::Discover { timeout } => proxy_discover_command(timeout),
         ProxyAction::Status { url, token } => proxy_status_command(&url, token),
+        ProxyAction::TokenRotate { store } => proxy_token_rotate_command(resolve_store(store)),
     }
 }
 
@@ -2140,6 +2147,26 @@ fn proxy_status_command(url: &str, token: Option<String>) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// proxy token-rotate command
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn proxy_token_rotate_command(store_path: PathBuf) -> Result<()> {
+    let mut config = load_config(&store_path).unwrap_or_default();
+
+    let new_token = Uuid::new_v4().to_string();
+    config.auth.token = new_token.clone();
+    save_config(&store_path, &config)?;
+
+    println!("{}", "✓ Bearer token rotated successfully.".green().bold());
+    println!("  {}", format!("New token: {}", new_token).bold());
+    println!(
+        "  {}",
+        "Restart the proxy server for the change to take effect.".dimmed()
+    );
     Ok(())
 }
 

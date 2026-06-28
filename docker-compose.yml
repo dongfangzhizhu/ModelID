@@ -1,0 +1,30 @@
+version: "3.9"
+services:
+  modeld:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - modeld-store:/data/modeld
+      - ${MODEL_DIR:-/mnt/models}:/models:ro
+    environment:
+      - MODELD_STORE=/data/modeld
+      - MODELD_AUTH_TOKEN=${MODELD_AUTH_TOKEN}
+    ports:
+      - "127.0.0.1:8234:8234"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "443:443"
+      - "80:80"
+    depends_on:
+      - modeld
+
+volumes:
+  modeld-store:
+  caddy-data:

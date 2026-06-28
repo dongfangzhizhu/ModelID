@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+sha2.workspace = true
 # mDNS discovery (mdns 3.x) is async-std based; drive its stream synchronously.
 async-std = "1.13"
 futures-util = "0.3"
@@ -23,5 +24,4 @@ futures-util = "0.3"
 [dev-dependencies]
 tempfile.workspace = true
 ureq.workspace = true
-sha2.workspace = true
 modeld-client = { path = "../modeld-client" }
