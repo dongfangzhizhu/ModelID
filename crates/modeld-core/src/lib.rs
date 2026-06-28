@@ -9,7 +9,9 @@
 //! - Quarantine mechanism
 //! - HuggingFace interception layer (Phase 3)
 //! - Workflow reference graph + safe GC (Phase 4)
+//! - Append-only NDJSON audit log
 
+pub mod audit;
 pub mod cas;
 pub mod config;
 pub mod db;
@@ -30,6 +32,7 @@ pub mod tx;
 pub mod unlink;
 pub mod workflow;
 
+pub use audit::{AuditEntry, AuditLogger};
 pub use cas::CasStore;
 pub use config::{
     load_config, save_config, AuthConfig, DedupConfig, GcConfig, ModeldConfig, ServeConfig,

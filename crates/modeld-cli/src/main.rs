@@ -10,6 +10,7 @@ use modeld_core::{
     token_remove, token_set, token_status,
 };
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "modeld")]
@@ -234,6 +235,24 @@ enum Commands {
         /// Store directory
         #[arg(short = 's', long)]
         store: Option<PathBuf>,
+    },
+    /// Start the modeld Web UI server (unified serve command)
+    Serve {
+        /// Bind address (default: 127.0.0.1)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on (default: 8234)
+        #[arg(long, short)]
+        port: Option<u16>,
+        /// Open browser after starting
+        #[arg(long)]
+        open: bool,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Reject all write operations (read-only mode)
+        #[arg(long)]
+        read_only: bool,
     },
     /// Manage the modeld store
     Store {
@@ -482,6 +501,9 @@ fn main() -> Result<()> {
         Commands::Store { action } => store_command(action)?,
         Commands::Config { action } => config_command(action)?,
         Commands::Hf { action } => hf_command(action)?,
+        Commands::Serve { host, port, open, store, read_only } => {
+            serve_command(host, port, open, resolve_store(store), read_only)?
+        }
     }
 
     Ok(())
@@ -1911,10 +1933,79 @@ fn unlink_command(store_path: PathBuf, path: PathBuf) -> Result<()> {
 // Phase 5: proxy commands
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── modeld serve ──────────────────────────────────────────────────────────
+
+/// Start the embedded Web UI server.
+///
+/// If no auth token is configured one is auto-generated and printed to stdout.
+/// The token value is **never** written to a log file.
+fn serve_command(
+    host: String,
+    port: Option<u16>,
+    open_browser: bool,
+    store_path: PathBuf,
+    _read_only: bool,
+) -> Result<()> {
+    use colored::Colorize;
+
+    let port = port.unwrap_or(8234);
+
+    // Warn loudly when binding to all interfaces.
+    if host == "0.0.0.0" {
+        println!(
+            "{}",
+            "⚠  Warning: binding to 0.0.0.0 exposes the Web UI to all network interfaces."
+                .yellow()
+                .bold()
+        );
+        println!("{}", "   Restrict access with a firewall if this machine is reachable from the internet.".yellow());
+        println!();
+    }
+
+    // Ensure the store is initialized.
+    std::fs::create_dir_all(&store_path)?;
+    let db_path = store_path.join("modeld.db");
+    let db = Database::open(&db_path)
+        .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
+
+    // Load existing config; generate a token if none is configured.
+    let mut config = load_config(&store_path).unwrap_or_default();
+    let auth_token = if config.auth.token.is_empty() {
+        let new_token = uuid::Uuid::new_v4().to_string();
+        config.auth.token = new_token.clone();
+        // Print to console only — NOT logged anywhere.
+        println!(
+            "{}",
+            "🔑  No auth token configured. Auto-generated token for this session:".cyan().bold()
+        );
+        println!("    {}", new_token.yellow().bold());
+        println!();
+        println!("{}", "   Pass it in the Authorization header:".dimmed());
+        println!("   {}", format!("Authorization: Bearer {}", new_token).dimmed());
+        println!();
+        new_token
+    } else {
+        config.auth.token.clone()
+    };
+
+    let (state, _rx) = modeld_webui::AppState::new(db, store_path, Some(auth_token), None);
+
+    let webui_config = modeld_webui::WebUiConfig { host, port, open_browser };
+
+    // Run the async server on a fresh Tokio runtime.
+    tokio::runtime::Runtime::new()
+        .context("Failed to create Tokio runtime")?
+        .block_on(modeld_webui::run(state, webui_config))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 fn proxy_command(action: ProxyAction) -> Result<()> {
     match action {
-        ProxyAction::Start { bind, port, store, token, allow_anonymous, config } => {
-            proxy_start_command(bind, port, store, token, allow_anonymous, config)
+        ProxyAction::Start { bind, port, store, token, allow_anonymous: _, config: _ } => {
+            // `modeld proxy start` is a compatibility alias for `modeld serve`.
+            let host = if bind == "0.0.0.0" { bind } else { bind };
+            serve_command(host, port, false, store, false)
         }
         ProxyAction::Discover { timeout } => proxy_discover_command(timeout),
         ProxyAction::Status { url, token } => proxy_status_command(&url, token),

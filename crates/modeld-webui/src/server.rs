@@ -1,9 +1,16 @@
 use anyhow::Result;
-use axum::{routing::get, Router};
-use tower_http::cors::CorsLayer;
+use axum::{
+    extract::State,
+    middleware,
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use tower_http::compression::CompressionLayer;
+use tower_http::cors::CorsLayer;
 
 use crate::api;
+use crate::auth::require_bearer_token;
 use crate::state::AppState;
 use crate::static_files::static_handler;
 use crate::ws::ws_handler;
@@ -26,11 +33,29 @@ impl Default for WebUiConfig {
     }
 }
 
+/// `GET /metrics` — Prometheus text format metrics (unauthenticated by design
+/// so scraping tools like prometheus-server don't need bearer tokens; restrict
+/// via firewall if needed in production).
+async fn metrics_handler(State(state): State<AppState>) -> Response {
+    let body = state.metrics.render_prometheus();
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
 /// Build and run the axum HTTP server.
 pub async fn run(state: AppState, config: WebUiConfig) -> Result<()> {
+    // Protected API routes — require bearer token when configured.
+    let protected_api = api::routes()
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer_token));
+
     let app = Router::new()
-        // REST API routes (mounted under /api/v1)
-        .nest("/api/v1", api::routes())
+        // Prometheus metrics (not behind auth — restrict at network level)
+        .route("/metrics", get(metrics_handler))
+        // Protected REST API routes (bearer token when auth_token is set)
+        .nest("/api/v1", protected_api)
         // WebSocket endpoint
         .route("/ws", get(ws_handler))
         // Static file fallback (serves embedded UI)

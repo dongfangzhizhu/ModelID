@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
     let db = modeld_core::Database::open(&db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
 
-    let (state, _) = modeld_webui::AppState::new(db, args.store);
+    let (state, _) = modeld_webui::AppState::new(db, args.store, None, None);
 
     let config = modeld_webui::WebUiConfig {
         host: args.host,

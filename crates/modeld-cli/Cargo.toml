@@ -14,9 +14,12 @@ path = "src/main.rs"
 modeld-core = { path = "../modeld-core" }
 modeld-proxy = { path = "../modeld-proxy" }
 modeld-client = { path = "../modeld-client" }
+modeld-webui = { path = "../modeld-webui" }
 clap.workspace = true
 indicatif.workspace = true
 colored.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+tokio.workspace = true
+uuid.workspace = true
