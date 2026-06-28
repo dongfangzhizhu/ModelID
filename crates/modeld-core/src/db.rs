@@ -1952,6 +1952,30 @@ impl Database {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
+    // ── Tag methods ───────────────────────────────────────────────────────────
+
+    /// Return all (model_hash, tag) pairs, ordered by tag then hash.
+    pub fn list_all_tags_per_model(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model_hash, tag FROM tags ORDER BY tag, model_hash",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Return all tags for a specific model.
+    pub fn get_tags_for_model(&self, model_hash: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tag FROM tags WHERE model_hash = ?1 ORDER BY tag",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![model_hash], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    // ── Workflow record accessors ─────────────────────────────────────────────
+
     /// Get a workflow record by path.
     pub fn get_workflow(&self, path: &str) -> Result<Option<WorkflowRecord>> {
         let result = self.conn.query_row(
