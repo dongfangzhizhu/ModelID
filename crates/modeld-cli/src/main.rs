@@ -3,13 +3,13 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
-    add_tag, build_model_lookup, explain_refs, export_tags_json, favorite_model, find_workflow_files,
-    get_provenance, hash_file, import_tags_json, index_workflow, is_pinned, list_all_tags,
-    list_orphans, list_pinned, parse_workflow, pin_model, remove_tag, run_fsck,
-    run_doctor, load_config, save_config, resolve_store_path, scan_workflow_refs, set_note,
-    t, tf, unfavorite_model, unlink_path, unpin_model,
+    add_tag, build_model_lookup, classify_refs, explain_refs, favorite_model,
+    find_workflow_files, get_tags_for_model, hash_file,
+    index_workflow, list_all_tags, list_orphans, list_pinned, parse_workflow, pin_model,
+    remove_tag, run_fsck, run_doctor, load_config, save_config, resolve_store_path,
+    scan_workflow_refs, set_note, t, tf, unfavorite_model, unlink_path, unpin_model,
     Blake3Hash, CasStore, CheckStatus, Database, DedupEngine, DedupMode, DedupStrategy,
-    DedupPlan, Downloader, GcEngine, HfCache, QuarantineManager, Scanner, ScanOptions,
+    Downloader, GcEngine, HfCache, QuarantineManager, RefStatus, Scanner, ScanOptions,
     TransactionManager, TxFilter,
     token_remove, token_set, token_status,
 };
@@ -91,6 +91,10 @@ enum Commands {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
+        /// Export a license report CSV to a file
+        /// (columns: hash, size, format, source_type, hf_repo_id, license, downloaded_at)
+        #[arg(long = "export-csv", value_name = "FILE")]
+        export_csv: Option<PathBuf>,
     },
     /// Show details for a model hash
     Info {
@@ -131,10 +135,28 @@ enum Commands {
         /// Minimum file size to consider for dedup, e.g. 100MB, 2GB
         #[arg(long)]
         min_size: Option<String>,
+        /// Only process files whose path matches this glob pattern
+        /// (can be specified multiple times)
+        #[arg(long = "include", value_name = "GLOB")]
+        include_globs: Vec<String>,
+        /// Exclude files whose path matches this glob pattern
+        /// (can be specified multiple times)
+        #[arg(long = "exclude", value_name = "GLOB")]
+        exclude_globs: Vec<String>,
         /// Protect a directory: files inside are preferred as the canonical copy
         /// (can be specified multiple times)
         #[arg(long = "protect", value_name = "PATH")]
         protect: Vec<PathBuf>,
+        /// Pin a specific file path as the highest-priority canonical for this
+        /// run (ephemeral, not persisted to the DB; can be specified multiple times)
+        #[arg(long = "pin", value_name = "PATH")]
+        pin: Vec<PathBuf>,
+        /// Skip the confirmation prompt when applying changes
+        #[arg(long)]
+        yes: bool,
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Manage quarantine
     Quarantine {
@@ -442,7 +464,11 @@ enum QuarantineAction {
     /// List quarantined files
     List,
     /// Clean up expired quarantine entries (>30 days)
-    Cleanup,
+    Cleanup {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
     /// Restore a quarantined file to its original location
     Restore {
         /// Full path to the quarantined file (shown by `quarantine list`)
@@ -659,6 +685,15 @@ enum RefsAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show reference graph: all models with their reference status
+    Graph {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ── Transaction management ────────────────────────────────────────────────────
@@ -702,6 +737,7 @@ enum TxAction {
     /// Delete transaction records older than a given duration
     Cleanup {
         /// Age threshold, e.g. "30d", "7d", "1h"
+        #[arg(long)]
         older_than: String,
         /// Store directory
         #[arg(short = 's', long)]
@@ -761,11 +797,11 @@ fn main() -> Result<()> {
         Commands::Status { store } => status_command(resolve_store(store))?,
         Commands::Stats { store } => stats_command(resolve_store(store))?,
         Commands::Dupes { store, min_size, json } => dupes_command(resolve_store(store), min_size, json)?,
-        Commands::List { store, limit, json } => list_command(resolve_store(store), limit, json)?,
+        Commands::List { store, limit, json, export_csv } => list_command(resolve_store(store), limit, json, export_csv)?,
         Commands::Info { hash, store, json } => info_command(resolve_store(store), &hash, json)?,
         Commands::Hash { file } => hash_command(file)?,
-        Commands::Dedup { store, dry_run, auto, apply, report, strategy, min_size, protect } => {
-            dedup_command(resolve_store(store), dry_run, auto || apply, report, strategy, min_size, protect)?
+        Commands::Dedup { store, dry_run, auto, apply, report, strategy, min_size, include_globs, exclude_globs, protect, pin, yes, json } => {
+            dedup_command(resolve_store(store), dry_run, auto || apply, report, strategy, min_size, include_globs, exclude_globs, protect, pin, yes, json)?
         }
         Commands::Quarantine { store, action } => quarantine_command(resolve_store(store), action)?,
         Commands::HfCheck { repo_id, filename, revision, json, store } => {
@@ -1025,6 +1061,16 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf, incremental: bool, full
             )?;
         }
 
+        // Update incremental scan index with mtime + inode for future scans
+        db.upsert_path_index(
+            &path_str,
+            &file.hash,
+            file.size as i64,
+            file.mtime,
+            file.inode,
+            file.device_id,
+        )?;
+
         processed += 1;
     }
 
@@ -1176,10 +1222,45 @@ fn dupes_command(store_path: PathBuf, min_size: Option<String>, json_output: boo
     Ok(())
 }
 
-fn list_command(store_path: PathBuf, limit: Option<i64>, json_output: bool) -> Result<()> {
+fn list_command(store_path: PathBuf, limit: Option<i64>, json_output: bool, export_csv: Option<PathBuf>) -> Result<()> {
     let db_path = require_store_db(&store_path)?;
     let db = Database::open(&db_path)?;
     let models = db.list_models(limit)?;
+
+    // ── CSV export ──────────────────────────────────────────────────────────
+    if let Some(csv_path) = export_csv {
+        use std::io::Write as IoWrite;
+        let mut file = std::fs::File::create(&csv_path)
+            .with_context(|| format!("Failed to create CSV file: {}", csv_path.display()))?;
+
+        // Header
+        writeln!(file, "hash,size,format,source_type,hf_repo_id,license,downloaded_at")?;
+
+        for m in &models {
+            let hash = m.blake3_hash.as_hex();
+            let size = m.size_bytes;
+            let format = csv_escape(m.format.as_deref().unwrap_or(""));
+            let source_type = csv_escape(m.source_type.as_deref().unwrap_or("local"));
+            let hf_repo_id = csv_escape(m.hf_repo_id.as_deref().unwrap_or(""));
+            let license = csv_escape(m.license.as_deref().unwrap_or(""));
+            let downloaded_at = m.downloaded_at
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default();
+            writeln!(
+                file,
+                "{},{},{},{},{},{},{}",
+                hash, size, format, source_type, hf_repo_id, license, downloaded_at
+            )?;
+        }
+
+        println!(
+            "{} Exported {} model(s) to {}",
+            "✓".green().bold(),
+            models.len(),
+            csv_path.display()
+        );
+        return Ok(());
+    }
 
     if json_output {
         let rows: Vec<_> = models
@@ -1230,6 +1311,7 @@ fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Resul
     };
     let aliases = db.get_aliases_for_model(&hash)?;
     let cas_path = CasStore::new(&store_path).get(&hash);
+    let tags = get_tags_for_model(&db, &hash)?;
 
     if json_output {
         let aliases_json: Vec<_> = aliases
@@ -1257,6 +1339,20 @@ fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Resul
                 "quarantined_at": model.quarantined_at.map(|d| d.to_rfc3339()),
                 "cas_path": cas_path.map(|p| p.display().to_string()),
                 "aliases": aliases_json,
+                // Governance fields
+                "note": model.note,
+                "pinned": model.pinned,
+                "favorited": model.favorited,
+                "tags": tags,
+                // Provenance fields
+                "source_type": model.source_type,
+                "hf_repo_id": model.hf_repo_id,
+                "revision": model.revision,
+                "download_url": model.download_url,
+                "license": model.license,
+                "downloaded_at": model.downloaded_at.map(|d| d.to_rfc3339()),
+                "original_filename": model.original_filename,
+                "model_card_url": model.model_card_url,
             })
         );
         return Ok(());
@@ -1264,8 +1360,8 @@ fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Resul
 
     println!("{}", t("info.header").cyan().bold());
     println!("{}", "─".repeat(40).cyan());
-    let hash = model.blake3_hash.as_hex().to_string();
-    println!("  {}", tf("info.hash", &[("hash", &hash)]).bold());
+    let hash_str = model.blake3_hash.as_hex().to_string();
+    println!("  {}", tf("info.hash", &[("hash", &hash_str)]).bold());
     let mb = format!("{:.2}", model.size_bytes as f64 / 1_048_576.0);
     println!("  {}", tf("info.size", &[("mb", &mb)]));
     let format = model.format.as_deref().unwrap_or("unknown");
@@ -1278,6 +1374,52 @@ fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Resul
         let p = path.display().to_string();
         println!("  {}", tf("info.cas_path", &[("path", &p)]));
     }
+
+    // ── Governance ──────────────────────────────────────────────────────────
+    println!("\n{}", "Governance".cyan());
+    let pin_icon = if model.pinned { "📌 pinned".green().to_string() } else { "  not pinned".dimmed().to_string() };
+    let fav_icon = if model.favorited { "⭐ favorited".yellow().to_string() } else { "  not favorited".dimmed().to_string() };
+    println!("  {}", pin_icon);
+    println!("  {}", fav_icon);
+    if let Some(ref note) = model.note {
+        println!("  note: {}", note);
+    }
+    if !tags.is_empty() {
+        println!("  tags: {}", tags.join(", "));
+    }
+
+    // ── Provenance ───────────────────────────────────────────────────────────
+    let has_provenance = model.hf_repo_id.is_some()
+        || model.source_type.as_deref().map(|s| s != "local").unwrap_or(false)
+        || model.original_filename.is_some()
+        || model.license.is_some()
+        || model.downloaded_at.is_some();
+
+    if has_provenance {
+        println!("\n{}", "Provenance".cyan());
+        if let Some(ref src) = model.source_type {
+            println!("  source:   {}", src);
+        }
+        if let Some(ref repo) = model.hf_repo_id {
+            println!("  hf_repo:  {}", repo);
+        }
+        if let Some(ref rev) = model.revision {
+            println!("  revision: {}", rev);
+        }
+        if let Some(ref fname) = model.original_filename {
+            println!("  filename: {}", fname);
+        }
+        if let Some(ref lic) = model.license {
+            println!("  license:  {}", lic);
+        }
+        if let Some(ref dl_at) = model.downloaded_at {
+            println!("  downloaded: {}", dl_at.to_rfc3339());
+        }
+        if let Some(ref url) = model.model_card_url {
+            println!("  model card: {}", url.dimmed());
+        }
+    }
+
     println!("\n{}", t("info.aliases").cyan());
     if aliases.is_empty() {
         println!("{}", t("info.aliases_none"));
@@ -1323,7 +1465,7 @@ fn hash_command(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, strategy_str: Option<String>, min_size: Option<String>, protect: Vec<PathBuf>) -> Result<()> {
+fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, strategy_str: Option<String>, min_size: Option<String>, include_globs: Vec<String>, exclude_globs: Vec<String>, protect: Vec<PathBuf>, pin: Vec<PathBuf>, yes: bool, json: bool) -> Result<()> {
     let db_path = store_path.join("modeld.db");
 
     if !db_path.exists() {
@@ -1343,19 +1485,27 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, s
         DedupMode::DryRun
     };
 
-    let mode_label = match mode {
-        DedupMode::DryRun => t("dedup.mode.dry_run"),
-        DedupMode::Report => t("dedup.mode.report"),
-        DedupMode::Auto => t("dedup.mode.auto"),
-        DedupMode::Interactive => t("dedup.mode.interactive"),
+    let mode_str = match mode {
+        DedupMode::DryRun => "dry_run",
+        DedupMode::Report => "report",
+        DedupMode::Auto => "apply",
+        DedupMode::Interactive => "interactive",
     };
 
-    println!("{}", t("dedup.header").cyan().bold());
-    println!("{}", "─".repeat(40).cyan());
-    let sp = store_path.display().to_string();
-    println!("  {}", tf("dedup.store", &[("path", &sp)]));
-    println!("  {}", tf("dedup.mode", &[("mode", &mode_label)]).yellow());
-    println!("{}", "─".repeat(40).cyan());
+    if !json {
+        let mode_label = match mode {
+            DedupMode::DryRun => t("dedup.mode.dry_run"),
+            DedupMode::Report => t("dedup.mode.report"),
+            DedupMode::Auto => t("dedup.mode.auto"),
+            DedupMode::Interactive => t("dedup.mode.interactive"),
+        };
+        println!("{}", t("dedup.header").cyan().bold());
+        println!("{}", "─".repeat(40).cyan());
+        let sp = store_path.display().to_string();
+        println!("  {}", tf("dedup.store", &[("path", &sp)]));
+        println!("  {}", tf("dedup.mode", &[("mode", &mode_label)]).yellow());
+        println!("{}", "─".repeat(40).cyan());
+    }
 
     let db = Database::open(&db_path)?;
     let mut engine = DedupEngine::new(db, store_path.clone());
@@ -1377,71 +1527,134 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, s
         engine = engine.with_protected_paths(protect);
     }
 
+    // Apply include/exclude glob filters
+    if !include_globs.is_empty() {
+        engine = engine.with_include_globs(include_globs);
+    }
+    if !exclude_globs.is_empty() {
+        engine = engine.with_exclude_globs(exclude_globs);
+    }
+
+    // Apply ephemeral pin paths (highest-priority canonicals for this run)
+    if !pin.is_empty() {
+        engine = engine.with_pin_paths(pin);
+    }
+
     // First, find and report duplicates
     let groups = engine.find_duplicates()?;
 
     if groups.is_empty() {
-        println!("\n{}", t("dedup.no_dupes").green());
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "mode": mode_str,
+                    "groups": [],
+                    "total_groups": 0,
+                    "potential_savings_bytes": 0,
+                })
+            );
+        } else {
+            println!("\n{}", t("dedup.no_dupes").green());
+        }
         return Ok(());
     }
 
     let total_savings = engine.calculate_savings(&groups);
 
-    println!(
-        "\n{} {}",
-        "→".cyan(),
-        tf("dedup.groups_found", &[("count", &groups.len())]).bold()
-    );
-    let gb = format!("{:.2}", total_savings as f64 / 1_073_741_824.0);
-    println!("{} {}", "→".cyan(), tf("dedup.potential_savings", &[("gb", &gb)]));
-
-    // Show each group
-    println!("\n{}", t("dedup.groups_header").cyan().bold());
-    for (i, group) in groups.iter().enumerate() {
-        let mb = format!("{:.2}", group.total_size as f64 / 1_048_576.0);
-        println!(
-            "\n  {}",
-            tf(
-                "dedup.group_header",
-                &[("i", &(i + 1)), ("mb", &mb), ("count", &group.files.len())]
-            )
-            .bold()
-        );
-        for file in &group.files {
-            let p = file.path.display().to_string();
-            println!("    {}", tf("dedup.file_line", &[("path", &p)]).dimmed());
-        }
-        let saved = (group.total_size * (group.files.len() as u64 - 1)) as f64 / 1_048_576.0;
-        let saved = format!("{:.2}", saved);
-        println!("    {} {}", "→".green(), tf("dedup.would_save", &[("mb", &saved)]));
-    }
-
     if mode == DedupMode::DryRun || mode == DedupMode::Report {
-        println!("\n{}", "─".repeat(40).cyan());
-        let gb = format!("{:.2}", total_savings as f64 / 1_073_741_824.0);
-        println!("  {} {}", "✓".green(), tf("dedup.total_potential", &[("gb", &gb)]));
-        println!("{}", t("dedup.run_without_dry_run"));
+        if json {
+            // JSON mode: output a single JSON object with the preview data
+            let groups_json: Vec<serde_json::Value> = groups
+                .iter()
+                .map(|g| {
+                    serde_json::json!({
+                        "hash": g.hash.as_hex(),
+                        "size_bytes": g.total_size,
+                        "file_count": g.files.len(),
+                        "potential_savings_bytes": g.total_size.saturating_mul(
+                            (g.files.len().saturating_sub(1)) as u64
+                        ),
+                        "files": g.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "mode": mode_str,
+                    "groups": groups_json,
+                    "total_groups": groups.len(),
+                    "potential_savings_bytes": total_savings,
+                })
+            );
+        } else {
+            println!(
+                "\n{} {}",
+                "→".cyan(),
+                tf("dedup.groups_found", &[("count", &groups.len())]).bold()
+            );
+            let gb = format!("{:.2}", total_savings as f64 / 1_073_741_824.0);
+            println!("{} {}", "→".cyan(), tf("dedup.potential_savings", &[("gb", &gb)]));
+
+            println!("\n{}", t("dedup.groups_header").cyan().bold());
+            for (i, group) in groups.iter().enumerate() {
+                let mb = format!("{:.2}", group.total_size as f64 / 1_048_576.0);
+                println!(
+                    "\n  {}",
+                    tf(
+                        "dedup.group_header",
+                        &[("i", &(i + 1)), ("mb", &mb), ("count", &group.files.len())]
+                    )
+                    .bold()
+                );
+                for file in &group.files {
+                    let p = file.path.display().to_string();
+                    println!("    {}", tf("dedup.file_line", &[("path", &p)]).dimmed());
+                }
+                let saved =
+                    (group.total_size * (group.files.len() as u64 - 1)) as f64 / 1_048_576.0;
+                let saved = format!("{:.2}", saved);
+                println!("    {} {}", "→".green(), tf("dedup.would_save", &[("mb", &saved)]));
+            }
+
+            println!("\n{}", "─".repeat(40).cyan());
+            let gb = format!("{:.2}", total_savings as f64 / 1_073_741_824.0);
+            println!("  {} {}", "✓".green(), tf("dedup.total_potential", &[("gb", &gb)]));
+            println!("{}", t("dedup.run_without_dry_run"));
+        }
         return Ok(());
     }
 
     // Executing for real: require explicit y/N confirmation to prevent
     // accidental data-modifying runs (audit item 1.6).
-    println!(
-        "\n{}",
-        "⚠  This will replace duplicate files with hard/symlinks on disk.".yellow().bold()
-    );
-    println!("{}", "   The operation is not easily reversible.".yellow());
-    print!("{}", "   Proceed? [y/N]: ".bold());
-    std::io::Write::flush(&mut std::io::stdout())?;
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    if !answer.trim().eq_ignore_ascii_case("y") {
-        println!("{}", t("dedup.aborted").yellow());
-        return Ok(());
+    // Skip prompt when --yes is passed or when --auto --yes is used.
+    // In JSON mode without --yes: require --yes to prevent silent destructive ops.
+    if !yes {
+        if json {
+            anyhow::bail!(
+                "dedup --json --apply requires --yes to confirm destructive operation"
+            );
+        }
+        println!(
+            "\n{}",
+            "⚠  This will replace duplicate files with hard/symlinks on disk.".yellow().bold()
+        );
+        println!("{}", "   The operation is not easily reversible.".yellow());
+        print!("{}", "   Proceed? [y/N]: ".bold());
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("{}", t("dedup.aborted").yellow());
+            return Ok(());
+        }
     }
 
     // Execute deduplication with progress
-    println!("\n{}", t("dedup.executing").cyan().bold());
+    if !json {
+        println!("\n{}", t("dedup.executing").cyan().bold());
+    }
 
     let pb = ProgressBar::new(groups.len() as u64);
     pb.set_style(
@@ -1450,6 +1663,10 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, s
             .unwrap()
             .progress_chars("#>-"),
     );
+    // In JSON mode, redirect the progress bar to stderr so stdout stays clean
+    if json {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::stderr());
+    }
 
     let stats = engine.run_dedup(mode, |current, total, hash_prefix| {
         pb.set_message(tf(
@@ -1459,26 +1676,59 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, s
         pb.set_position((current as u64).saturating_sub(1));
     })?;
 
-    pb.finish_with_message(t("progress.done"));
+    pb.finish_and_clear();
 
-    // Final report
-    println!("\n{}", "─".repeat(40).cyan());
-    println!("{}", t("dedup.complete").green().bold());
-    println!("  {}", tf("dedup.groups_processed", &[("count", &stats.groups_processed)]).bold());
-    println!(
-        "  {}",
-        tf("dedup.groups_succeeded", &[("count", &stats.groups_succeeded)]).green().bold()
-    );
-    if stats.groups_failed > 0 {
-        println!("  {}", tf("dedup.groups_failed", &[("count", &stats.groups_failed)]).red().bold());
+    if json {
+        // JSON mode: output a single JSON object with the apply stats
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode": mode_str,
+                "groups_processed": stats.groups_processed,
+                "groups_succeeded": stats.groups_succeeded,
+                "groups_failed": stats.groups_failed,
+                "files_deduplicated": stats.files_deduplicated,
+                "space_saved_bytes": stats.space_saved,
+                "locked_files_skipped": stats.locked_files_skipped,
+                "locked_files": stats.locked_files.iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>(),
+            })
+        );
+    } else {
+        // Human-readable final report
+        println!("\n{}", "─".repeat(40).cyan());
+        println!("{}", t("dedup.complete").green().bold());
+        println!("  {}", tf("dedup.groups_processed", &[("count", &stats.groups_processed)]).bold());
+        println!(
+            "  {}",
+            tf("dedup.groups_succeeded", &[("count", &stats.groups_succeeded)]).green().bold()
+        );
+        if stats.groups_failed > 0 {
+            println!("  {}", tf("dedup.groups_failed", &[("count", &stats.groups_failed)]).red().bold());
+        }
+        println!("  {}", tf("dedup.files_dedup", &[("count", &stats.files_deduplicated)]).bold());
+        let gb = format!("{:.2}", stats.space_saved as f64 / 1_073_741_824.0);
+        println!(
+            "  {}",
+            tf("dedup.space_saved", &[("gb", &gb)]).green().bold()
+        );
+        if stats.locked_files_skipped > 0 {
+            println!(
+                "  {}",
+                format!(
+                    "⚠  {} file(s) were locked by another process and skipped:",
+                    stats.locked_files_skipped
+                )
+                .yellow()
+                .bold()
+            );
+            for locked in &stats.locked_files {
+                println!("    {}", locked.display().to_string().yellow());
+            }
+        }
+        println!("{}", "─".repeat(40).cyan());
     }
-    println!("  {}", tf("dedup.files_dedup", &[("count", &stats.files_deduplicated)]).bold());
-    let gb = format!("{:.2}", stats.space_saved as f64 / 1_073_741_824.0);
-    println!(
-        "  {}",
-        tf("dedup.space_saved", &[("gb", &gb)]).green().bold()
-    );
-    println!("{}", "─".repeat(40).cyan());
 
     Ok(())
 }
@@ -1533,7 +1783,18 @@ fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Result<(
             }
         }
 
-        QuarantineAction::Cleanup => {
+        QuarantineAction::Cleanup { yes } => {
+            if !yes {
+                print!("This will permanently delete all expired quarantine entries (>30 days). Proceed? [y/N]: ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut ans = String::new();
+                std::io::stdin().read_line(&mut ans)?;
+                if !ans.trim().eq_ignore_ascii_case("y") {
+                    println!("{}", "Aborted.".yellow());
+                    return Ok(());
+                }
+            }
+
             println!("{}", t("quarantine.cleanup.start").cyan());
 
             let cleaned = qm.cleanup_expired()?;
@@ -1787,6 +2048,16 @@ fn format_bytes(bytes: u64) -> String {
         unit_idx += 1;
     }
     format!("{:.2} {}", size, UNITS[unit_idx])
+}
+
+/// Escape a string for CSV output.  Fields containing commas, quotes, or
+/// newlines are wrapped in double-quotes with internal quotes doubled.
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2158,7 +2429,9 @@ fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
     let db_path = require_store_db(&store_path)?;
     let db = Database::open(&db_path)?;
 
-    println!("{}", t("verify.running").cyan().bold());
+    if !json_output {
+        println!("{}", t("verify.running").cyan().bold());
+    }
     let report = run_fsck(&db, &store_path)?;
 
     if json_output {
@@ -3120,7 +3393,110 @@ fn refs_command(action: RefsAction) -> Result<()> {
                 }
             }
         }
+        RefsAction::Graph { store, json } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let db = Database::open(&db_path)?;
+            refs_graph_command(&db, json)?;
+        }
     }
+    Ok(())
+}
+
+/// Display a reference graph for all models in the store.
+///
+/// Each model is shown with its RefStatus and alias / workflow-ref counts.
+fn refs_graph_command(db: &Database, json_output: bool) -> Result<()> {
+    let rows = db.get_gc_candidate_counts()?;
+
+    if json_output {
+        let entries: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(model, alias_count, wf_count)| {
+                let status = classify_refs(db, &model.blake3_hash);
+                let status_str = match status {
+                    RefStatus::HardReference => "hard-reference",
+                    RefStatus::SoftReference => "soft-reference",
+                    RefStatus::Pinned => "pinned",
+                    RefStatus::RecentlyUsed => "recently-used",
+                    RefStatus::Unknown => "unknown",
+                    RefStatus::OrphanCandidate => "orphan-candidate",
+                };
+                serde_json::json!({
+                    "hash": model.blake3_hash.as_hex(),
+                    "hash_prefix": &model.blake3_hash.as_hex()[..16],
+                    "size_bytes": model.size_bytes,
+                    "format": model.format,
+                    "ref_status": status_str,
+                    "alias_count": alias_count,
+                    "workflow_ref_count": wf_count,
+                    "pinned": model.pinned,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("{}", "No models in store.".yellow());
+        return Ok(());
+    }
+
+    println!("{}", "Reference Graph".cyan().bold());
+    println!("{}", "─".repeat(70).cyan());
+    println!(
+        "  {:<18}  {:<7}  {:<8}  {:<8}  {}",
+        "Hash".dimmed(),
+        "Size".dimmed(),
+        "Aliases".dimmed(),
+        "WfRefs".dimmed(),
+        "Status".dimmed(),
+    );
+    println!("{}", "─".repeat(70).dimmed());
+
+    // Sort by status severity: orphans first, then soft, then hard/pinned
+    let mut sorted = rows;
+    sorted.sort_by_key(|(model, _, _)| {
+        let s = classify_refs(db, &model.blake3_hash);
+        match s {
+            RefStatus::OrphanCandidate => 0,
+            RefStatus::SoftReference => 1,
+            RefStatus::Unknown => 2,
+            RefStatus::RecentlyUsed => 3,
+            RefStatus::HardReference => 4,
+            RefStatus::Pinned => 5,
+        }
+    });
+
+    for (model, alias_count, wf_count) in &sorted {
+        let status = classify_refs(db, &model.blake3_hash);
+        let (status_str, colored_status) = match status {
+            RefStatus::HardReference  => ("hard-ref ",  "hard-ref ".green().to_string()),
+            RefStatus::SoftReference  => ("soft-ref ",  "soft-ref ".yellow().to_string()),
+            RefStatus::Pinned         => ("pinned   ",  "pinned   ".cyan().to_string()),
+            RefStatus::RecentlyUsed   => ("recent   ",  "recent   ".blue().to_string()),
+            RefStatus::Unknown        => ("unknown  ",  "unknown  ".dimmed().to_string()),
+            RefStatus::OrphanCandidate=> ("orphan   ",  "orphan   ".red().to_string()),
+        };
+        let _ = status_str;
+        let size_str = format_bytes(model.size_bytes as u64);
+        let hash_prefix = &model.blake3_hash.as_hex()[..16];
+        println!(
+            "  {}...  {:>7}  {:>8}  {:>8}  {}",
+            hash_prefix,
+            size_str,
+            alias_count,
+            wf_count,
+            colored_status,
+        );
+    }
+
+    println!("{}", "─".repeat(70).dimmed());
+    println!(
+        "  Total: {} model(s)",
+        sorted.len()
+    );
     Ok(())
 }
 
@@ -3171,20 +3547,18 @@ fn tx_command(action: TxAction) -> Result<()> {
             let record = records.iter().find(|r| r.tx_id == tx_id || r.tx_id.starts_with(&tx_id));
             if let Some(r) = record {
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "tx_id": r.tx_id,
-                            "op_type": r.op_type.as_ref().map(|o| o.as_str()),
-                            "status": format!("{:?}", r.status),
-                            "start_time": r.start_time.to_rfc3339(),
-                            "end_time": r.end_time.map(|t| t.to_rfc3339()),
-                            "error": r.error_message,
-                            "affected_paths": r.affected_paths.iter()
-                                .map(|p| p.source.display().to_string())
-                                .collect::<Vec<_>>(),
-                        })
-                    );
+                    let obj = serde_json::json!({
+                        "tx_id": r.tx_id,
+                        "op_type": r.op_type.as_ref().map(|o| o.as_str()),
+                        "status": format!("{:?}", r.status),
+                        "start_time": r.start_time.to_rfc3339(),
+                        "end_time": r.end_time.map(|t| t.to_rfc3339()),
+                        "error": r.error_message,
+                        "affected_paths": r.affected_paths.iter()
+                            .map(|p| p.source.display().to_string())
+                            .collect::<Vec<_>>(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&obj)?);
                 } else {
                     println!("tx_id:  {}", r.tx_id);
                     println!("status: {:?}", r.status);
@@ -3258,9 +3632,14 @@ fn db_command(action: DbAction) -> Result<()> {
             let db_size = std::fs::metadata(&db_path)?.len();
             let wal_path = db_path.with_extension("db-wal");
             let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+            let wal_active = wal_path.exists();
             println!("schema version : {}", version);
             println!("db size        : {} KB", db_size / 1024);
-            println!("wal size       : {} KB", wal_size / 1024);
+            println!(
+                "wal status     : {} ({} KB)",
+                if wal_active { "active" } else { "inactive" },
+                wal_size / 1024
+            );
             let integrity_result = db.integrity_check().unwrap_or_else(|_| "ERROR".to_string());
             let integrity_ok = integrity_result.eq_ignore_ascii_case("ok");
             println!("integrity      : {}", if integrity_ok { "OK" } else { &integrity_result });
@@ -3270,17 +3649,18 @@ fn db_command(action: DbAction) -> Result<()> {
             let db_path = require_store_db(&store_path)?;
             let backups_dir = store_path.join("backups");
             std::fs::create_dir_all(&backups_dir)?;
-            let ts = {
-                let secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                secs
-            };
-            let backup_path = backups_dir.join(format!("modeld_backup_{}.db", ts));            std::fs::copy(&db_path, &backup_path)?;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let backup_path = backups_dir.join(format!("modeld_backup_{}.db", ts));
+            std::fs::copy(&db_path, &backup_path)?;
             println!("✓ Database backed up to {}", backup_path.display());
         }
         DbAction::Restore { backup, store, yes } => {
+            if !backup.exists() {
+                anyhow::bail!("Backup file not found: {}", backup.display());
+            }
             let store_path = resolve_store(store);
             let db_path = store_path.join("modeld.db");
             if !yes {
@@ -3306,9 +3686,28 @@ fn db_command(action: DbAction) -> Result<()> {
         DbAction::Migrate { store } => {
             let store_path = resolve_store(store);
             let db_path = store_path.join("modeld.db");
+            if !db_path.exists() {
+                anyhow::bail!("Database not found at {}", db_path.display());
+            }
+            // Read the version before migrations run.
+            let version_before = Database::read_schema_version_raw(&db_path)?;
+            // Opening the database triggers any pending migrations automatically.
             let db = Database::open(&db_path)?;
-            let version = db.schema_version()?;
-            println!("✓ Database is at schema version {} (no pending migrations)", version);
+            let version_after = db.schema_version()?;
+            let latest = Database::latest_schema_version();
+            if version_before < version_after {
+                println!(
+                    "✓ Migrated database from schema v{} to v{}",
+                    version_before, version_after
+                );
+            } else if version_after >= latest {
+                println!(
+                    "✓ Database is already at the latest schema version (v{})",
+                    version_after
+                );
+            } else {
+                println!("  Database is at schema version {} (latest: {})", version_after, latest);
+            }
         }
     }
     Ok(())

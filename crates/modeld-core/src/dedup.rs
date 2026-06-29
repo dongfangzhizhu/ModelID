@@ -14,6 +14,7 @@
 use crate::db::{AliasType, Database, Frontend, TransactionStatus};
 use crate::hash::{hash_file, Blake3Hash};
 use crate::links::{create_link, LinkCapability, LinkResult};
+use crate::tx::{PathEntry as TxPathEntry, RollbackPlan, TransactionManager, TxHandle};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -42,6 +43,24 @@ impl Default for DedupStrategy {
     fn default() -> Self {
         DedupStrategy::Hardlink
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Risk level
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Indicates how risky a dedup operation is from a recoverability standpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    /// No filesystem changes; completely reversible at any time.
+    Low,
+    /// Filesystem modified; reversible with effort (e.g. hardlinks – content
+    /// is preserved in CAS, restoring is a file copy).
+    Medium,
+    /// Creates path dependencies (symlinks) that break if the CAS object is
+    /// ever removed.
+    High,
 }
 
 impl std::str::FromStr for DedupStrategy {
@@ -80,6 +99,8 @@ pub struct DedupGroupPlan {
     pub strategy: DedupStrategy,
     /// Whether the operation can be undone (`modeld unlink`).
     pub reversible: bool,
+    /// Risk level of the operation.
+    pub risk_level: RiskLevel,
     /// Bytes that would be freed on disk.
     pub estimated_savings: u64,
 }
@@ -131,6 +152,8 @@ pub struct DedupGroupResult {
     pub canonical: PathBuf,
     pub links_created: Vec<(PathBuf, AliasType)>,
     pub space_saved: u64,
+    /// Files that were skipped because they are locked by another process.
+    pub locked_files: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -140,6 +163,10 @@ pub struct DedupStats {
     pub groups_failed: usize,
     pub space_saved: u64,
     pub files_deduplicated: usize,
+    /// Number of files skipped because they were locked by another process.
+    pub locked_files_skipped: usize,
+    /// Paths of locked files encountered (accumulated across all groups).
+    pub locked_files: Vec<PathBuf>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +185,14 @@ pub struct DedupEngine {
     protected_paths: Vec<PathBuf>,
     /// Minimum file size in bytes for a group to be deduplicated.
     min_size_bytes: u64,
+    /// Only include files whose path matches at least one of these glob patterns.
+    /// If empty, all files are included.
+    include_globs: Vec<String>,
+    /// Exclude files whose path matches any of these glob patterns.
+    exclude_globs: Vec<String>,
+    /// Paths that are treated as the highest-priority canonical candidates for
+    /// this run (ephemeral, not persisted to the DB).
+    pin_paths: Vec<PathBuf>,
 }
 
 impl DedupEngine {
@@ -169,6 +204,9 @@ impl DedupEngine {
             strategy: None,
             protected_paths: Vec::new(),
             min_size_bytes: 0,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            pin_paths: Vec::new(),
         }
     }
 
@@ -184,6 +222,9 @@ impl DedupEngine {
             strategy: None,
             protected_paths: Vec::new(),
             min_size_bytes: 0,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            pin_paths: Vec::new(),
         }
     }
 
@@ -205,6 +246,26 @@ impl DedupEngine {
         self
     }
 
+    /// Only include files whose path matches at least one of these glob patterns.
+    /// When empty (the default), all files are candidates.
+    pub fn with_include_globs(mut self, globs: Vec<String>) -> Self {
+        self.include_globs = globs;
+        self
+    }
+
+    /// Exclude files whose path matches any of these glob patterns.
+    pub fn with_exclude_globs(mut self, globs: Vec<String>) -> Self {
+        self.exclude_globs = globs;
+        self
+    }
+
+    /// Mark these paths as the highest-priority canonical candidates for this
+    /// dedup run.  Does NOT persist the pin to the database.
+    pub fn with_pin_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.pin_paths = paths;
+        self
+    }
+
     /// Find duplicate groups using a single batch DB query (avoids N+1).
     pub fn find_duplicates(&self) -> Result<Vec<DuplicateGroup>> {
         let batch = self.db.find_duplicate_groups()?;
@@ -217,10 +278,18 @@ impl DedupEngine {
             let mut files = Vec::new();
             for alias in &aliases {
                 let p = PathBuf::from(&alias.path);
-                if p.exists() {
-                    if let Ok(info) = FileInfo::from_path(&p) {
-                        files.push(info);
-                    }
+                if !p.exists() {
+                    continue;
+                }
+                // Apply include/exclude glob filters
+                if self.path_is_excluded(&p) {
+                    continue;
+                }
+                if !self.path_is_included(&p) {
+                    continue;
+                }
+                if let Ok(info) = FileInfo::from_path(&p) {
+                    files.push(info);
                 }
             }
             if files.len() >= 2 {
@@ -232,6 +301,25 @@ impl DedupEngine {
             }
         }
         Ok(groups)
+    }
+
+    /// Return `true` if the path matches any exclude glob.
+    fn path_is_excluded(&self, path: &Path) -> bool {
+        if self.exclude_globs.is_empty() {
+            return false;
+        }
+        let path_norm = path.to_string_lossy().replace('\\', "/");
+        self.exclude_globs.iter().any(|pat| crate::scanner::glob_matches(pat, &path_norm))
+    }
+
+    /// Return `true` if the path matches at least one include glob, or if no
+    /// include globs have been specified (include all by default).
+    fn path_is_included(&self, path: &Path) -> bool {
+        if self.include_globs.is_empty() {
+            return true;
+        }
+        let path_norm = path.to_string_lossy().replace('\\', "/");
+        self.include_globs.iter().any(|pat| crate::scanner::glob_matches(pat, &path_norm))
     }
 
     /// Build a deduplication plan without executing any filesystem operations.
@@ -252,6 +340,7 @@ impl DedupEngine {
                 group.total_size * (selection.duplicates.len() as u64);
 
             let reversible = matches!(strategy, DedupStrategy::Hardlink | DedupStrategy::Symlink);
+            let risk_level = compute_risk_level(&strategy);
 
             plan_groups.push(DedupGroupPlan {
                 hash: group.hash.as_hex().to_string(),
@@ -260,6 +349,7 @@ impl DedupEngine {
                 to_replace: selection.duplicates,
                 strategy: strategy.clone(),
                 reversible,
+                risk_level,
                 estimated_savings,
             });
             total_savings += estimated_savings;
@@ -280,6 +370,7 @@ impl DedupEngine {
     /// Select canonical file from a duplicate group.
     ///
     /// Priority (highest first):
+    ///   0. Ephemeral pin (`--pin` CLI flag, `engine.pin_paths`)
     ///   1. Pinned file (`governance::is_pinned`)
     ///   2. File already in CAS
     ///   3. File in a protected directory (`--protect`)
@@ -288,6 +379,25 @@ impl DedupEngine {
     ///   6. Alphabetically first (deterministic tie-break)
     pub fn select_canonical(&self, files: &[FileInfo]) -> CanonicalSelection {
         assert!(!files.is_empty(), "select_canonical requires at least one file");
+
+        // Priority 0: ephemeral pin paths (--pin CLI flag)
+        if !self.pin_paths.is_empty() {
+            for file in files {
+                let is_pinned_path = self.pin_paths.iter().any(|p| file.path == *p);
+                if is_pinned_path {
+                    let duplicates = files
+                        .iter()
+                        .filter(|f| f.path != file.path)
+                        .map(|f| f.path.clone())
+                        .collect();
+                    return CanonicalSelection {
+                        canonical: file.path.clone(),
+                        duplicates,
+                        reason: "Explicitly pinned via --pin flag".to_string(),
+                    };
+                }
+            }
+        }
 
         // Priority 1: pinned file
         for file in files {
@@ -413,6 +523,7 @@ impl DedupEngine {
                 canonical: selection.canonical,
                 links_created: Vec::new(),
                 space_saved: group.total_size * (selection.duplicates.len() as u64),
+                locked_files: Vec::new(),
             });
         }
 
@@ -444,6 +555,41 @@ impl DedupEngine {
             dup_paths_json.as_deref(),
         )?;
 
+        // Populate new-style TransactionManager fields (affected_paths + rollback_plan)
+        // so TransactionManager::list() and rollback work correctly.
+        let rollback_entries: Vec<TxPathEntry> = selection
+            .duplicates
+            .iter()
+            .map(|p| TxPathEntry {
+                source: p.clone(),
+                target: Some(cas_path.clone()),
+                original_hash: Some(group.hash.clone()),
+                new_hash: None,
+                size: group.total_size,
+            })
+            .collect();
+        let affected_entries: Vec<TxPathEntry> = std::iter::once(&selection.canonical)
+            .chain(selection.duplicates.iter())
+            .map(|p| TxPathEntry {
+                source: p.clone(),
+                target: Some(cas_path.clone()),
+                original_hash: Some(group.hash.clone()),
+                new_hash: None,
+                size: group.total_size,
+            })
+            .collect();
+        let affected_json = serde_json::to_string(&affected_entries).unwrap_or_default();
+        let rollback_json = serde_json::to_string(&RollbackPlan { entries: rollback_entries })
+            .unwrap_or_default();
+        self.db.update_wal_extended(
+            &tx_id,
+            Some("dedup"),
+            Some(&affected_json),
+            Some(&rollback_json),
+            None,
+            None,
+        )?;
+
         let already_in_cas = cas_path.exists();
 
         if !already_in_cas {
@@ -459,7 +605,14 @@ impl DedupEngine {
                 .with_context(|| "Failed to hash staged file during verification")?;
             if staged_hash.as_hex() != group.hash.as_hex() {
                 let _ = std::fs::remove_file(&staging_path);
-                self.db.update_wal_status(&tx_id, TransactionStatus::Failed)?;
+                // Fail via TransactionManager for proper lifecycle recording
+                {
+                    let mut tm = TransactionManager::new(&mut self.db, &self.store_path);
+                    let _ = tm.fail(
+                        TxHandle { tx_id: tx_id.clone() },
+                        "Hash mismatch during staging",
+                    );
+                }
                 return Err(anyhow!(
                     "Hash mismatch during staging: expected {}, got {}",
                     group.hash.as_hex(),
@@ -499,6 +652,7 @@ impl DedupEngine {
 
         let mut links_created = Vec::new();
         let mut space_saved = 0u64;
+        let mut locked_files: Vec<PathBuf> = Vec::new();
 
         // Ensure canonical alias is recorded
         let canonical_str = selection.canonical.to_string_lossy().to_string();
@@ -513,6 +667,18 @@ impl DedupEngine {
 
         // ── Link each duplicate to CAS ────────────────────────────────────────
         for dup_path in &selection.duplicates {
+            // Windows file lock check: if the file is locked by another process,
+            // skip it and add to the locked-files report.  Do NOT fail the whole
+            // transaction — property 17 (Windows 文件锁跳过).
+            if crate::platform::check_file_locked(dup_path) {
+                eprintln!(
+                    "dedup: {} is locked by another process — skipping (locked-files report)",
+                    dup_path.display()
+                );
+                locked_files.push(dup_path.clone());
+                continue;
+            }
+
             // Windows cross-volume check: if strategy is Hardlink but volumes
             // differ, automatically degrade to CopyToCas and warn the user.
             let effective_strategy = self.resolve_strategy_for_path(dup_path, &cas_path);
@@ -558,33 +724,55 @@ impl DedupEngine {
         // ── Also replace canonical with CAS hardlink (eliminate second copy) ─
         // Skip when canonical IS the CAS object (already optimal).
         if selection.canonical != cas_path {
-            let canonical_link = create_link(&selection.canonical, &cas_path, &self.link_capability);
-            match &canonical_link {
-                LinkResult::Success(atype)
-                    if !matches!(atype, AliasType::ReferenceOnly) =>
-                {
-                    let _ = self.db.delete_alias(&canonical_str);
-                    self.db.insert_alias(
-                        &group.hash,
-                        &canonical_str,
-                        Frontend::User,
-                        atype.clone(),
-                    )?;
-                    links_created.push((selection.canonical.clone(), atype.clone()));
-                    space_saved += group.total_size;
+            // Check if canonical is locked (Windows)
+            if crate::platform::check_file_locked(&selection.canonical) {
+                eprintln!(
+                    "dedup: canonical {} is locked by another process — keeping as independent copy",
+                    selection.canonical.display()
+                );
+                locked_files.push(selection.canonical.clone());
+            } else {
+                let canonical_link =
+                    create_link(&selection.canonical, &cas_path, &self.link_capability);
+                match &canonical_link {
+                    LinkResult::Success(atype)
+                        if !matches!(atype, AliasType::ReferenceOnly) =>
+                    {
+                        let _ = self.db.delete_alias(&canonical_str);
+                        self.db.insert_alias(
+                            &group.hash,
+                            &canonical_str,
+                            Frontend::User,
+                            atype.clone(),
+                        )?;
+                        links_created.push((selection.canonical.clone(), atype.clone()));
+                        space_saved += group.total_size;
+                    }
+                    _ => { /* keep Original alias; canonical stays as a real file */ }
                 }
-                _ => { /* keep Original alias; canonical stays as a real file */ }
             }
         }
 
-        self.db.update_wal_status(&tx_id, TransactionStatus::Committed)?;
-        self.db.delete_wal_transaction(&tx_id)?;
+        // Commit via TransactionManager for proper lifecycle recording
+        {
+            let mut tm = TransactionManager::new(&mut self.db, &self.store_path);
+            tm.commit(TxHandle { tx_id: tx_id.clone() })?;
+        }
+
+        if !locked_files.is_empty() {
+            eprintln!(
+                "dedup: {} file(s) were locked and skipped in group {}",
+                locked_files.len(),
+                &group.hash.as_hex()[..8]
+            );
+        }
 
         Ok(DedupGroupResult {
             hash: group.hash.clone(),
             canonical: selection.canonical,
             links_created,
             space_saved,
+            locked_files,
         })
     }
 
@@ -632,6 +820,8 @@ impl DedupEngine {
                     stats.groups_succeeded += 1;
                     stats.space_saved += result.space_saved;
                     stats.files_deduplicated += result.links_created.len();
+                    stats.locked_files_skipped += result.locked_files.len();
+                    stats.locked_files.extend(result.locked_files);
                 }
                 Err(e) => {
                     stats.groups_failed += 1;
@@ -799,6 +989,29 @@ impl DedupEngine {
             .join("blake3")
             .join(hash.prefix())
             .join(hash.as_hex())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Free functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Compute the risk level of a dedup operation given the chosen strategy.
+///
+/// | Strategy     | Risk   | Rationale                                           |
+/// |-------------|--------|------------------------------------------------------|
+/// | VirtualAlias | Low    | No filesystem changes at all.                       |
+/// | CopyToCas    | Low    | Content safely in CAS; user files untouched.        |
+/// | Hardlink     | Medium | Content preserved but inode shared; reversible via  |
+/// |              |        | file copy.                                           |
+/// | Symlink      | High   | Creates a path dependency on the CAS object; if the |
+/// |              |        | object is removed all symlinks break.                |
+pub fn compute_risk_level(strategy: &DedupStrategy) -> RiskLevel {
+    match strategy {
+        DedupStrategy::VirtualAlias => RiskLevel::Low,
+        DedupStrategy::CopyToCas => RiskLevel::Low,
+        DedupStrategy::Hardlink => RiskLevel::Medium,
+        DedupStrategy::Symlink => RiskLevel::High,
     }
 }
 

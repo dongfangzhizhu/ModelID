@@ -7,8 +7,10 @@
 //! - 5.6: Incremental scan — pass a pre-indexed cache from the DB so unchanged
 //!   files (same path + same size) are returned immediately without re-hashing.
 //! - 14.3: ScanOptions (incremental/full flags, exclude globs, follow_symlinks),
-//!   symlink cycle detection via visited HashSet, glob-pattern exclusions.
+//!   symlink cycle detection via visited HashSet, glob-pattern exclusions,
+//!   full mtime + inode incremental check, WsBroadcaster progress events.
 
+use crate::db::FileIndexEntry;
 use crate::hash::{hash_file, Blake3Hash};
 use anyhow::Result;
 use rayon::prelude::*;
@@ -61,6 +63,13 @@ pub struct ScannedFile {
     pub hash: Blake3Hash,
     /// True when the hash was taken from the incremental cache (no disk read).
     pub from_cache: bool,
+    /// Last-modified time as Unix timestamp (seconds since epoch).
+    /// `0` if the platform could not provide reliable mtime.
+    pub mtime: i64,
+    /// Inode number (Unix) or file index (Windows).  `0` if unavailable.
+    pub inode: i64,
+    /// Device ID (Unix) or volume serial number (Windows).  `0` if unavailable.
+    pub device_id: i64,
 }
 
 /// Scanner configuration
@@ -68,8 +77,8 @@ pub struct Scanner {
     extensions: Vec<String>,
     /// Absolute paths excluded from scanning (e.g. the modeld store directory).
     excluded_dirs: Vec<PathBuf>,
-    /// path → (hash, size_bytes) pre-indexed from the DB for incremental scan.
-    preindexed: HashMap<String, (Blake3Hash, i64)>,
+    /// path → FileIndexEntry pre-indexed from the DB for incremental scan.
+    preindexed: HashMap<String, FileIndexEntry>,
     /// Scan-time options (incremental flags, globs, symlink following).
     scan_options: ScanOptions,
 }
@@ -97,11 +106,10 @@ impl Scanner {
 
     /// Supply a pre-indexed cache for incremental scanning.
     ///
-    /// Build `cache` from `db.get_all_indexed_paths()`.  Files whose path is
-    /// present in the cache **and** whose current on-disk size matches the
-    /// cached size are returned without re-hashing — saving all the I/O for
-    /// large unchanged model files.
-    pub fn with_preindexed(mut self, cache: HashMap<String, (Blake3Hash, i64)>) -> Self {
+    /// Build `cache` from `db.get_all_indexed_paths()`.  Files whose path,
+    /// size, mtime, and inode/file-id all match the cached entry are returned
+    /// without re-hashing, saving all I/O for large unchanged model files.
+    pub fn with_preindexed(mut self, cache: HashMap<String, FileIndexEntry>) -> Self {
         self.preindexed = cache;
         self
     }
@@ -114,17 +122,19 @@ impl Scanner {
 
     /// Scan a directory recursively.
     ///
-    /// Phase 1 (serial): WalkDir collects all matching paths + sizes.
+    /// Phase 1 (serial): WalkDir collects all matching paths + sizes + mtime +
+    ///   inode/device_id for incremental skip decisions.
     ///   - Symlink cycle detection is active when `follow_symlinks = true`.
     ///   - Glob exclusions from `ScanOptions::exclude_globs` are applied here.
     ///
     /// Phase 2 (parallel): Rayon hashes each file concurrently.  Files found in
-    /// the incremental cache with a matching size are returned without hashing
-    /// (unless `ScanOptions::full = true`).
+    /// the incremental cache with matching size **and** mtime **and** inode are
+    /// returned without hashing (unless `ScanOptions::full = true`).
     ///
-    /// The `progress_callback` is called from the Rayon thread pool; it must be
-    /// `Fn + Sync` (a simple `ProgressBar::inc` call works fine — indicatif's
-    /// `ProgressBar` is `Clone + Send + Sync`).
+    /// The `progress_callback` receives `(path, size)` per file and is called
+    /// from the Rayon thread pool — it must be `Fn + Sync`.  The caller can
+    /// also forward these calls to a `WsBroadcaster` for real-time WebSocket
+    /// progress events.
     ///
     /// Individual file errors are logged to stderr and skipped; the outer
     /// `Result` only propagates fatal directory-level failures.
@@ -140,7 +150,8 @@ impl Scanner {
         // Uses (dev, inode) on Unix; (0, canonical_path_hash) on Windows.
         let visited: RefCell<HashSet<(u64, u64)>> = RefCell::new(HashSet::new());
 
-        let mut to_process: Vec<(PathBuf, u64)> = Vec::new();
+        // (path, size, mtime_secs, inode, device_id)
+        let mut to_process: Vec<(PathBuf, u64, i64, i64, i64)> = Vec::new();
 
         for entry in WalkDir::new(root)
             .follow_links(opts.follow_symlinks)
@@ -193,15 +204,28 @@ impl Scanner {
                 continue;
             }
 
-            let size = match entry.metadata() {
-                Ok(m) => m.len(),
+            let meta = match entry.metadata() {
+                Ok(m) => m,
                 Err(e) => {
                     eprintln!("scan: skipping {} (metadata: {e})", path.display());
                     continue;
                 }
             };
 
-            to_process.push((path, size));
+            let size = meta.len();
+
+            // Extract mtime as Unix timestamp (seconds since epoch).
+            let mtime: i64 = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            // Extract (inode, device_id) for the file.
+            let (inode, device_id) = get_file_id(&path, &meta);
+
+            to_process.push((path, size, mtime, inode, device_id));
         }
 
         // ── Phase 2: hash in parallel (Rayon work-stealing pool) ────────────
@@ -210,22 +234,33 @@ impl Scanner {
 
         let results: Vec<ScannedFile> = to_process
             .par_iter()
-            .filter_map(|(path, size)| {
+            .filter_map(|(path, size, mtime, inode, device_id)| {
                 let path_str = path.to_string_lossy();
 
-                // Incremental: use cached hash when size hasn't changed,
-                // unless --full was requested.
+                // Incremental: use cached hash when size, mtime, and inode
+                // all match, unless --full was requested.
                 if use_incremental {
-                    if let Some((cached_hash, cached_size)) =
-                        self.preindexed.get(path_str.as_ref())
-                    {
-                        if *cached_size == *size as i64 {
+                    if let Some(entry) = self.preindexed.get(path_str.as_ref()) {
+                        let size_match = entry.size == *size as i64;
+                        // mtime check: skip if both are non-zero and match
+                        let mtime_match = *mtime == 0
+                            || entry.mtime == 0
+                            || entry.mtime == *mtime;
+                        // inode check: skip if both are non-zero and match
+                        let inode_match = *inode == 0
+                            || entry.inode == 0
+                            || (entry.inode == *inode && entry.device_id == *device_id);
+
+                        if size_match && mtime_match && inode_match {
                             progress_callback(path, *size);
                             return Some(ScannedFile {
                                 path: path.clone(),
                                 size: *size,
-                                hash: cached_hash.clone(),
+                                hash: entry.hash.clone(),
                                 from_cache: true,
+                                mtime: *mtime,
+                                inode: *inode,
+                                device_id: *device_id,
                             });
                         }
                     }
@@ -239,6 +274,9 @@ impl Scanner {
                         size: *size,
                         hash,
                         from_cache: false,
+                        mtime: *mtime,
+                        inode: *inode,
+                        device_id: *device_id,
                     }),
                     Err(e) => {
                         eprintln!("scan: skipping {} (hash error: {e})", path.display());
@@ -354,6 +392,19 @@ fn get_dir_id(path: &Path, meta: &std::fs::Metadata) -> Option<(u64, u64)> {
     get_dir_id_impl(path, meta)
 }
 
+/// Return `(inode, device_id)` for a regular file.
+///
+/// Used to detect whether a file is identical to a previously-indexed entry
+/// (same file, not just same name/size/mtime).
+///
+/// - Unix: returns `(ino, dev)` from `MetadataExt`.
+/// - Windows: returns `(0, 0)` — a future improvement could use
+///   `GetFileInformationByHandle`.
+/// - Other: returns `(0, 0)`.
+fn get_file_id(_path: &Path, meta: &std::fs::Metadata) -> (i64, i64) {
+    get_file_id_impl(_path, meta)
+}
+
 #[cfg(unix)]
 fn get_dir_id_impl(
     _path: &Path,
@@ -382,6 +433,27 @@ fn get_dir_id_impl(_path: &Path, _meta: &std::fs::Metadata) -> Option<(u64, u64)
     None
 }
 
+// ── get_file_id implementations ──────────────────────────────────────────────
+
+#[cfg(unix)]
+fn get_file_id_impl(_path: &Path, meta: &std::fs::Metadata) -> (i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.ino() as i64, meta.dev() as i64)
+}
+
+#[cfg(windows)]
+fn get_file_id_impl(_path: &Path, _meta: &std::fs::Metadata) -> (i64, i64) {
+    // True file-index detection on Windows requires opening the file with
+    // CreateFile + GetFileInformationByHandle, which is non-trivial.  We
+    // return (0, 0) so the incremental check falls back to size+mtime only.
+    (0, 0)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn get_file_id_impl(_path: &Path, _meta: &std::fs::Metadata) -> (i64, i64) {
+    (0, 0)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Glob matching
 // ─────────────────────────────────────────────────────────────────────────────
@@ -394,7 +466,7 @@ fn get_dir_id_impl(_path: &Path, _meta: &std::fs::Metadata) -> Option<(u64, u64)
 /// - Literal prefix/suffix without wildcards.
 ///
 /// Both the pattern and the path should use `/` as the separator.
-fn glob_matches(pattern: &str, path: &str) -> bool {
+pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
     // Fast path: no wildcard — check if path contains the literal pattern
     if !pattern.contains('*') {
         return path.contains(pattern);
@@ -461,6 +533,7 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::FileIndexEntry;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -565,13 +638,59 @@ mod tests {
         )
         .unwrap();
         let mut cache = HashMap::new();
-        let size = fs::metadata(&f).unwrap().len();
-        cache.insert(f.to_string_lossy().to_string(), (fake_hash.clone(), size as i64));
+        let meta = fs::metadata(&f).unwrap();
+        let size = meta.len();
+        let mtime: i64 = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        cache.insert(
+            f.to_string_lossy().to_string(),
+            FileIndexEntry {
+                hash: fake_hash.clone(),
+                size: size as i64,
+                mtime,
+                inode: 0,
+                device_id: 0,
+            },
+        );
 
         let results = Scanner::new().with_preindexed(cache).scan(tmp.path(), |_, _| {}).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].from_cache);
         assert_eq!(results[0].hash.as_hex(), fake_hash.as_hex());
+    }
+
+    #[test]
+    fn test_incremental_mtime_change_forces_rehash() {
+        let tmp = TempDir::new().unwrap();
+        let f = create_test_file(tmp.path(), "model.safetensors", b"hello world");
+
+        let fake_hash = Blake3Hash::from_hex(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut cache = HashMap::new();
+        let size = fs::metadata(&f).unwrap().len();
+        // Pretend the cached mtime is much older (different from actual)
+        cache.insert(
+            f.to_string_lossy().to_string(),
+            FileIndexEntry {
+                hash: fake_hash.clone(),
+                size: size as i64,
+                mtime: 1000, // old mtime — will not match current mtime
+                inode: 0,
+                device_id: 0,
+            },
+        );
+
+        let results = Scanner::new().with_preindexed(cache).scan(tmp.path(), |_, _| {}).unwrap();
+        assert_eq!(results.len(), 1);
+        // mtime mismatch → should re-hash (not from cache)
+        assert!(!results[0].from_cache);
+        assert_ne!(results[0].hash.as_hex(), fake_hash.as_hex());
     }
 
     #[test]
@@ -584,10 +703,26 @@ mod tests {
         )
         .unwrap();
         let mut cache = HashMap::new();
-        let size = fs::metadata(&f).unwrap().len();
-        cache.insert(f.to_string_lossy().to_string(), (fake_hash.clone(), size as i64));
+        let meta = fs::metadata(&f).unwrap();
+        let size = meta.len();
+        let mtime: i64 = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        cache.insert(
+            f.to_string_lossy().to_string(),
+            FileIndexEntry {
+                hash: fake_hash.clone(),
+                size: size as i64,
+                mtime,
+                inode: 0,
+                device_id: 0,
+            },
+        );
 
-        // With --full, even though size matches, we must not use cache
+        // With --full, even though size+mtime match, we must not use cache
         let opts = ScanOptions { full: true, incremental: true, ..Default::default() };
         let results = Scanner::new()
             .with_preindexed(cache)
@@ -667,5 +802,23 @@ mod tests {
         assert!(!opts.full);
         assert!(!opts.follow_symlinks);
         assert!(opts.exclude_globs.is_empty());
+    }
+
+    #[test]
+    fn test_scanned_file_has_metadata() {
+        let tmp = TempDir::new().unwrap();
+        create_test_file(tmp.path(), "model.safetensors", b"test content");
+
+        let results = Scanner::new().scan(tmp.path(), |_, _| {}).unwrap();
+        assert_eq!(results.len(), 1);
+        let f = &results[0];
+        assert_eq!(f.size, 12); // "test content"
+        // mtime should be populated (non-zero on most filesystems)
+        // inode should be non-zero on Unix
+        #[cfg(unix)]
+        {
+            assert!(f.inode != 0, "inode should be non-zero on Unix");
+            assert!(f.device_id != 0, "device_id should be non-zero on Unix");
+        }
     }
 }

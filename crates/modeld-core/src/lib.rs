@@ -41,8 +41,8 @@ pub use config::{
     StoreConfig,
 };
 pub use db::{Database, Download, DownloadStatus, HfMapping, Model, TransactionStatus,
-    WalTransaction, WorkflowRecord, WorkflowRef};
-pub use dedup::{DedupEngine, DedupMode, DedupStats, DuplicateGroup, DedupStrategy, DedupPlan, DedupGroupPlan};
+    WalTransaction, WorkflowRecord, WorkflowRef, FileIndexEntry, ScanStatus};
+pub use dedup::{DedupEngine, DedupMode, DedupStats, DuplicateGroup, DedupStrategy, DedupPlan, DedupGroupPlan, RiskLevel, compute_risk_level};
 pub use doctor::{run_doctor, CheckStatus, DoctorCheck, DoctorReport};
 pub use downloader::{DownloadResult, Downloader, HfFileMetadata, Provenance,
     token_set, token_get, token_remove, token_status};

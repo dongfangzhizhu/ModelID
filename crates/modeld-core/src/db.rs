@@ -214,6 +214,49 @@ pub struct WalTransaction {
     pub error_message: Option<String>,
 }
 
+/// Per-file index entry used for incremental scanning.
+///
+/// Populated from the `path_index` table and loaded into the scanner's
+/// preindexed cache.  When all three of `size`, `mtime`, and `inode` match
+/// the current filesystem metadata, the scanner skips re-hashing.
+#[derive(Debug, Clone)]
+pub struct FileIndexEntry {
+    /// Previously computed BLAKE3 hash.
+    pub hash: Blake3Hash,
+    /// File size in bytes.
+    pub size: i64,
+    /// Last-modified time as Unix timestamp (seconds since epoch).
+    /// `0` if the platform could not provide a reliable mtime.
+    pub mtime: i64,
+    /// Inode number (Unix) or file index lower-32-bits (Windows).
+    /// `0` if unavailable.
+    pub inode: i64,
+    /// Device ID (Unix) or volume serial number (Windows).
+    /// `0` if unavailable.
+    pub device_id: i64,
+}
+
+/// Scan status for a path in the index.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScanStatus {
+    /// File was present and hashed on the last scan.
+    Indexed,
+    /// File was not found on the last scan (may have been deleted/moved).
+    Missing,
+    /// File content changed since last scan (size or mtime differs).
+    Changed,
+}
+
+impl ScanStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScanStatus::Indexed => "indexed",
+            ScanStatus::Missing => "missing",
+            ScanStatus::Changed => "changed",
+        }
+    }
+}
+
 /// Database connection manager
 pub struct Database {
     conn: Connection,
@@ -224,7 +267,7 @@ pub struct Database {
 impl Database {
     /// Current schema version.  Bump this whenever you add a migration below.
     #[allow(dead_code)]
-    const SCHEMA_VERSION: i64 = 3;
+    const SCHEMA_VERSION: i64 = 4;
 
     /// Open or create database at the given path
     pub fn open(path: &Path) -> Result<Self> {
@@ -268,6 +311,35 @@ impl Database {
 
         if current_version == 0 {
             // ── Fresh database: create schema at v3 directly ─────────────────
+            //
+            // For truly fresh databases this creates all tables with v3 columns.
+            // For old v0 databases (user_version never stamped) the models table
+            // may already exist with the original schema that is missing v3+
+            // columns like `pinned`, `favorited`, `source_type`, etc. In that
+            // case we silently add the missing columns BEFORE the main batch so
+            // that the `CREATE INDEX … ON models(pinned)` statements succeed.
+            // ALTER TABLE ADD COLUMN fails with "duplicate column name" when the
+            // column already exists, so we simply ignore those errors.
+            let heal_stmts: &[&str] = &[
+                "ALTER TABLE models ADD COLUMN note TEXT",
+                "ALTER TABLE models ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE models ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE models ADD COLUMN source_type TEXT DEFAULT 'local'",
+                "ALTER TABLE models ADD COLUMN hf_repo_id TEXT",
+                "ALTER TABLE models ADD COLUMN revision TEXT",
+                "ALTER TABLE models ADD COLUMN download_url TEXT",
+                "ALTER TABLE models ADD COLUMN license TEXT",
+                "ALTER TABLE models ADD COLUMN downloaded_by TEXT",
+                "ALTER TABLE models ADD COLUMN downloaded_at TEXT",
+                "ALTER TABLE models ADD COLUMN original_filename TEXT",
+                "ALTER TABLE models ADD COLUMN model_card_url TEXT",
+            ];
+            for stmt in heal_stmts {
+                // Silently ignore errors: "table doesn't exist" (fresh db) and
+                // "duplicate column name" (column already added) are both fine.
+                let _ = self.conn.execute(stmt, []);
+            }
+
             self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS models (
@@ -438,10 +510,29 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_tags_model_hash ON tags(model_hash);
             CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+
+            -- v4: per-file scan index (incremental scanning)
+            CREATE TABLE IF NOT EXISTS path_index (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                path        TEXT    UNIQUE NOT NULL,
+                blake3_hash TEXT    NOT NULL,
+                size_bytes  INTEGER NOT NULL,
+                mtime       INTEGER NOT NULL DEFAULT 0,
+                inode       INTEGER NOT NULL DEFAULT 0,
+                device_id   INTEGER NOT NULL DEFAULT 0,
+                last_seen   TEXT    NOT NULL DEFAULT (datetime('now')),
+                scan_status TEXT    NOT NULL DEFAULT 'indexed',
+
+                FOREIGN KEY (blake3_hash) REFERENCES models(blake3_hash),
+                CHECK (scan_status IN ('indexed', 'missing', 'changed'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_path_index_hash   ON path_index(blake3_hash);
+            CREATE INDEX IF NOT EXISTS idx_path_index_status ON path_index(scan_status);
             "#,
         )?;
-            // Brand-new database: stamp directly at v3 (no migration needed)
-            self.conn.pragma_update(None, "user_version", 3i64)?;
+            // Brand-new database: stamp directly at v4 (no migration needed)
+            self.conn.pragma_update(None, "user_version", 4i64)?;
         } else if current_version == 1 {
             // ── Migration v1 → v2 ────────────────────────────────────────────
             // Adds extended transaction metadata columns to `wal_transactions`
@@ -548,6 +639,45 @@ impl Database {
             self.conn.pragma_update(None, "user_version", 3i64)?;
         }
         // current_version >= 3: schema is already up to date
+
+        // ── Migration v3 → v4 ────────────────────────────────────────────────
+        // Adds the path_index table for incremental scanning support.
+        // Re-check version in case v2→v3 migration just ran.
+        let current_version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap_or(0);
+
+        if current_version == 3 {
+            self.backup_before_migration(3)?;
+
+            self.conn.execute_batch(
+                r#"
+                -- Per-file scan index for incremental scanning.
+                -- Tracks inode/file-id, device-id, mtime and scan status
+                -- so the scanner can skip re-hashing unchanged files.
+                CREATE TABLE IF NOT EXISTS path_index (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path        TEXT    UNIQUE NOT NULL,
+                    blake3_hash TEXT    NOT NULL,
+                    size_bytes  INTEGER NOT NULL,
+                    mtime       INTEGER NOT NULL DEFAULT 0,
+                    inode       INTEGER NOT NULL DEFAULT 0,
+                    device_id   INTEGER NOT NULL DEFAULT 0,
+                    last_seen   TEXT    NOT NULL DEFAULT (datetime('now')),
+                    scan_status TEXT    NOT NULL DEFAULT 'indexed',
+
+                    CHECK (scan_status IN ('indexed', 'missing', 'changed'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_path_index_hash   ON path_index(blake3_hash);
+                CREATE INDEX IF NOT EXISTS idx_path_index_status ON path_index(scan_status);
+                "#,
+            )?;
+
+            self.conn.pragma_update(None, "user_version", 4i64)?;
+        }
+        // current_version >= 4: schema is already up to date
 
         // Re-enable FK enforcement
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -1175,6 +1305,20 @@ impl Database {
         Ok(self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
     }
 
+    /// Read the schema version of a database file without running any migrations.
+    ///
+    /// Useful for the `db migrate` CLI command to report before/after versions.
+    pub fn read_schema_version_raw(path: &Path) -> Result<i64> {
+        let conn = Connection::open(path)
+            .with_context(|| format!("Failed to open database at {}", path.display()))?;
+        Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or(0))
+    }
+
+    /// The latest schema version this build supports.
+    pub fn latest_schema_version() -> i64 {
+        Self::SCHEMA_VERSION
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // GC helpers
     // ─────────────────────────────────────────────────────────────────────────
@@ -1370,31 +1514,6 @@ impl Database {
         Ok(rows)
     }
 
-    /// Return all indexed (path, hash, size_bytes) pairs for incremental scan.
-    ///
-    /// The caller compares current file size against `size_bytes`; if they
-    /// match the file is assumed unchanged and re-hashing is skipped.
-    pub fn get_all_indexed_paths(&self) -> Result<std::collections::HashMap<String, (Blake3Hash, i64)>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT a.path, a.model_hash, m.size_bytes
-            FROM aliases a
-            JOIN models m ON m.blake3_hash = a.model_hash
-            "#,
-        )?;
-        let mut map = std::collections::HashMap::new();
-        let rows = stmt.query_map([], |row| {
-            let path: String = row.get(0)?;
-            let mh: String = row.get(1)?;
-            let size: i64 = row.get(2)?;
-            Ok((path, parse_blake3(&mh)?, size))
-        })?;
-        for row in rows {
-            let (path, hash, size) = row?;
-            map.insert(path, (hash, size));
-        }
-        Ok(map)
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2015,6 +2134,94 @@ impl Database {
     /// Run `VACUUM` to compact the database file in-place.
     pub fn vacuum(&self) -> Result<()> {
         self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
+
+    // ── Incremental scan index (path_index) ──────────────────────────────────
+
+    /// Load the full path-index cache for incremental scanning.
+    ///
+    /// Returns a `HashMap<path_string, FileIndexEntry>`.  The scanner compares
+    /// each file's current (size, mtime, inode) against the cached entry and
+    /// skips re-hashing when all three are unchanged.
+    pub fn get_all_indexed_paths(&self) -> Result<std::collections::HashMap<String, FileIndexEntry>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT path, blake3_hash, size_bytes, mtime, inode, device_id
+            FROM path_index
+            WHERE scan_status = 'indexed'
+            "#,
+        )?;
+
+        let entries = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let hash_hex: String = row.get(1)?;
+            let size: i64 = row.get(2)?;
+            let mtime: i64 = row.get(3)?;
+            let inode: i64 = row.get(4)?;
+            let device_id: i64 = row.get(5)?;
+            Ok((path, hash_hex, size, mtime, inode, device_id))
+        })?;
+
+        let mut map = std::collections::HashMap::new();
+        for entry in entries {
+            let (path, hash_hex, size, mtime, inode, device_id) = entry?;
+            if let Ok(hash) = Blake3Hash::from_hex(&hash_hex) {
+                map.insert(
+                    path,
+                    FileIndexEntry { hash, size, mtime, inode, device_id },
+                );
+            }
+        }
+        Ok(map)
+    }
+
+    /// Insert or update a path-index entry after a successful scan.
+    ///
+    /// Sets `scan_status = 'indexed'` and updates all fields.
+    pub fn upsert_path_index(
+        &mut self,
+        path: &str,
+        hash: &Blake3Hash,
+        size: i64,
+        mtime: i64,
+        inode: i64,
+        device_id: i64,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            INSERT INTO path_index (path, blake3_hash, size_bytes, mtime, inode, device_id, last_seen, scan_status)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'indexed')
+            ON CONFLICT(path) DO UPDATE SET
+                blake3_hash = ?2,
+                size_bytes  = ?3,
+                mtime       = ?4,
+                inode       = ?5,
+                device_id   = ?6,
+                last_seen   = ?7,
+                scan_status = 'indexed'
+            "#,
+            params![path, hash.as_hex(), size, mtime, inode, device_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a set of paths as missing in the path index.
+    ///
+    /// Called after a scan to mark paths that were in the index but not found
+    /// on disk (file may have been moved or deleted).
+    pub fn mark_paths_missing(&mut self, paths: &[&str]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        for path in paths {
+            self.conn.execute(
+                r#"
+                UPDATE path_index SET scan_status = 'missing', last_seen = ?2
+                WHERE path = ?1
+                "#,
+                params![path, now],
+            )?;
+        }
         Ok(())
     }
 }
