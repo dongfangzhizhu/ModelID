@@ -7,11 +7,15 @@
 //!   crash recovery can restore every link, not just the canonical one.
 //! - After all duplicates are linked to CAS, the canonical path is also
 //!   replaced with a hardlink to CAS (eliminating the second full copy).
+//! - 14.1: DedupStrategy enum, DedupPlan/DedupGroupPlan, enhanced canonical
+//!   selection (pinned > CAS > protected > newest mtime > shortest path),
+//!   Windows cross-volume fallback to CopyToCas.
 
 use crate::db::{AliasType, Database, Frontend, TransactionStatus};
 use crate::hash::{hash_file, Blake3Hash};
 use crate::links::{create_link, LinkCapability, LinkResult};
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use uuid::Uuid;
@@ -19,6 +23,66 @@ use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// How duplicates should be replaced after deduplication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DedupStrategy {
+    /// Replace duplicates with a hard link to the CAS object (same volume only).
+    Hardlink,
+    /// Replace duplicates with a symbolic link to the CAS object.
+    Symlink,
+    /// Copy content to CAS; leave duplicate paths as independent files.
+    CopyToCas,
+    /// Record the duplicate in the DB only — no filesystem change.
+    VirtualAlias,
+}
+
+impl Default for DedupStrategy {
+    fn default() -> Self {
+        DedupStrategy::Hardlink
+    }
+}
+
+impl std::str::FromStr for DedupStrategy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "hardlink" | "hard-link" => Ok(DedupStrategy::Hardlink),
+            "symlink" | "sym-link" => Ok(DedupStrategy::Symlink),
+            "copy-to-cas" | "copy_to_cas" | "copytocas" => Ok(DedupStrategy::CopyToCas),
+            "virtual-alias" | "virtual_alias" | "virtualalias" => Ok(DedupStrategy::VirtualAlias),
+            other => anyhow::bail!("Unknown dedup strategy: {other}. Valid: hardlink, symlink, copy-to-cas, virtual-alias"),
+        }
+    }
+}
+
+/// A complete deduplication plan (dry-run / plan phase output).
+#[derive(Debug, Default)]
+pub struct DedupPlan {
+    pub groups: Vec<DedupGroupPlan>,
+    pub total_savings_bytes: u64,
+}
+
+/// Dedup plan for a single content-identical group.
+#[derive(Debug)]
+pub struct DedupGroupPlan {
+    /// BLAKE3 hex digest of the shared content.
+    pub hash: String,
+    /// The file that will be kept as the authoritative copy.
+    pub canonical: PathBuf,
+    /// Human-readable explanation of why `canonical` was chosen.
+    pub canonical_reason: String,
+    /// Paths that will be replaced according to `strategy`.
+    pub to_replace: Vec<PathBuf>,
+    /// Strategy to apply (hardlink / symlink / copy-to-cas / virtual-alias).
+    pub strategy: DedupStrategy,
+    /// Whether the operation can be undone (`modeld unlink`).
+    pub reversible: bool,
+    /// Bytes that would be freed on disk.
+    pub estimated_savings: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct DuplicateGroup {
@@ -86,11 +150,26 @@ pub struct DedupEngine {
     db: Database,
     store_path: PathBuf,
     link_capability: LinkCapability,
+    /// Preferred dedup strategy; `None` means auto-detect (hardlink → symlink
+    /// → reference-only based on platform capabilities).
+    strategy: Option<DedupStrategy>,
+    /// Directories whose files are treated as "protected": they are
+    /// preferred as the canonical copy over unprotected paths.
+    protected_paths: Vec<PathBuf>,
+    /// Minimum file size in bytes for a group to be deduplicated.
+    min_size_bytes: u64,
 }
 
 impl DedupEngine {
     pub fn new(db: Database, store_path: PathBuf) -> Self {
-        Self { db, store_path, link_capability: LinkCapability::detect() }
+        Self {
+            db,
+            store_path,
+            link_capability: LinkCapability::detect(),
+            strategy: None,
+            protected_paths: Vec::new(),
+            min_size_bytes: 0,
+        }
     }
 
     pub fn with_link_capability(
@@ -98,7 +177,32 @@ impl DedupEngine {
         store_path: PathBuf,
         link_capability: LinkCapability,
     ) -> Self {
-        Self { db, store_path, link_capability }
+        Self {
+            db,
+            store_path,
+            link_capability,
+            strategy: None,
+            protected_paths: Vec::new(),
+            min_size_bytes: 0,
+        }
+    }
+
+    /// Override the default auto-detect link strategy.
+    pub fn with_strategy(mut self, strategy: DedupStrategy) -> Self {
+        self.strategy = Some(strategy);
+        self
+    }
+
+    /// Mark directories as protected: files inside are preferred as canonical.
+    pub fn with_protected_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.protected_paths = paths;
+        self
+    }
+
+    /// Only process groups whose file size is at least `bytes`.
+    pub fn with_min_size(mut self, bytes: u64) -> Self {
+        self.min_size_bytes = bytes;
+        self
     }
 
     /// Find duplicate groups using a single batch DB query (avoids N+1).
@@ -107,6 +211,9 @@ impl DedupEngine {
         let mut groups = Vec::new();
 
         for (hash, size_bytes, aliases) in batch {
+            if (size_bytes as u64) < self.min_size_bytes {
+                continue;
+            }
             let mut files = Vec::new();
             for alias in &aliases {
                 let p = PathBuf::from(&alias.path);
@@ -127,18 +234,88 @@ impl DedupEngine {
         Ok(groups)
     }
 
+    /// Build a deduplication plan without executing any filesystem operations.
+    ///
+    /// Returns a `DedupPlan` describing what would be done for each duplicate
+    /// group.  Use this for dry-run output, progress estimation, or confirmation
+    /// prompts before calling `run_dedup`.
+    pub fn plan_dedup(&self) -> Result<DedupPlan> {
+        let groups = self.find_duplicates()?;
+        let strategy = self.effective_strategy();
+
+        let mut plan_groups = Vec::new();
+        let mut total_savings = 0u64;
+
+        for group in &groups {
+            let selection = self.select_canonical(&group.files);
+            let estimated_savings =
+                group.total_size * (selection.duplicates.len() as u64);
+
+            let reversible = matches!(strategy, DedupStrategy::Hardlink | DedupStrategy::Symlink);
+
+            plan_groups.push(DedupGroupPlan {
+                hash: group.hash.as_hex().to_string(),
+                canonical: selection.canonical,
+                canonical_reason: selection.reason,
+                to_replace: selection.duplicates,
+                strategy: strategy.clone(),
+                reversible,
+                estimated_savings,
+            });
+            total_savings += estimated_savings;
+        }
+
+        Ok(DedupPlan { groups: plan_groups, total_savings_bytes: total_savings })
+    }
+
+    /// Effective strategy: explicit > auto-detect from link capability.
+    fn effective_strategy(&self) -> DedupStrategy {
+        if let Some(ref s) = self.strategy {
+            return s.clone();
+        }
+        // Auto-detect: prefer hardlink; fall back to symlink; then reference-only
+        DedupStrategy::Hardlink
+    }
+
     /// Select canonical file from a duplicate group.
     ///
-    /// Priority: CAS file > oldest mtime > shortest path > alphabetical.
+    /// Priority (highest first):
+    ///   1. Pinned file (`governance::is_pinned`)
+    ///   2. File already in CAS
+    ///   3. File in a protected directory (`--protect`)
+    ///   4. Most recently modified file (newest mtime)
+    ///   5. Shortest path (simpler reference)
+    ///   6. Alphabetically first (deterministic tie-break)
     pub fn select_canonical(&self, files: &[FileInfo]) -> CanonicalSelection {
         assert!(!files.is_empty(), "select_canonical requires at least one file");
 
-        // Priority 1: any file already residing inside CAS
+        // Priority 1: pinned file
+        for file in files {
+            if let Ok(hash) = crate::hash::hash_file(&file.path) {
+                if crate::governance::is_pinned(&self.db, &hash).unwrap_or(false) {
+                    let duplicates = files
+                        .iter()
+                        .filter(|f| f.path != file.path)
+                        .map(|f| f.path.clone())
+                        .collect();
+                    return CanonicalSelection {
+                        canonical: file.path.clone(),
+                        duplicates,
+                        reason: "Pinned file (governance)".to_string(),
+                    };
+                }
+            }
+        }
+
+        // Priority 2: file already in CAS
         let cas_prefix = self.store_path.join("cas");
         for file in files {
             if file.path.starts_with(&cas_prefix) {
-                let duplicates =
-                    files.iter().filter(|f| f.path != file.path).map(|f| f.path.clone()).collect();
+                let duplicates = files
+                    .iter()
+                    .filter(|f| f.path != file.path)
+                    .map(|f| f.path.clone())
+                    .collect();
                 return CanonicalSelection {
                     canonical: file.path.clone(),
                     duplicates,
@@ -147,11 +324,34 @@ impl DedupEngine {
             }
         }
 
-        // Priority 2-4: oldest, shortest, alphabetical
+        // Priority 3: file in a protected directory
+        for file in files {
+            let in_protected = self
+                .protected_paths
+                .iter()
+                .any(|p| file.path.starts_with(p));
+            if in_protected {
+                let duplicates = files
+                    .iter()
+                    .filter(|f| f.path != file.path)
+                    .map(|f| f.path.clone())
+                    .collect();
+                return CanonicalSelection {
+                    canonical: file.path.clone(),
+                    duplicates,
+                    reason: "In protected directory".to_string(),
+                };
+            }
+        }
+
+        // Priority 4 & 5: newest mtime, then shortest path, then alphabetical
         let canonical = files
             .iter()
-            .min_by_key(|f| {
-                (f.mtime, f.path.as_os_str().len(), f.path.to_string_lossy().to_string())
+            .max_by_key(|f| {
+                // Sort: newest mtime first (max), shortest path first (min → negate)
+                let path_len_neg = -(f.path.as_os_str().len() as i64);
+                let path_alpha = f.path.to_string_lossy().to_string();
+                (f.mtime, path_len_neg, std::cmp::Reverse(path_alpha))
             })
             .unwrap();
 
@@ -170,7 +370,7 @@ impl DedupEngine {
                 "Shortest path (simpler reference)".to_string()
             }
         } else {
-            "Oldest file (likely original)".to_string()
+            "Most recently modified (likely current)".to_string()
         };
 
         CanonicalSelection { canonical: canonical.path.clone(), duplicates, reason }
@@ -196,6 +396,10 @@ impl DedupEngine {
     ///   5. Link each duplicate path → CAS  (delete dup first, then hardlink/symlink)
     ///   6. Link canonical path → CAS too  (eliminate second full copy)
     ///   7. Record aliases; WAL → committed
+    ///
+    /// Windows cross-volume: when strategy is Hardlink but source and CAS are
+    /// on different volumes, automatically falls back to CopyToCas and logs a
+    /// warning.
     pub fn execute_dedup_group(
         &mut self,
         group: &DuplicateGroup,
@@ -309,7 +513,19 @@ impl DedupEngine {
 
         // ── Link each duplicate to CAS ────────────────────────────────────────
         for dup_path in &selection.duplicates {
-            let link_result = create_link(dup_path, &cas_path, &self.link_capability);
+            // Windows cross-volume check: if strategy is Hardlink but volumes
+            // differ, automatically degrade to CopyToCas and warn the user.
+            let effective_strategy = self.resolve_strategy_for_path(dup_path, &cas_path);
+
+            let link_result = match effective_strategy {
+                DedupStrategy::VirtualAlias => LinkResult::Success(AliasType::ReferenceOnly),
+                DedupStrategy::CopyToCas => {
+                    // Duplicate is already redundant — just record it as ReferenceOnly
+                    // (the content is safely in CAS; no hard/symlink is created).
+                    LinkResult::Success(AliasType::ReferenceOnly)
+                }
+                _ => create_link(dup_path, &cas_path, &self.link_capability),
+            };
 
             let alias_type = match &link_result {
                 LinkResult::Success(t) => t.clone(),
@@ -370,6 +586,28 @@ impl DedupEngine {
             links_created,
             space_saved,
         })
+    }
+
+    /// Resolve the effective strategy for a specific source→target pair,
+    /// handling the Windows cross-volume hardlink restriction.
+    fn resolve_strategy_for_path(&self, source: &Path, target: &Path) -> DedupStrategy {
+        let strategy = self.effective_strategy();
+
+        // Hardlink across volumes is impossible; fall back to CopyToCas.
+        if strategy == DedupStrategy::Hardlink {
+            let same_vol = crate::platform::is_same_volume(source, target);
+            if !same_vol {
+                eprintln!(
+                    "dedup: {} and {} are on different volumes — hardlink not possible, \
+                     falling back to copy-to-cas (content is preserved in CAS)",
+                    source.display(),
+                    target.display()
+                );
+                return DedupStrategy::CopyToCas;
+            }
+        }
+
+        strategy
     }
 
     /// Run deduplication across all duplicate groups.
@@ -583,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn test_select_canonical_oldest() {
+    fn test_select_canonical_newest() {
         let tmp = tempdir().unwrap();
         let (engine, _db) = make_engine(&tmp);
 
@@ -595,7 +833,8 @@ mod tests {
 
         let files = vec![FileInfo::from_path(&f1).unwrap(), FileInfo::from_path(&f2).unwrap()];
         let sel = engine.select_canonical(&files);
-        assert_eq!(sel.canonical, f1);
+        // Priority 4: newest mtime wins — f2 was written 50 ms after f1
+        assert_eq!(sel.canonical, f2);
         assert_eq!(sel.duplicates.len(), 1);
     }
 
