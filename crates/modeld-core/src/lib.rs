@@ -42,7 +42,7 @@ pub use config::{
 };
 pub use db::{Database, Download, DownloadStatus, HfMapping, Model, TransactionStatus,
     WalTransaction, WorkflowRecord, WorkflowRef};
-pub use dedup::{DedupEngine, DedupMode, DedupStats, DuplicateGroup};
+pub use dedup::{DedupEngine, DedupMode, DedupStats, DuplicateGroup, DedupStrategy, DedupPlan, DedupGroupPlan};
 pub use doctor::{run_doctor, CheckStatus, DoctorCheck, DoctorReport};
 pub use downloader::{DownloadResult, Downloader, HfFileMetadata, Provenance,
     token_set, token_get, token_remove, token_status};
@@ -63,7 +63,7 @@ pub use hf_cache::{HfCache, HfCacheStats};
 pub use i18n::{detect, t, tf, Lang};
 pub use platform::{detect_capabilities, is_same_volume, check_file_locked, PlatformCapabilities};
 pub use quarantine::QuarantineManager;
-pub use scanner::{ScannedFile, Scanner};
+pub use scanner::{ScannedFile, Scanner, ScanOptions};
 pub use store_path::{default_store_path, resolve_store_path};
 pub use tx::{
     OpType, PathEntry, RecoveryAction, RollbackPlan, TxFilter, TxHandle, TxPlan, TxRecord,
