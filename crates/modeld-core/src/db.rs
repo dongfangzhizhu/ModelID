@@ -1999,6 +1999,24 @@ impl Database {
             Err(e) => Err(e.into()),
         }
     }
+
+    // ── DB management helpers ────────────────────────────────────────────────
+
+    /// Run `PRAGMA integrity_check` and return the first result line.
+    ///
+    /// Returns `"ok"` when the database is healthy.
+    pub fn integrity_check(&self) -> Result<String> {
+        let result: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        Ok(result)
+    }
+
+    /// Run `VACUUM` to compact the database file in-place.
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn.execute_batch("VACUUM")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

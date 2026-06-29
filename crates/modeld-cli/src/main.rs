@@ -3,10 +3,14 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
-    build_model_lookup, find_workflow_files, hash_file, index_workflow, parse_workflow, run_fsck,
-    run_doctor, load_config, save_config, resolve_store_path,
-    t, tf, unlink_path, CasStore, CheckStatus, Database, DedupEngine, DedupMode, Downloader,
-    GcEngine, HfCache, QuarantineManager, Scanner,
+    add_tag, build_model_lookup, explain_refs, export_tags_json, favorite_model, find_workflow_files,
+    get_provenance, hash_file, import_tags_json, index_workflow, is_pinned, list_all_tags,
+    list_orphans, list_pinned, parse_workflow, pin_model, remove_tag, run_fsck,
+    run_doctor, load_config, save_config, resolve_store_path, scan_workflow_refs, set_note,
+    t, tf, unfavorite_model, unlink_path, unpin_model,
+    Blake3Hash, CasStore, CheckStatus, Database, DedupEngine, DedupMode, DedupStrategy,
+    DedupPlan, Downloader, GcEngine, HfCache, QuarantineManager, Scanner, ScanOptions,
+    TransactionManager, TxFilter,
     token_remove, token_set, token_status,
 };
 use std::path::{Path, PathBuf};
@@ -39,6 +43,18 @@ enum Commands {
         /// Store directory
         #[arg(short = 's', long)]
         store: Option<PathBuf>,
+        /// Skip re-hashing files whose size matches the cache (default: true)
+        #[arg(long, default_value = "true")]
+        incremental: bool,
+        /// Force full re-hash of every file, ignoring any cache
+        #[arg(long)]
+        full: bool,
+        /// Exclude paths matching a glob pattern (can be specified multiple times)
+        #[arg(long = "exclude", value_name = "GLOB")]
+        exclude_globs: Vec<String>,
+        /// Follow symbolic links when traversing directories (default: false)
+        #[arg(long)]
+        follow_symlinks: bool,
     },
     /// Show store statistics
     Status {
@@ -100,12 +116,25 @@ enum Commands {
         /// Preview mode - show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
-        /// Auto mode - execute without confirmation prompts
+        /// Auto mode - execute without confirmation prompts (alias for --apply)
         #[arg(long)]
         auto: bool,
+        /// Apply deduplication (execute changes); without this flag runs as dry-run
+        #[arg(long)]
+        apply: bool,
         /// Report mode - analyze only, no modifications
         #[arg(long)]
         report: bool,
+        /// Dedup strategy: hardlink, symlink, copy-to-cas, virtual-alias
+        #[arg(long, value_name = "STRATEGY")]
+        strategy: Option<String>,
+        /// Minimum file size to consider for dedup, e.g. 100MB, 2GB
+        #[arg(long)]
+        min_size: Option<String>,
+        /// Protect a directory: files inside are preferred as the canonical copy
+        /// (can be specified multiple times)
+        #[arg(long = "protect", value_name = "PATH")]
+        protect: Vec<PathBuf>,
     },
     /// Manage quarantine
     Quarantine {
@@ -268,6 +297,41 @@ enum Commands {
     Hf {
         #[command(subcommand)]
         action: HfAction,
+    },
+    /// Tag management for models
+    Tag {
+        #[command(subcommand)]
+        action: TagAction,
+    },
+    /// Model notes management
+    Note {
+        #[command(subcommand)]
+        action: NoteAction,
+    },
+    /// Pin management (protect models from GC)
+    Pin {
+        #[command(subcommand)]
+        action: PinAction,
+    },
+    /// Favourite management for models
+    Favorite {
+        #[command(subcommand)]
+        action: FavoriteAction,
+    },
+    /// Reference graph commands
+    Refs {
+        #[command(subcommand)]
+        action: RefsAction,
+    },
+    /// Transaction management
+    Tx {
+        #[command(subcommand)]
+        action: TxAction,
+    },
+    /// Database management
+    Db {
+        #[command(subcommand)]
+        action: DbAction,
     },
 }
 
@@ -470,20 +534,238 @@ enum HfTokenAction {
     },
 }
 
+// ── Governance subcommand trees ───────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum TagAction {
+    /// Attach a tag to a model
+    Add {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Tag to add
+        tag: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Remove a tag from a model
+    Remove {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Tag to remove
+        tag: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// List all tags with usage counts
+    List {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum NoteAction {
+    /// Set or clear the note for a model (empty text clears the note)
+    Set {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Note text (empty string clears the note)
+        text: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PinAction {
+    /// Pin a model (protect from GC)
+    Add {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Unpin a model
+    Remove {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// List all pinned models
+    List {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum FavoriteAction {
+    /// Mark a model as favourite
+    Add {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Remove the favourite flag from a model
+    Remove {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RefsAction {
+    /// Parse a ComfyUI workflow JSON and index its model references
+    Scan {
+        /// Workflow JSON file (or directory of JSON files)
+        path: PathBuf,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Explain why a model cannot be deleted
+    Why {
+        /// Full 64-character BLAKE3 hash
+        hash: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// List models with no workflow references and no aliases (orphans)
+    Orphans {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+// ── Transaction management ────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum TxAction {
+    /// List transaction records
+    List {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show details of a specific transaction
+    Show {
+        /// Transaction ID (UUID)
+        tx_id: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Roll back a transaction
+    Rollback {
+        /// Transaction ID (UUID)
+        tx_id: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Recover from a crash: mark PENDING transactions as FAILED and clean staging
+    Recover {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Delete transaction records older than a given duration
+    Cleanup {
+        /// Age threshold, e.g. "30d", "7d", "1h"
+        older_than: String,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+}
+
+// ── Database management ───────────────────────────────────────────────────────
+
+#[derive(Subcommand)]
+enum DbAction {
+    /// Show database status (schema version, file sizes, integrity)
+    Status {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Backup the database to <store>/backups/
+    Backup {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Restore the database from a backup file
+    Restore {
+        /// Path to the backup file
+        backup: PathBuf,
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// VACUUM the database to reclaim disk space
+    Vacuum {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+    /// Run any pending schema migrations
+    Migrate {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Init { path, interactive } => init_command(path, interactive)?,
-        Commands::Scan { path, store } => scan_command(path, resolve_store(store))?,
+        Commands::Scan { path, store, incremental, full, exclude_globs, follow_symlinks } => {
+            scan_command(path, resolve_store(store), incremental, full, exclude_globs, follow_symlinks)?
+        }
         Commands::Status { store } => status_command(resolve_store(store))?,
         Commands::Stats { store } => stats_command(resolve_store(store))?,
         Commands::Dupes { store, min_size, json } => dupes_command(resolve_store(store), min_size, json)?,
         Commands::List { store, limit, json } => list_command(resolve_store(store), limit, json)?,
         Commands::Info { hash, store, json } => info_command(resolve_store(store), &hash, json)?,
         Commands::Hash { file } => hash_command(file)?,
-        Commands::Dedup { store, dry_run, auto, report } => {
-            dedup_command(resolve_store(store), dry_run, auto, report)?
+        Commands::Dedup { store, dry_run, auto, apply, report, strategy, min_size, protect } => {
+            dedup_command(resolve_store(store), dry_run, auto || apply, report, strategy, min_size, protect)?
         }
         Commands::Quarantine { store, action } => quarantine_command(resolve_store(store), action)?,
         Commands::HfCheck { repo_id, filename, revision, json, store } => {
@@ -510,6 +792,13 @@ fn main() -> Result<()> {
         Commands::Serve { host, port, open, store, read_only } => {
             serve_command(host, port, open, resolve_store(store), read_only)?
         }
+        Commands::Tag { action } => tag_command(action)?,
+        Commands::Note { action } => note_command(action)?,
+        Commands::Pin { action } => pin_command(action)?,
+        Commands::Favorite { action } => favorite_command(action)?,
+        Commands::Refs { action } => refs_command(action)?,
+        Commands::Tx { action } => tx_command(action)?,
+        Commands::Db { action } => db_command(action)?,
     }
 
     Ok(())
@@ -643,7 +932,7 @@ fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<()> {
     Ok(())
 }
 
-fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
+fn scan_command(scan_path: PathBuf, store_path: PathBuf, incremental: bool, full: bool, exclude_globs: Vec<String>, follow_symlinks: bool) -> Result<()> {
     println!("{}", tf("scan.scanning", &[("path", &scan_path.display())]).cyan().bold());
 
     // Exclude the store directory from scanning to prevent CAS objects,
@@ -668,7 +957,13 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf) -> Result<()> {
 
     let scanner = Scanner::new()
         .with_excluded_dirs(vec![store_canonical])
-        .with_preindexed(preindexed);
+        .with_preindexed(preindexed)
+        .with_scan_options(ScanOptions {
+            incremental,
+            full,
+            exclude_globs,
+            follow_symlinks,
+        });
 
     // Quick count first
     let (file_count, total_size) = scanner.count_files(&scan_path)?;
@@ -1028,7 +1323,7 @@ fn hash_command(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool) -> Result<()> {
+fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, strategy_str: Option<String>, min_size: Option<String>, protect: Vec<PathBuf>) -> Result<()> {
     let db_path = store_path.join("modeld.db");
 
     if !db_path.exists() {
@@ -1064,6 +1359,23 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool) -
 
     let db = Database::open(&db_path)?;
     let mut engine = DedupEngine::new(db, store_path.clone());
+
+    // Apply optional strategy override
+    if let Some(ref s) = strategy_str {
+        let strategy: DedupStrategy = s.parse().with_context(|| format!("Invalid dedup strategy: {s}"))?;
+        engine = engine.with_strategy(strategy);
+    }
+
+    // Apply min-size filter
+    if let Some(ref ms) = min_size {
+        let bytes = parse_size(ms)?;
+        engine = engine.with_min_size(bytes);
+    }
+
+    // Apply protected paths
+    if !protect.is_empty() {
+        engine = engine.with_protected_paths(protect);
+    }
 
     // First, find and report duplicates
     let groups = engine.find_duplicates()?;
@@ -2648,4 +2960,356 @@ fn read_secret_from_stdin() -> Result<String> {
         .read_line(&mut line)
         .context("Failed to read token from stdin")?;
     Ok(line.trim().to_string())
+}
+
+// ── Tag management ────────────────────────────────────────────────────────────
+
+fn tag_command(action: TagAction) -> Result<()> {
+    match action {
+        TagAction::Add { hash, tag, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            add_tag(&mut db, &h, &tag)?;
+            println!("✓ Added tag '{}' to {}", tag, &hash[..16]);
+        }
+        TagAction::Remove { hash, tag, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            remove_tag(&mut db, &h, &tag)?;
+            println!("✓ Removed tag '{}' from {}", tag, &hash[..16]);
+        }
+        TagAction::List { store, json } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let db = Database::open(&db_path)?;
+            let tags = list_all_tags(&db)?;
+            if json {
+                let j: Vec<_> = tags
+                    .iter()
+                    .map(|(t, c)| serde_json::json!({"tag": t, "count": c}))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                for (tag, count) in &tags {
+                    println!("  {} ({})", tag, count);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Note management ───────────────────────────────────────────────────────────
+
+fn note_command(action: NoteAction) -> Result<()> {
+    match action {
+        NoteAction::Set { hash, text, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            set_note(&mut db, &h, &text)?;
+            println!("✓ Note set for {}", &hash[..16]);
+        }
+    }
+    Ok(())
+}
+
+// ── Pin management ────────────────────────────────────────────────────────────
+
+fn pin_command(action: PinAction) -> Result<()> {
+    match action {
+        PinAction::Add { hash, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            pin_model(&mut db, &h)?;
+            println!("✓ Pinned {}", &hash[..16]);
+        }
+        PinAction::Remove { hash, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            unpin_model(&mut db, &h)?;
+            println!("✓ Unpinned {}", &hash[..16]);
+        }
+        PinAction::List { store, json } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let db = Database::open(&db_path)?;
+            let pinned = list_pinned(&db)?;
+            if json {
+                let hashes: Vec<_> = pinned.iter().map(|h| h.as_hex()).collect();
+                println!("{}", serde_json::to_string_pretty(&hashes)?);
+            } else {
+                for h in &pinned {
+                    println!("  {}", h.as_hex());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Favorite management ───────────────────────────────────────────────────────
+
+fn favorite_command(action: FavoriteAction) -> Result<()> {
+    match action {
+        FavoriteAction::Add { hash, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            favorite_model(&mut db, &h)?;
+            println!("✓ Favorited {}", &hash[..16]);
+        }
+        FavoriteAction::Remove { hash, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            unfavorite_model(&mut db, &h)?;
+            println!("✓ Unfavorited {}", &hash[..16]);
+        }
+    }
+    Ok(())
+}
+
+// ── Reference graph commands ──────────────────────────────────────────────────
+
+fn refs_command(action: RefsAction) -> Result<()> {
+    match action {
+        RefsAction::Scan { path, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let count = scan_workflow_refs(&mut db, &path)?;
+            println!("✓ Indexed {} model references from {}", count, path.display());
+        }
+        RefsAction::Why { hash, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let db = Database::open(&db_path)?;
+            let h = Blake3Hash::from_hex(&hash)?;
+            let reasons = explain_refs(&db, &h)?;
+            if reasons.is_empty() {
+                println!("  No references found — this model is an orphan candidate.");
+            } else {
+                for r in &reasons {
+                    println!("  • {}", r);
+                }
+            }
+        }
+        RefsAction::Orphans { store, json } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let db = Database::open(&db_path)?;
+            let orphans = list_orphans(&db)?;
+            if json {
+                let hashes: Vec<_> = orphans.iter().map(|h| h.as_hex()).collect();
+                println!("{}", serde_json::to_string_pretty(&hashes)?);
+            } else {
+                for h in &orphans {
+                    println!("  {}", &h.as_hex()[..16]);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ── Transaction management ────────────────────────────────────────────────────
+
+fn tx_command(action: TxAction) -> Result<()> {
+    match action {
+        TxAction::List { store, json } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let tm = TransactionManager::new(&mut db, &store_path);
+            let records = tm.list(TxFilter::default())?;
+            if json {
+                let j: Vec<_> = records
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "tx_id": r.tx_id,
+                            "op_type": r.op_type.as_ref().map(|o| o.as_str()),
+                            "status": format!("{:?}", r.status),
+                            "start_time": r.start_time.to_rfc3339(),
+                            "end_time": r.end_time.map(|t| t.to_rfc3339()),
+                            "error": r.error_message,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&j)?);
+            } else {
+                for r in &records {
+                    let op = r.op_type.as_ref().map(|o| o.as_str()).unwrap_or("unknown");
+                    println!(
+                        "  {} | {:?} | {} | {}",
+                        &r.tx_id[..8],
+                        r.status,
+                        op,
+                        r.start_time.format("%Y-%m-%d %H:%M")
+                    );
+                }
+            }
+        }
+        TxAction::Show { tx_id, store, json } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let tm = TransactionManager::new(&mut db, &store_path);
+            let records = tm.list(TxFilter::default())?;
+            let record = records.iter().find(|r| r.tx_id == tx_id || r.tx_id.starts_with(&tx_id));
+            if let Some(r) = record {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "tx_id": r.tx_id,
+                            "op_type": r.op_type.as_ref().map(|o| o.as_str()),
+                            "status": format!("{:?}", r.status),
+                            "start_time": r.start_time.to_rfc3339(),
+                            "end_time": r.end_time.map(|t| t.to_rfc3339()),
+                            "error": r.error_message,
+                            "affected_paths": r.affected_paths.iter()
+                                .map(|p| p.source.display().to_string())
+                                .collect::<Vec<_>>(),
+                        })
+                    );
+                } else {
+                    println!("tx_id:  {}", r.tx_id);
+                    println!("status: {:?}", r.status);
+                    println!("op:     {}", r.op_type.as_ref().map(|o| o.as_str()).unwrap_or("unknown"));
+                    println!("start:  {}", r.start_time);
+                    if let Some(end) = r.end_time {
+                        println!("end:    {}", end);
+                    }
+                    if let Some(err) = &r.error_message {
+                        println!("error:  {}", err);
+                    }
+                }
+            } else {
+                anyhow::bail!("Transaction not found: {}", tx_id);
+            }
+        }
+        TxAction::Rollback { tx_id, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let mut tm = TransactionManager::new(&mut db, &store_path);
+            tm.rollback(&tx_id)?;
+            println!("✓ Rolled back transaction {}", &tx_id[..8.min(tx_id.len())]);
+        }
+        TxAction::Recover { store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let mut tm = TransactionManager::new(&mut db, &store_path);
+            let results = tm.recover()?;
+            println!("✓ Recovered {} transaction(s)", results.len());
+        }
+        TxAction::Cleanup { older_than, store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let mut db = Database::open(&db_path)?;
+            let mut tm = TransactionManager::new(&mut db, &store_path);
+            let duration = parse_duration_str(&older_than)?;
+            let removed = tm.cleanup_older_than(duration)?;
+            println!("✓ Removed {} transaction record(s)", removed);
+        }
+    }
+    Ok(())
+}
+
+fn parse_duration_str(s: &str) -> Result<std::time::Duration> {
+    let s = s.trim();
+    if let Some(days) = s.strip_suffix('d') {
+        let n: u64 = days.parse().with_context(|| format!("Invalid duration: {}", s))?;
+        return Ok(std::time::Duration::from_secs(n * 86400));
+    }
+    if let Some(hours) = s.strip_suffix('h') {
+        let n: u64 = hours.parse().with_context(|| format!("Invalid duration: {}", s))?;
+        return Ok(std::time::Duration::from_secs(n * 3600));
+    }
+    anyhow::bail!("Invalid duration '{}': use format like '30d' or '24h'", s);
+}
+
+// ── Database management ───────────────────────────────────────────────────────
+
+fn db_command(action: DbAction) -> Result<()> {
+    match action {
+        DbAction::Status { store } => {
+            let store_path = resolve_store(store);
+            let db_path = store_path.join("modeld.db");
+            if !db_path.exists() {
+                anyhow::bail!("Database not found at {}", db_path.display());
+            }
+            let db = Database::open(&db_path)?;
+            let version = db.schema_version()?;
+            let db_size = std::fs::metadata(&db_path)?.len();
+            let wal_path = db_path.with_extension("db-wal");
+            let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+            println!("schema version : {}", version);
+            println!("db size        : {} KB", db_size / 1024);
+            println!("wal size       : {} KB", wal_size / 1024);
+            let integrity_result = db.integrity_check().unwrap_or_else(|_| "ERROR".to_string());
+            let integrity_ok = integrity_result.eq_ignore_ascii_case("ok");
+            println!("integrity      : {}", if integrity_ok { "OK" } else { &integrity_result });
+        }
+        DbAction::Backup { store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let backups_dir = store_path.join("backups");
+            std::fs::create_dir_all(&backups_dir)?;
+            let ts = {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                secs
+            };
+            let backup_path = backups_dir.join(format!("modeld_backup_{}.db", ts));            std::fs::copy(&db_path, &backup_path)?;
+            println!("✓ Database backed up to {}", backup_path.display());
+        }
+        DbAction::Restore { backup, store, yes } => {
+            let store_path = resolve_store(store);
+            let db_path = store_path.join("modeld.db");
+            if !yes {
+                print!("Replace {} with {}? [y/N]: ", db_path.display(), backup.display());
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut ans = String::new();
+                std::io::stdin().read_line(&mut ans)?;
+                if !ans.trim().eq_ignore_ascii_case("y") {
+                    println!("Aborted.");
+                    return Ok(());
+                }
+            }
+            std::fs::copy(&backup, &db_path)?;
+            println!("✓ Database restored from {}", backup.display());
+        }
+        DbAction::Vacuum { store } => {
+            let store_path = resolve_store(store);
+            let db_path = require_store_db(&store_path)?;
+            let db = Database::open(&db_path)?;
+            db.vacuum()?;
+            println!("✓ Database vacuumed");
+        }
+        DbAction::Migrate { store } => {
+            let store_path = resolve_store(store);
+            let db_path = store_path.join("modeld.db");
+            let db = Database::open(&db_path)?;
+            let version = db.schema_version()?;
+            println!("✓ Database is at schema version {} (no pending migrations)", version);
+        }
+    }
+    Ok(())
 }
