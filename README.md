@@ -2,7 +2,7 @@
 
 Content-Addressable Storage (CAS) infrastructure for AI models.
 
-**Status**: Phases 1–5 complete · [MIT License](LICENSE)
+**Status**: All phases complete (Phases 1–5 + Web UI) · v1.0 · [MIT License](LICENSE)
 
 ## Overview
 
@@ -224,6 +224,8 @@ $MODELD_STORE/          (default: .modeld/)
 | 4 | Workflow reference graph — ComfyUI parser, dependency graph, safe GC | ✅ Complete |
 | 5 | Local registry & proxy — LAN HF mirror, mDNS discovery, Range requests, auth | ✅ Complete |
 | — | Web UI (`modeld-webui`) — embedded dashboard with REST API + WebSocket | ✅ Complete |
+
+> **v1.0**: All 7 implementation areas are complete and shipping.
 
 ## Building
 
