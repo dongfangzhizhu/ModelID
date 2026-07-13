@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # Rust
 # ============================================================
 /target/
@@ -7,7 +7,7 @@
 # to guarantee reproducible builds.
 
 # ============================================================
-# Python — build & cache artifacts
+# Python 鈥?build & cache artifacts
 # ============================================================
 __pycache__/
 *.py[cod]
@@ -21,7 +21,7 @@ python/.eggs/
 *.tar.gz
 
 # ============================================================
-# Python — virtual environments
+# Python 鈥?virtual environments
 # ============================================================
 .venv/
 venv/
@@ -34,7 +34,15 @@ env/
 # ============================================================
 node_modules/
 package-lock.json
+# But exclude node_modules installed there
+!/crates/modeld-webui/ui/node_modules/
 package.json
+# Exception: modeld-webui/ui has a minimal package.json to run its
+# frontend property/unit tests (node:test + fast-check) 鈥?track it.
+!/crates/modeld-webui/ui/package.json
+!/crates/modeld-webui/ui/package-lock.json
+# But exclude node_modules installed there
+!/crates/modeld-webui/ui/node_modules/
 
 # ============================================================
 # IDE & Editor
@@ -56,7 +64,7 @@ Thumbs.db
 desktop.ini
 
 # ============================================================
-# modeld — local dev / test artifacts
+# modeld 鈥?local dev / test artifacts
 # ============================================================
 /test-store/
 /.modeld-test/

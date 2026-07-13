@@ -2,7 +2,7 @@
 
 Content-Addressable Storage (CAS) infrastructure for AI models.
 
-**Status**: All phases complete (Phases 1–5 + Web UI) · v1.0 · [MIT License](LICENSE)
+**Status**: First public release · v0.1.0 · [MIT License](LICENSE)
 
 ## Overview
 
@@ -19,7 +19,10 @@ modeld is the "containerd + git-lfs + nix store" for AI models. It provides:
 ## Quick Start
 
 ```bash
-# Initialize store (default: ~/.local/share/modeld)
+# Install
+cargo install --locked modeld-cli
+
+# Initialize store (default: ~/.local/share/modeld on Linux/macOS, %LOCALAPPDATA%\modeld on Windows)
 modeld init
 
 # Scan models directory — hash, index, detect duplicates
@@ -197,7 +200,6 @@ modeld-webui --store .modeld --host 0.0.0.0 --port 9000 --open
 
 ## Store layout
 
-
 ```
 $MODELD_STORE/          (default: .modeld/)
 ├── cas/blake3/
@@ -214,28 +216,14 @@ $MODELD_STORE/          (default: .modeld/)
 └── modeld.db            (SQLite: models, aliases, refs, downloads)
 ```
 
-## Phases
-
-| Phase | Focus | Status |
-|-------|-------|--------|
-| 1 | Core CAS — BLAKE3 hashing, SQLite registry, file scanner, dedup report | ✅ Complete |
-| 2 | Dedup engine — two-phase commit, hardlinks/symlinks, quarantine, GC | ✅ Complete |
-| 3 | HuggingFace interception — fake HF cache, resumable downloader, Python hook | ✅ Complete |
-| 4 | Workflow reference graph — ComfyUI parser, dependency graph, safe GC | ✅ Complete |
-| 5 | Local registry & proxy — LAN HF mirror, mDNS discovery, Range requests, auth | ✅ Complete |
-| — | Web UI (`modeld-webui`) — embedded dashboard with REST API + WebSocket | ✅ Complete |
-
-> **v1.0**: All 7 implementation areas are complete and shipping.
-
 ## Building
 
 ```bash
 cargo build --release
 # Produces two binaries:
-#   target/release/modeld         — CLI tool (all Phase 1–5 commands)
+#   target/release/modeld         — CLI tool (all commands)
 #   target/release/modeld-webui   — Web UI server (browser dashboard)
 ```
-
 
 ## Testing
 
