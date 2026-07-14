@@ -183,10 +183,7 @@ pub fn export_tags_json(db: &Database) -> Result<String> {
     for model in &models {
         let tags = db.get_tags(&model.blake3_hash)?;
         if !tags.is_empty() {
-            entries.push(TagEntry {
-                hash: model.blake3_hash.as_hex().to_string(),
-                tags,
-            });
+            entries.push(TagEntry { hash: model.blake3_hash.as_hex().to_string(), tags });
         }
     }
     serde_json::to_string_pretty(&entries).context("failed to serialise tags to JSON")
@@ -198,8 +195,7 @@ pub fn export_tags_json(db: &Database) -> Result<String> {
 /// Returns the total number of tag associations that were inserted (duplicates
 /// already in the DB are ignored).
 pub fn import_tags_json(db: &mut Database, json: &str) -> Result<usize> {
-    let entries: Vec<TagEntry> =
-        serde_json::from_str(json).context("failed to parse tags JSON")?;
+    let entries: Vec<TagEntry> = serde_json::from_str(json).context("failed to parse tags JSON")?;
 
     let mut count = 0usize;
     for entry in &entries {

@@ -1,6 +1,12 @@
 // pages/dashboard.js
 import { api } from '../api.js';
 import { fmtBytes, fmtRelTime, toast, confirm, events, t } from '../main.js';
+import {
+  resolvePhaseKey,
+  computeScanProgressPercent,
+  computeScanButtonDisabled,
+} from './dashboard-progress.js';
+import { decideButtonToRestore } from './dashboard-operation-complete.js';
 
 export function render(container) {
   container.innerHTML = `
@@ -63,7 +69,10 @@ export function render(container) {
     </div>
   `;
 
-  const unsub = events.on('scan_progress', handleScanProgress);
+  const unsubs = [
+    events.on('scan_progress', handleScanProgress),
+    events.on('operation_complete', handleOperationComplete),
+  ];
   loadStats();
   let refreshTimer = setInterval(loadStats, 30000);
 
@@ -126,49 +135,62 @@ export function render(container) {
     }
   }
 
-  const PHASE_KEYS = { walking: 'dash.scan.walking', hashing: 'dash.scan.hashing', indexing: 'dash.scan.indexing', done: 'dash.scan.done' };
-
   function handleScanProgress(payload) {
     const area = document.getElementById('scan-progress-area');
     if (!area) return;
     area.style.display = '';
 
     const p = payload.payload || payload;
-    const phaseKey = PHASE_KEYS[p.phase] || 'dash.scan.scanning';
+    const phaseKey = resolvePhaseKey(p.phase);
     document.getElementById('scan-phase').textContent = t(phaseKey);
     document.getElementById('scan-path').textContent  = p.current_path || '';
     document.getElementById('scan-count').textContent = t('dash.scan.files', { n: p.files_scanned || 0 });
 
-    const pct = p.files_total > 0 ? Math.round((p.files_scanned / p.files_total) * 100) : 0;
+    const pct = computeScanProgressPercent(p);
     document.getElementById('scan-prog').style.width = pct + '%';
 
+    document.getElementById('btn-scan').disabled = computeScanButtonDisabled(p.phase);
+
     if (p.phase === 'done') {
-      document.getElementById('btn-scan').disabled = false;
       setTimeout(() => { if (area) area.style.display = 'none'; }, 2000);
       loadStats();
       toast(t('dash.scan.complete'), 'success');
     }
   }
 
+  function handleOperationComplete(payload) {
+    const p = payload.payload || payload;
+    const buttonToRestore = decideButtonToRestore(p.operation);
+    
+    if (buttonToRestore === 'gc') {
+      document.getElementById('btn-gc').disabled = false;
+      if (!p.success) toast(t('dash.gc.fail', { msg: p.message }), 'error');
+    } else if (buttonToRestore === 'scan') {
+      document.getElementById('btn-scan').disabled = false;
+    }
+  }
+
   async function runGc() {
     try {
       const preview = await api.gcPreview();
-      if (preview.reclaimable.length === 0) {
+      if (preview.would_quarantine.length === 0) {
         toast(t('dash.gc.none'), 'info');
         return;
       }
       const ok = await confirm(
         t('dash.gc.confirm.title'),
-        t('dash.gc.confirm.body', { n: preview.reclaimable.length, size: fmtBytes(preview.total_reclaimable_bytes) })
+        t('dash.gc.confirm.body', { n: preview.would_quarantine.length, size: fmtBytes(preview.total_reclaimable_bytes) })
       );
       if (!ok) return;
+      document.getElementById('btn-gc').disabled = true;
       await api.gcRun({});
       toast(t('dash.gc.done'), 'success');
       loadStats();
     } catch (e) {
       toast(t('dash.gc.fail', { msg: e.message }), 'error');
+      document.getElementById('btn-gc').disabled = false;
     }
   }
 
-  return () => { unsub(); clearInterval(refreshTimer); };
+  return () => { unsubs.forEach((fn) => fn()); clearInterval(refreshTimer); };
 }

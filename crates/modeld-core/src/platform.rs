@@ -44,7 +44,9 @@ pub struct PlatformCapabilities {
 /// Uses probe-based detection where possible so that the results reflect the
 /// actual runtime environment rather than compile-time assumptions.
 pub fn detect_capabilities(path: &Path) -> PlatformCapabilities {
-    let probe_root = if path.is_dir() { path.to_path_buf() } else {
+    let probe_root = if path.is_dir() {
+        path.to_path_buf()
+    } else {
         path.parent().unwrap_or(path).to_path_buf()
     };
 
@@ -316,7 +318,7 @@ fn get_volume_root(path: &Path) -> Option<String> {
     }
     if s.starts_with(r"\\") {
         // UNC path — take first two components
-        let parts: Vec<&str> = s[2..].splitn(3, '\\').collect();
+        let parts: Vec<&str> = s.strip_prefix(r"\\").unwrap_or(&s).splitn(3, '\\').collect();
         if parts.len() >= 2 {
             return Some(format!(r"\\{}\{}\", parts[0], parts[1]));
         }
@@ -335,11 +337,7 @@ fn check_file_locked_impl(path: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
 
     // Convert path to wide string
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
 
     // Try to open with GENERIC_READ | GENERIC_WRITE, sharing READ only.
     // If another process has the file open exclusively, this will fail with

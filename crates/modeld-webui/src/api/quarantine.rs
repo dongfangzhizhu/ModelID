@@ -76,9 +76,8 @@ pub async fn restore_quarantine(
         .find(|e| e.meta.blake3_hash == id)
         .ok_or_else(|| ApiError::not_found(format!("No quarantine entry with id '{}'", id)))?;
 
-    let restored_path = qm
-        .restore(&entry.quarantine_path)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let restored_path =
+        qm.restore(&entry.quarantine_path).map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "restored_path": restored_path.display().to_string(),

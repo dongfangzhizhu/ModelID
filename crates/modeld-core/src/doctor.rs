@@ -51,19 +51,10 @@ pub struct DoctorCheck {
 
 impl DoctorCheck {
     fn pass(name: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            status: CheckStatus::Pass,
-            message: message.into(),
-            fix: None,
-        }
+        Self { name: name.into(), status: CheckStatus::Pass, message: message.into(), fix: None }
     }
 
-    fn warn(
-        name: impl Into<String>,
-        message: impl Into<String>,
-        fix: impl Into<String>,
-    ) -> Self {
+    fn warn(name: impl Into<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             status: CheckStatus::Warn,
@@ -72,11 +63,7 @@ impl DoctorCheck {
         }
     }
 
-    fn fail(
-        name: impl Into<String>,
-        message: impl Into<String>,
-        fix: impl Into<String>,
-    ) -> Self {
+    fn fail(name: impl Into<String>, message: impl Into<String>, fix: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             status: CheckStatus::Fail,
@@ -155,26 +142,14 @@ impl DoctorReport {
 /// wrapper is reserved for unexpected I/O errors that prevent inspection from
 /// completing entirely.
 pub fn run_doctor(store: &Path) -> Result<DoctorReport> {
-    let mut checks = Vec::new();
-
-    // 1. Store directory exists
-    checks.push(check_store_exists(store));
-
-    // 2. Store directory writable
-    checks.push(check_store_writable(store));
-
-    // 3. Disk free space
-    checks.push(check_disk_space(store));
-
-    // 4. SQLite WAL mode
-    checks.push(check_sqlite_wal(store));
-
-    // 5. modeld version
-    checks.push(check_version());
-
-    // 6. Platform capabilities
-    let caps_checks = check_platform_capabilities(store);
-    checks.extend(caps_checks);
+    let mut checks = vec![
+        check_store_exists(store),
+        check_store_writable(store),
+        check_disk_space(store),
+        check_sqlite_wal(store),
+        check_version(),
+    ];
+    checks.extend(check_platform_capabilities(store));
 
     // Windows-only checks
     #[cfg(windows)]
@@ -185,16 +160,9 @@ pub fn run_doctor(store: &Path) -> Result<DoctorReport> {
     let version = env!("CARGO_PKG_VERSION").to_string();
     // Build target is set by build.rs via GIT_HASH/BUILD_TARGET; fall back to
     // compile-time cfg if build.rs is not present.
-    let build_target = option_env!("BUILD_TARGET")
-        .unwrap_or(std::env::consts::ARCH)
-        .to_string();
+    let build_target = option_env!("BUILD_TARGET").unwrap_or(std::env::consts::ARCH).to_string();
 
-    Ok(DoctorReport {
-        checks,
-        store_path: store.to_path_buf(),
-        version,
-        build_target,
-    })
+    Ok(DoctorReport { checks, store_path: store.to_path_buf(), version, build_target })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -264,10 +232,7 @@ fn check_disk_space(store: &Path) -> DoctorCheck {
                     "Consider freeing disk space or using a different store location",
                 )
             } else {
-                DoctorCheck::pass(
-                    "disk.space",
-                    format!("{:.2} GiB free", free_gib),
-                )
+                DoctorCheck::pass("disk.space", format!("{:.2} GiB free", free_gib))
             }
         }
         Err(e) => DoctorCheck::warn(
@@ -319,21 +284,15 @@ fn open_sqlite_wal_probe(path: &Path) -> anyhow::Result<()> {
 fn check_version() -> DoctorCheck {
     let version = env!("CARGO_PKG_VERSION");
     let git_hash = option_env!("GIT_HASH").unwrap_or("unknown");
-    DoctorCheck::pass(
-        "version",
-        format!("modeld {} (git: {})", version, git_hash),
-    )
+    DoctorCheck::pass("version", format!("modeld {} (git: {})", version, git_hash))
 }
 
+#[allow(clippy::vec_init_then_push)]
 fn check_platform_capabilities(store: &Path) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
 
     // Use a directory that is likely to exist for probing
-    let probe_path = if store.is_dir() {
-        store.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    };
+    let probe_path = if store.is_dir() { store.to_path_buf() } else { std::env::temp_dir() };
 
     let caps = detect_capabilities(&probe_path);
 
@@ -345,10 +304,7 @@ fn check_platform_capabilities(store: &Path) -> Vec<DoctorCheck> {
 
     // Hardlink support
     if caps.supports_hardlink {
-        checks.push(DoctorCheck::pass(
-            "platform.hardlink",
-            "hardlink support available",
-        ));
+        checks.push(DoctorCheck::pass("platform.hardlink", "hardlink support available"));
     } else {
         checks.push(DoctorCheck::warn(
             "platform.hardlink",
@@ -365,6 +321,7 @@ fn check_platform_capabilities(store: &Path) -> Vec<DoctorCheck> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(windows)]
+#[allow(clippy::vec_init_then_push)]
 fn check_windows_specific(store: &Path) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
 
@@ -420,9 +377,7 @@ fn check_windows_specific(store: &Path) -> Vec<DoctorCheck> {
 #[cfg(windows)]
 fn check_windows_os_version() -> DoctorCheck {
     // Use `ver` command (always available on Windows) to get the OS version.
-    let output = std::process::Command::new("cmd")
-        .args(["/C", "ver"])
-        .output();
+    let output = std::process::Command::new("cmd").args(["/C", "ver"]).output();
 
     match output {
         Ok(o) if o.status.success() => {
@@ -460,11 +415,7 @@ fn free_space_bytes(path: &Path) -> anyhow::Result<u64> {
     use std::os::windows::ffi::OsStrExt;
 
     // Use GetDiskFreeSpaceExW
-    let wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
 
     extern "system" {
         fn GetDiskFreeSpaceExW(
@@ -480,12 +431,7 @@ fn free_space_bytes(path: &Path) -> anyhow::Result<u64> {
     let mut total_free: u64 = 0;
 
     let result = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut free_available,
-            &mut total,
-            &mut total_free,
-        )
+        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_available, &mut total, &mut total_free)
     };
 
     if result != 0 {

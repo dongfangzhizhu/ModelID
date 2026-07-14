@@ -36,9 +36,7 @@ pub async fn list_downloads(State(state): State<AppState>) -> ApiResult<Json<Dow
             let name = d
                 .filename
                 .clone()
-                .or_else(|| {
-                    d.source_url.split('/').last().map(|s| s.to_string())
-                })
+                .or_else(|| d.source_url.split('/').next_back().map(|s| s.to_string()))
                 .unwrap_or_else(|| format!("download-{}", d.id));
 
             DownloadItem {

@@ -40,15 +40,8 @@ pub async fn get_settings(State(state): State<AppState>) -> ApiResult<Json<UiSet
             watch_enabled: false,
             incremental_scan: true,
         },
-        gc: GcSettings {
-            quarantine_days: 30,
-            confirm_before_gc: true,
-        },
-        ui: UiSectionSettings {
-            port: 8234,
-            host: "127.0.0.1".to_string(),
-            open_browser: false,
-        },
+        gc: GcSettings { quarantine_days: 30, confirm_before_gc: true },
+        ui: UiSectionSettings { port: 8234, host: "127.0.0.1".to_string(), open_browser: false },
     }))
 }
 

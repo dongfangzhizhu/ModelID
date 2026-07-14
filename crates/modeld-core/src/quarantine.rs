@@ -217,6 +217,7 @@ impl QuarantineManager {
     ///
     /// On Windows, CAS objects are marked read-only.  `remove_file` on a
     /// read-only file returns `PermissionDenied`, so we clear the flag first.
+    #[allow(clippy::permissions_set_readonly_false)]
     pub fn delete_permanent(&self, quarantine_path: &Path) -> Result<()> {
         let meta_path = self.meta_path_for(quarantine_path);
 

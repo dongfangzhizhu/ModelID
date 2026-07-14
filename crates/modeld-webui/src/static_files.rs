@@ -28,10 +28,7 @@ fn serve_asset(path: &str) -> Response {
     match Assets::get(path) {
         Some(content) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            (
-                [(header::CONTENT_TYPE, mime.as_ref().to_string())],
-                content.data.to_vec(),
-            )
+            ([(header::CONTENT_TYPE, mime.as_ref().to_string())], content.data.to_vec())
                 .into_response()
         }
         // SPA fallback: return index.html for unknown paths (hash router handles client-side routing)

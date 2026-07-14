@@ -114,7 +114,9 @@ impl Downloader {
 
     pub fn with_hf_base_url(mut self, base: impl Into<String>) -> Self {
         let mut b = base.into();
-        while b.ends_with('/') { b.pop(); }
+        while b.ends_with('/') {
+            b.pop();
+        }
         self.hf_base_url = b;
         self
     }
@@ -217,8 +219,8 @@ impl Downloader {
             let size = fs::metadata(&cached_path).map(|m| m.len()).unwrap_or(0);
             if let Some(sha256) = &metadata.sha256 {
                 if let Some(mapping) = db.get_blake3_by_sha256(sha256)? {
-                    let blake3 = Blake3Hash::from_hex(&mapping.blake3_hash)
-                        .map_err(|e| anyhow!("{}", e))?;
+                    let blake3 =
+                        Blake3Hash::from_hex(&mapping.blake3_hash).map_err(|e| anyhow!("{}", e))?;
                     return Ok(DownloadResult {
                         blake3_hash: blake3,
                         sha256_hash: Some(sha256.clone()),
@@ -308,10 +310,8 @@ impl Downloader {
         // Step 9: Insert HfCache alias so GC does not immediately orphan this model.
         // Without an alias, alias_count=0 and is_orphan()=true → GC quarantines
         // the freshly-downloaded file on the very next run.
-        let snapshot_str = hf_cache
-            .snapshot_file_path(repo_id, filename, rev)
-            .to_string_lossy()
-            .to_string();
+        let snapshot_str =
+            hf_cache.snapshot_file_path(repo_id, filename, rev).to_string_lossy().to_string();
         if db.get_alias_by_path(&snapshot_str)?.is_none() {
             db.insert_alias(&blake3, &snapshot_str, Frontend::HfCache, AliasType::Symlink)?;
         }
@@ -437,7 +437,9 @@ impl Downloader {
 
         loop {
             let n = reader.read(&mut buf).context("Error reading response body")?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             file.write_all(&buf[..n]).context("Error writing to file")?;
             bytes_done += n as u64;
             if let Some(cb) = progress {
@@ -449,9 +451,8 @@ impl Downloader {
 
         // Verify SHA256 integrity when the expected hash is known
         if let Some(expected) = expected_sha256 {
-            verify_sha256(dest, expected).with_context(|| {
-                format!("SHA256 integrity check failed for {}", dest.display())
-            })?;
+            verify_sha256(dest, expected)
+                .with_context(|| format!("SHA256 integrity check failed for {}", dest.display()))?;
         }
 
         Ok(bytes_done)
@@ -557,16 +558,14 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     let mut buf = [0u8; 65536];
     loop {
         let n = file.read(&mut buf).context("IO error during SHA256")?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     let got = format!("{:x}", hasher.finalize());
     if got != expected.to_lowercase() {
-        return Err(anyhow!(
-            "SHA256 mismatch: expected {}, got {}",
-            expected,
-            got
-        ));
+        return Err(anyhow!("SHA256 mismatch: expected {}, got {}", expected, got));
     }
     Ok(())
 }
@@ -641,11 +640,8 @@ mod tests {
         f.write_all(b"hello").unwrap();
         f.flush().unwrap();
         // SHA256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-        verify_sha256(
-            f.path(),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-        )
-        .expect("should pass");
+        verify_sha256(f.path(), "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+            .expect("should pass");
     }
 
     #[test]

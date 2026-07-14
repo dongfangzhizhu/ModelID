@@ -18,9 +18,7 @@ use std::path::Path;
 /// Parse an RFC-3339 string into UTC DateTime.  Falls back to `Utc::now()` on
 /// parse error so that a single malformed row does not crash the whole query.
 fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+    DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now())
 }
 
 /// Parse a BLAKE3 hex string into `Blake3Hash`, returning a rusqlite error on
@@ -32,23 +30,20 @@ fn parse_blake3(s: &str) -> std::result::Result<Blake3Hash, rusqlite::Error> {
 
 /// Parse a `Frontend` discriminant, returning a rusqlite error on unknown values.
 fn parse_frontend(s: &str) -> std::result::Result<Frontend, rusqlite::Error> {
-    Frontend::from_db_value(s).ok_or_else(|| {
-        rusqlite::Error::InvalidParameterName(format!("unknown frontend: {}", s))
-    })
+    Frontend::from_db_value(s)
+        .ok_or_else(|| rusqlite::Error::InvalidParameterName(format!("unknown frontend: {}", s)))
 }
 
 /// Parse an `AliasType` discriminant, returning a rusqlite error on unknown values.
 fn parse_alias_type(s: &str) -> std::result::Result<AliasType, rusqlite::Error> {
-    AliasType::from_db_value(s).ok_or_else(|| {
-        rusqlite::Error::InvalidParameterName(format!("unknown alias_type: {}", s))
-    })
+    AliasType::from_db_value(s)
+        .ok_or_else(|| rusqlite::Error::InvalidParameterName(format!("unknown alias_type: {}", s)))
 }
 
 /// Parse a `TransactionStatus` discriminant.
 fn parse_tx_status(s: &str) -> std::result::Result<TransactionStatus, rusqlite::Error> {
-    TransactionStatus::from_db_value(s).ok_or_else(|| {
-        rusqlite::Error::InvalidParameterName(format!("unknown tx_status: {}", s))
-    })
+    TransactionStatus::from_db_value(s)
+        .ok_or_else(|| rusqlite::Error::InvalidParameterName(format!("unknown tx_status: {}", s)))
 }
 
 /// Model metadata stored in database (v3 schema)
@@ -304,10 +299,8 @@ impl Database {
         // Temporarily disable FK enforcement so we can create tables in any order.
         self.conn.pragma_update(None, "foreign_keys", "OFF")?;
 
-        let current_version: i64 = self
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap_or(0);
+        let current_version: i64 =
+            self.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or(0);
 
         if current_version == 0 {
             // ── Fresh database: create schema at v3 directly ─────────────────
@@ -592,10 +585,8 @@ impl Database {
 
         // ── Migration v2 → v3 ────────────────────────────────────────────────
         // Re-check after v1→v2 may have just set it to 2.
-        let current_version: i64 = self
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap_or(0);
+        let current_version: i64 =
+            self.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or(0);
 
         if current_version == 2 {
             self.backup_before_migration(2)?;
@@ -643,10 +634,8 @@ impl Database {
         // ── Migration v3 → v4 ────────────────────────────────────────────────
         // Adds the path_index table for incremental scanning support.
         // Re-check version in case v2→v3 migration just ran.
-        let current_version: i64 = self
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))
-            .unwrap_or(0);
+        let current_version: i64 =
+            self.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap_or(0);
 
         if current_version == 3 {
             self.backup_before_migration(3)?;
@@ -682,7 +671,6 @@ impl Database {
         // Re-enable FK enforcement
         self.conn.pragma_update(None, "foreign_keys", "ON")?;
 
-
         Ok(())
     }
 
@@ -709,18 +697,11 @@ impl Database {
 
         // `VACUUM INTO` creates a compact, self-contained copy of the database
         // without requiring the file to be closed — safe on Windows and Unix.
-        let backup_sql = format!(
-            "VACUUM INTO '{}'",
-            backup_path.to_string_lossy().replace('\'', "''")
-        );
+        let backup_sql =
+            format!("VACUUM INTO '{}'", backup_path.to_string_lossy().replace('\'', "''"));
         self.conn
             .execute_batch(&backup_sql)
-            .with_context(|| {
-                format!(
-                    "Failed to backup database to {}",
-                    backup_path.display()
-                )
-            })?;
+            .with_context(|| format!("Failed to backup database to {}", backup_path.display()))?;
 
         Ok(())
     }
@@ -927,7 +908,7 @@ impl Database {
         download_url: Option<&str>,
         license: Option<&str>,
         downloaded_by: Option<&str>,
-        downloaded_at: Option<&str>,  // RFC-3339 string or NULL
+        downloaded_at: Option<&str>, // RFC-3339 string or NULL
         original_filename: Option<&str>,
         model_card_url: Option<&str>,
     ) -> Result<()> {
@@ -987,9 +968,8 @@ impl Database {
 
     /// Return all tags attached to a model, ordered alphabetically.
     pub fn get_tags(&self, hash: &Blake3Hash) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT tag FROM tags WHERE model_hash = ?1 ORDER BY tag ASC",
-        )?;
+        let mut stmt =
+            self.conn.prepare("SELECT tag FROM tags WHERE model_hash = ?1 ORDER BY tag ASC")?;
         let tags = stmt
             .query_map(params![hash.as_hex()], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
@@ -1335,10 +1315,9 @@ impl Database {
     /// Delete all aliases for a model (call after quarantine so aliases
     /// no longer point at a non-existent file).
     pub fn delete_aliases_for_model(&mut self, hash: &Blake3Hash) -> Result<usize> {
-        let n = self.conn.execute(
-            "DELETE FROM aliases WHERE model_hash = ?1",
-            params![hash.as_hex()],
-        )?;
+        let n = self
+            .conn
+            .execute("DELETE FROM aliases WHERE model_hash = ?1", params![hash.as_hex()])?;
         Ok(n)
     }
 
@@ -1513,7 +1492,6 @@ impl Database {
 
         Ok(rows)
     }
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2075,20 +2053,16 @@ impl Database {
 
     /// Return all (model_hash, tag) pairs, ordered by tag then hash.
     pub fn list_all_tags_per_model(&self) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT model_hash, tag FROM tags ORDER BY tag, model_hash",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let mut stmt =
+            self.conn.prepare("SELECT model_hash, tag FROM tags ORDER BY tag, model_hash")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
     /// Return all tags for a specific model.
     pub fn get_tags_for_model(&self, model_hash: &str) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT tag FROM tags WHERE model_hash = ?1 ORDER BY tag",
-        )?;
+        let mut stmt =
+            self.conn.prepare("SELECT tag FROM tags WHERE model_hash = ?1 ORDER BY tag")?;
         let rows = stmt.query_map(rusqlite::params![model_hash], |r| r.get::<_, String>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
@@ -2125,9 +2099,7 @@ impl Database {
     ///
     /// Returns `"ok"` when the database is healthy.
     pub fn integrity_check(&self) -> Result<String> {
-        let result: String = self
-            .conn
-            .query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        let result: String = self.conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
         Ok(result)
     }
 
@@ -2144,7 +2116,9 @@ impl Database {
     /// Returns a `HashMap<path_string, FileIndexEntry>`.  The scanner compares
     /// each file's current (size, mtime, inode) against the cached entry and
     /// skips re-hashing when all three are unchanged.
-    pub fn get_all_indexed_paths(&self) -> Result<std::collections::HashMap<String, FileIndexEntry>> {
+    pub fn get_all_indexed_paths(
+        &self,
+    ) -> Result<std::collections::HashMap<String, FileIndexEntry>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT path, blake3_hash, size_bytes, mtime, inode, device_id
@@ -2167,10 +2141,7 @@ impl Database {
         for entry in entries {
             let (path, hash_hex, size, mtime, inode, device_id) = entry?;
             if let Ok(hash) = Blake3Hash::from_hex(&hash_hex) {
-                map.insert(
-                    path,
-                    FileIndexEntry { hash, size, mtime, inode, device_id },
-                );
+                map.insert(path, FileIndexEntry { hash, size, mtime, inode, device_id });
             }
         }
         Ok(map)

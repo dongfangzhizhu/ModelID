@@ -19,6 +19,8 @@ pub mod server;
 
 pub use auth::{check_auth, check_ip, AuthDecision};
 pub use config::{AuthConfig, NetworkConfig, ProxyConfig};
-pub use discovery::{discover, discover_services, DiscoveredServer, DiscoveredService, MdnsAnnouncer};
+pub use discovery::{
+    discover, discover_services, DiscoveredServer, DiscoveredService, MdnsAnnouncer,
+};
 pub use range::parse_range;
 pub use server::{ProxyServer, ServerStats};

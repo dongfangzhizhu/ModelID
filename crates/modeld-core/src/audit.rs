@@ -80,13 +80,10 @@ impl AuditLogger {
 
         let line = serde_json::to_string(entry)?;
 
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to open audit log {}: {}", self.log_path.display(), e)
-            })?;
+        let mut file =
+            std::fs::OpenOptions::new().create(true).append(true).open(&self.log_path).map_err(
+                |e| anyhow::anyhow!("Failed to open audit log {}: {}", self.log_path.display(), e),
+            )?;
 
         writeln!(file, "{}", line)?;
         Ok(())

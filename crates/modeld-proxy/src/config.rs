@@ -51,6 +51,7 @@ pub struct AuthConfig {
 /// `[proxy.network]` — IP allow/deny lists.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct NetworkConfig {
     /// Whether unauthenticated (anonymous) access is permitted at all.
     pub allow_anonymous: bool,
@@ -64,20 +65,11 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             port: 8234,
-            bind_address: "0.0.0.0".to_string(),
+            bind_address: "127.0.0.1".to_string(),
             store_path: PathBuf::from(".modeld"),
             auth: AuthConfig::default(),
             network: NetworkConfig::default(),
         }
-    }
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        // Secure default: anonymous access is disabled.
-        // Enable it explicitly via `--allow-anonymous` on the CLI or via
-        // `[proxy.network] allow_anonymous = true` in modeld.toml.
-        Self { allow_anonymous: false, allowed_ips: Vec::new(), denied_ips: Vec::new() }
     }
 }
 
@@ -187,7 +179,7 @@ mod tests {
     fn test_default_port_is_8234() {
         let cfg = ProxyConfig::default();
         assert_eq!(cfg.port, 8234);
-        assert_eq!(cfg.bind_address, "0.0.0.0");
+        assert_eq!(cfg.bind_address, "127.0.0.1");
         assert!(!cfg.auth.require_token);
         // Secure default: anonymous access is off
         assert!(!cfg.network.allow_anonymous);
@@ -243,7 +235,7 @@ denied_ips = ["10.0.0.5"]
 
         let cfg = ProxyConfig::load(f.path()).unwrap();
         assert_eq!(cfg.port, 7777);
-        assert_eq!(cfg.bind_address, "0.0.0.0"); // default
+        assert_eq!(cfg.bind_address, "127.0.0.1"); // default
         assert!(!cfg.auth.require_token); // default
     }
 

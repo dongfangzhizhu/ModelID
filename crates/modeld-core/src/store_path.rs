@@ -64,10 +64,7 @@ pub fn default_store_path() -> PathBuf {
     {
         // ~/Library/Application Support/modeld
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("modeld");
+            return PathBuf::from(home).join("Library").join("Application Support").join("modeld");
         }
         PathBuf::from("/tmp/modeld")
     }
@@ -97,9 +94,8 @@ fn read_store_path_from_toml(store_path: &Path) -> Result<PathBuf> {
     let contents = std::fs::read_to_string(&toml_path)
         .with_context(|| format!("Failed to read {}", toml_path.display()))?;
 
-    let table: toml::Table = contents
-        .parse()
-        .with_context(|| format!("Failed to parse {}", toml_path.display()))?;
+    let table: toml::Table =
+        contents.parse().with_context(|| format!("Failed to parse {}", toml_path.display()))?;
 
     if let Some(store_section) = table.get("store").and_then(|v| v.as_table()) {
         if let Some(path_val) = store_section.get("path").and_then(|v| v.as_str()) {
@@ -177,10 +173,8 @@ mod tests {
         let toml_store = tmp.path().join("toml_store");
 
         // Write a minimal modeld.toml into tmp (which acts as the "default" store)
-        let toml_content = format!(
-            "[store]\npath = \"{}\"\n",
-            toml_store.to_str().unwrap().replace('\\', "\\\\")
-        );
+        let toml_content =
+            format!("[store]\npath = \"{}\"\n", toml_store.to_str().unwrap().replace('\\', "\\\\"));
         let toml_path = tmp.path().join("modeld.toml");
         let mut f = std::fs::File::create(&toml_path).unwrap();
         f.write_all(toml_content.as_bytes()).unwrap();

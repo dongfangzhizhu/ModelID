@@ -142,11 +142,7 @@ pub struct GcEngine<'a> {
 
 impl<'a> GcEngine<'a> {
     pub fn new(db: &'a mut Database, store_path: &std::path::Path) -> Self {
-        Self {
-            db,
-            cas: CasStore::new(store_path),
-            quarantine: QuarantineManager::new(store_path),
-        }
+        Self { db, cas: CasStore::new(store_path), quarantine: QuarantineManager::new(store_path) }
     }
 
     /// List all models with their protection status (single batch query).
@@ -209,8 +205,7 @@ impl<'a> GcEngine<'a> {
         let entries = self.quarantine.list().unwrap_or_default();
         let expired: Vec<_> = entries.iter().filter(|e| e.days_remaining.is_none()).collect();
         preview.expired_quarantine_count = expired.len();
-        preview.expired_quarantine_bytes =
-            expired.iter().map(|e| e.meta.size_bytes as i64).sum();
+        preview.expired_quarantine_bytes = expired.iter().map(|e| e.meta.size_bytes as i64).sum();
 
         Ok(preview)
     }
@@ -232,7 +227,8 @@ impl<'a> GcEngine<'a> {
                 continue;
             }
             // Pinned or Unknown → skip conservatively (no GC)
-            if c.is_pinned() || matches!(c.ref_status, RefStatus::Unknown | RefStatus::RecentlyUsed) {
+            if c.is_pinned() || matches!(c.ref_status, RefStatus::Unknown | RefStatus::RecentlyUsed)
+            {
                 result.skipped_protected.push(hash_prefix);
                 continue;
             }
@@ -269,9 +265,7 @@ impl<'a> GcEngine<'a> {
                             }
 
                             // ── Delete dangling aliases ──────────────────────
-                            if let Err(e) =
-                                self.db.delete_aliases_for_model(&c.model.blake3_hash)
-                            {
+                            if let Err(e) = self.db.delete_aliases_for_model(&c.model.blake3_hash) {
                                 eprintln!(
                                     "{}",
                                     crate::i18n::tf(
@@ -289,10 +283,7 @@ impl<'a> GcEngine<'a> {
                                 "{}",
                                 crate::i18n::tf(
                                     "warn.gc_quarantine_failed",
-                                    &[
-                                        ("hash", &&hash_str[..16]),
-                                        ("error", &format!("{:#}", e)),
-                                    ],
+                                    &[("hash", &&hash_str[..16]), ("error", &format!("{:#}", e)),],
                                 )
                             );
                         }
@@ -317,7 +308,11 @@ impl<'a> GcEngine<'a> {
     /// - `{store}/tmp/cas_staging/*.tmp` older than `staging_max_age_hours`
     ///
     /// Returns the number of files removed.
-    pub fn cleanup_tmp(store_path: &std::path::Path, part_max_age_hours: u64, staging_max_age_hours: u64) -> Result<usize> {
+    pub fn cleanup_tmp(
+        store_path: &std::path::Path,
+        part_max_age_hours: u64,
+        staging_max_age_hours: u64,
+    ) -> Result<usize> {
         let mut removed = 0usize;
         let now = std::time::SystemTime::now();
 
@@ -331,7 +326,8 @@ impl<'a> GcEngine<'a> {
             let mut count = 0usize;
             for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
                 let path = entry.path();
-                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let name =
+                    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 if !name.ends_with(ext) {
                     continue;
                 }
@@ -342,10 +338,8 @@ impl<'a> GcEngine<'a> {
                     .and_then(|mtime| now.duration_since(mtime).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if age_secs >= max_age_secs {
-                    if std::fs::remove_file(&path).is_ok() {
-                        count += 1;
-                    }
+                if age_secs >= max_age_secs && std::fs::remove_file(&path).is_ok() {
+                    count += 1;
                 }
             }
             Ok(count)
@@ -473,5 +467,144 @@ mod tests {
         // quarantined_at should now be set
         let model = db.get_model(&hash).unwrap().unwrap();
         assert!(model.quarantined_at.is_some(), "quarantined_at must be written back to DB");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Property-based tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    use crate::db::{AliasType, Frontend};
+    use crate::refs::list_orphans;
+    use proptest::prelude::*;
+
+    /// One of a small number of reference states a synthetic model can be
+    /// placed in for the purposes of this property test.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RefState {
+        /// No aliases, no workflow refs, not pinned — a true orphan.
+        Orphan,
+        /// Has at least one alias, no workflow refs — soft-protected.
+        Aliased,
+        /// Pinned by the user — never GC'd regardless of refs.
+        Pinned,
+        /// Referenced by a workflow — hard-protected.
+        WorkflowRef,
+    }
+
+    fn ref_state_strategy() -> impl Strategy<Value = RefState> {
+        prop_oneof![
+            Just(RefState::Orphan),
+            Just(RefState::Aliased),
+            Just(RefState::Pinned),
+            Just(RefState::WorkflowRef),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(30))]
+
+        /// Property 5: GC preview quarantine set matches orphan detection.
+        ///
+        /// For any database state containing a mix of orphaned models (no
+        /// aliases, no workflow refs, not pinned) and referenced models
+        /// (aliased, pinned, or workflow-referenced), the `would_quarantine`
+        /// list produced by `GcEngine::preview` must contain exactly the set
+        /// of models that the independent orphan-detection code path
+        /// (`refs::list_orphans`, which the WebUI/CLI `models`/`refs` views
+        /// rely on for `is_orphan` classification) reports as orphans — and
+        /// must exclude every referenced/pinned model. This guards against
+        /// the two orphan-detection code paths (GC preview vs. models
+        /// listing) silently diverging.
+        ///
+        /// **Validates: Requirements 2.5**
+        #[test]
+        fn prop_gc_preview_would_quarantine_matches_orphan_detection(
+            states in prop::collection::vec(ref_state_strategy(), 0..12)
+        ) {
+            let tmp = TempDir::new().unwrap();
+            let db_file = NamedTempFile::new().unwrap();
+            let mut db = Database::open(db_file.path()).unwrap();
+
+            let mut orphan_hashes: Vec<Blake3Hash> = Vec::new();
+
+            for (i, state) in states.iter().enumerate() {
+                // Distinct, valid 64-hex-char hash per model. The index is
+                // encoded in the leading 16 hex chars (rather than the
+                // trailing digits) so that `hash_prefix` (first 16 hex
+                // chars, used by GcPreviewItem/preview grouping) is unique
+                // per model — a trailing-digit encoding would collide on
+                // the prefix for i in the same order of magnitude.
+                let hash =
+                    Blake3Hash::from_hex(&format!("{:016x}{:048x}", i + 1, 0u64)).unwrap();
+                db.insert_or_update_model(&hash, 1000 + i as i64, None, None, None, None)
+                    .unwrap();
+
+                match state {
+                    RefState::Orphan => {
+                        orphan_hashes.push(hash.clone());
+                    }
+                    RefState::Aliased => {
+                        db.insert_alias(
+                            &hash,
+                            &format!("/models/aliased_{i}.safetensors"),
+                            Frontend::User,
+                            AliasType::Original,
+                        )
+                        .unwrap();
+                    }
+                    RefState::Pinned => {
+                        db.pin_model(&hash, true).unwrap();
+                    }
+                    RefState::WorkflowRef => {
+                        let wf_id = db
+                            .upsert_workflow(&format!("/workflows/wf_{i}.json"), None, None)
+                            .unwrap();
+                        db.insert_workflow_ref(
+                            wf_id,
+                            Some(hash.as_hex()),
+                            "checkpoint",
+                            &format!("model_{i}.safetensors"),
+                            None,
+                            true,
+                        )
+                        .unwrap();
+                        db.update_workflow_ref_count(wf_id).unwrap();
+                    }
+                }
+            }
+
+            // Path A: GC preview's own orphan classification.
+            let gc = GcEngine::new(&mut db, tmp.path());
+            let preview = gc.preview().unwrap();
+            let preview_prefixes: std::collections::HashSet<String> = preview
+                .would_quarantine
+                .iter()
+                .map(|item| item.hash_prefix.clone())
+                .collect();
+
+            // Path B: the independent orphan-detection function used
+            // elsewhere (e.g. by the `refs`/`models` views) for `is_orphan`.
+            let orphans_from_refs = list_orphans(&db).unwrap();
+            let refs_prefixes: std::collections::HashSet<String> = orphans_from_refs
+                .iter()
+                .map(|h| h.as_hex()[..16].to_string())
+                .collect();
+
+            // The two independent code paths must agree exactly.
+            prop_assert_eq!(
+                preview_prefixes.clone(),
+                refs_prefixes.clone(),
+                "GC preview would_quarantine set must match refs::list_orphans exactly"
+            );
+
+            // `would_quarantine` must contain exactly the synthetic orphan
+            // models and no referenced/pinned model.
+            let expected_prefixes: std::collections::HashSet<String> = orphan_hashes
+                .iter()
+                .map(|h| h.as_hex()[..16].to_string())
+                .collect();
+            prop_assert_eq!(preview_prefixes.len(), orphan_hashes.len());
+            prop_assert_eq!(preview_prefixes, expected_prefixes);
+        }
     }
 }

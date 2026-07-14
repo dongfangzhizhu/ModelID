@@ -25,11 +25,7 @@ pub struct WebUiConfig {
 
 impl Default for WebUiConfig {
     fn default() -> Self {
-        Self {
-            host: "127.0.0.1".to_string(),
-            port: 8234,
-            open_browser: false,
-        }
+        Self { host: "127.0.0.1".to_string(), port: 8234, open_browser: false }
     }
 }
 
@@ -38,10 +34,7 @@ impl Default for WebUiConfig {
 /// via firewall if needed in production).
 async fn metrics_handler(State(state): State<AppState>) -> Response {
     let body = state.metrics.render_prometheus();
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        body,
-    )
+    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], body)
         .into_response()
 }
 
@@ -51,18 +44,36 @@ pub async fn run(state: AppState, config: WebUiConfig) -> Result<()> {
     let protected_api = api::routes()
         .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer_token));
 
+    // WebSocket also requires the same bearer-token middleware.
+    let protected_ws = axum::Router::new()
+        .route("/ws", get(ws_handler))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer_token));
+
     let app = Router::new()
         // Prometheus metrics (not behind auth — restrict at network level)
         .route("/metrics", get(metrics_handler))
         // Protected REST API routes (bearer token when auth_token is set)
         .nest("/api/v1", protected_api)
-        // WebSocket endpoint
-        .route("/ws", get(ws_handler))
+        // Protected WebSocket endpoint
+        .merge(protected_ws)
         // Static file fallback (serves embedded UI)
         .fallback(static_handler)
         // Provide shared state to ALL routes
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::very_permissive()
+                .allow_methods(vec![
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::CONTENT_TYPE,
+                ]),
+        )
         .layer(CompressionLayer::new());
 
     let addr = format!("{}:{}", config.host, config.port);

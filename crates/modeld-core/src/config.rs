@@ -38,10 +38,18 @@ pub struct ServeConfig {
 }
 
 impl ServeConfig {
-    fn default_host() -> String { "127.0.0.1".to_string() }
-    fn default_port() -> u16 { 8234 }
-    fn default_webui() -> bool { true }
-    fn default_proxy() -> bool { true }
+    fn default_host() -> String {
+        "127.0.0.1".to_string()
+    }
+    fn default_port() -> u16 {
+        8234
+    }
+    fn default_webui() -> bool {
+        true
+    }
+    fn default_proxy() -> bool {
+        true
+    }
 }
 
 impl Default for ServeConfig {
@@ -67,16 +75,17 @@ pub struct DedupConfig {
 }
 
 impl DedupConfig {
-    fn default_strategy() -> String { "hardlink".to_string() }
-    fn default_min_size() -> u64 { 1_048_576 }
+    fn default_strategy() -> String {
+        "hardlink".to_string()
+    }
+    fn default_min_size() -> u64 {
+        1_048_576
+    }
 }
 
 impl Default for DedupConfig {
     fn default() -> Self {
-        Self {
-            strategy: Self::default_strategy(),
-            min_size_bytes: Self::default_min_size(),
-        }
+        Self { strategy: Self::default_strategy(), min_size_bytes: Self::default_min_size() }
     }
 }
 
@@ -92,15 +101,14 @@ pub struct GcConfig {
 }
 
 impl GcConfig {
-    fn default_quarantine_ttl_days() -> u32 { 30 }
+    fn default_quarantine_ttl_days() -> u32 {
+        30
+    }
 }
 
 impl Default for GcConfig {
     fn default() -> Self {
-        Self {
-            quarantine_ttl_days: Self::default_quarantine_ttl_days(),
-            auto_gc: false,
-        }
+        Self { quarantine_ttl_days: Self::default_quarantine_ttl_days(), auto_gc: false }
     }
 }
 
@@ -168,8 +176,7 @@ pub fn save_config(store_path: &Path, config: &ModeldConfig) -> Result<()> {
 
     let toml_path = store_path.join("modeld.toml");
 
-    let contents = toml::to_string_pretty(config)
-        .context("Failed to serialize config to TOML")?;
+    let contents = toml::to_string_pretty(config).context("Failed to serialize config to TOML")?;
 
     std::fs::write(&toml_path, contents)
         .with_context(|| format!("Failed to write config file: {}", toml_path.display()))?;
@@ -203,15 +210,11 @@ mod tests {
     fn test_partial_toml_fills_defaults() {
         let tmp = TempDir::new().unwrap();
         // Write only the [serve] section
-        std::fs::write(
-            tmp.path().join("modeld.toml"),
-            "[serve]\nport = 9000\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("modeld.toml"), "[serve]\nport = 9000\n").unwrap();
 
         let config = load_config(tmp.path()).unwrap();
         assert_eq!(config.serve.port, 9000);
-        assert_eq!(config.serve.host, "127.0.0.1");    // default preserved
+        assert_eq!(config.serve.host, "127.0.0.1"); // default preserved
         assert_eq!(config.gc.quarantine_ttl_days, 30); // sibling section default
     }
 

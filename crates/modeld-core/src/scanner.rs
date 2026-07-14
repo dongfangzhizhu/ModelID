@@ -46,12 +46,7 @@ pub struct ScanOptions {
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self {
-            incremental: true,
-            full: false,
-            exclude_globs: Vec::new(),
-            follow_symlinks: false,
-        }
+        Self { incremental: true, full: false, exclude_globs: Vec::new(), follow_symlinks: false }
     }
 }
 
@@ -153,10 +148,8 @@ impl Scanner {
         // (path, size, mtime_secs, inode, device_id)
         let mut to_process: Vec<(PathBuf, u64, i64, i64, i64)> = Vec::new();
 
-        for entry in WalkDir::new(root)
-            .follow_links(opts.follow_symlinks)
-            .into_iter()
-            .filter_entry(|e| {
+        for entry in
+            WalkDir::new(root).follow_links(opts.follow_symlinks).into_iter().filter_entry(|e| {
                 let path = e.path();
 
                 // ── Symlink cycle detection for directories ──────────────────
@@ -243,9 +236,7 @@ impl Scanner {
                     if let Some(entry) = self.preindexed.get(path_str.as_ref()) {
                         let size_match = entry.size == *size as i64;
                         // mtime check: skip if both are non-zero and match
-                        let mtime_match = *mtime == 0
-                            || entry.mtime == 0
-                            || entry.mtime == *mtime;
+                        let mtime_match = *mtime == 0 || entry.mtime == 0 || entry.mtime == *mtime;
                         // inode check: skip if both are non-zero and match
                         let inode_match = *inode == 0
                             || entry.inode == 0
@@ -304,10 +295,7 @@ impl Scanner {
                 if matches!(name, "node_modules" | "venv" | "__pycache__") {
                     return true;
                 }
-                if name.starts_with('.')
-                    && !name.starts_with(".tmp")
-                    && name != "."
-                    && name != ".."
+                if name.starts_with('.') && !name.starts_with(".tmp") && name != "." && name != ".."
                 {
                     return true;
                 }
@@ -406,10 +394,7 @@ fn get_file_id(_path: &Path, meta: &std::fs::Metadata) -> (i64, i64) {
 }
 
 #[cfg(unix)]
-fn get_dir_id_impl(
-    _path: &Path,
-    meta: &std::fs::Metadata,
-) -> Option<(u64, u64)> {
+fn get_dir_id_impl(_path: &Path, meta: &std::fs::Metadata) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     Some((meta.dev(), meta.ino()))
 }
@@ -745,10 +730,8 @@ mod tests {
         create_test_file(tmp.path(), "model.safetensors", b"model");
         create_test_file(&store, "cas_object.safetensors", b"cas");
 
-        let results = Scanner::new()
-            .with_excluded_dirs(vec![store])
-            .scan(tmp.path(), |_, _| {})
-            .unwrap();
+        let results =
+            Scanner::new().with_excluded_dirs(vec![store]).scan(tmp.path(), |_, _| {}).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].path.file_name().unwrap() == "model.safetensors");
@@ -760,12 +743,8 @@ mod tests {
         create_test_file(tmp.path(), "model.safetensors", b"model");
         create_test_file(tmp.path(), "cache/model.gguf", b"cached");
 
-        let opts = ScanOptions {
-            exclude_globs: vec!["cache".to_string()],
-            ..Default::default()
-        };
-        let results =
-            Scanner::new().with_scan_options(opts).scan(tmp.path(), |_, _| {}).unwrap();
+        let opts = ScanOptions { exclude_globs: vec!["cache".to_string()], ..Default::default() };
+        let results = Scanner::new().with_scan_options(opts).scan(tmp.path(), |_, _| {}).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].path.file_name().unwrap() == "model.safetensors");
     }
@@ -776,12 +755,8 @@ mod tests {
         create_test_file(tmp.path(), "model.safetensors", b"model");
         create_test_file(tmp.path(), "temp/model.gguf", b"temp");
 
-        let opts = ScanOptions {
-            exclude_globs: vec!["temp*".to_string()],
-            ..Default::default()
-        };
-        let results =
-            Scanner::new().with_scan_options(opts).scan(tmp.path(), |_, _| {}).unwrap();
+        let opts = ScanOptions { exclude_globs: vec!["temp*".to_string()], ..Default::default() };
+        let results = Scanner::new().with_scan_options(opts).scan(tmp.path(), |_, _| {}).unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -813,8 +788,8 @@ mod tests {
         assert_eq!(results.len(), 1);
         let f = &results[0];
         assert_eq!(f.size, 12); // "test content"
-        // mtime should be populated (non-zero on most filesystems)
-        // inode should be non-zero on Unix
+                                // mtime should be populated (non-zero on most filesystems)
+                                // inode should be non-zero on Unix
         #[cfg(unix)]
         {
             assert!(f.inode != 0, "inode should be non-zero on Unix");

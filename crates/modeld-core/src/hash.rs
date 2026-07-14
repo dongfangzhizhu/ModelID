@@ -26,7 +26,11 @@ pub struct Blake3Hash(String);
 impl Blake3Hash {
     /// Create from a 64-character lowercase hex string.
     pub fn from_hex(hex: &str) -> Result<Self> {
-        anyhow::ensure!(hex.len() == 64, "BLAKE3 hash must be 64 hex characters, got {}", hex.len());
+        anyhow::ensure!(
+            hex.len() == 64,
+            "BLAKE3 hash must be 64 hex characters, got {}",
+            hex.len()
+        );
         anyhow::ensure!(
             hex.chars().all(|c| c.is_ascii_hexdigit()),
             "Hash must contain only hex characters"
@@ -95,15 +99,13 @@ fn hash_file_small(path: &Path) -> Result<Blake3Hash> {
 /// identical to `b3sum`, `blake3::hash()`, and any other conforming
 /// implementation, regardless of the number of threads used.
 fn hash_file_large(path: &Path) -> Result<Blake3Hash> {
-    let file =
-        File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
 
     // Safety: the file is opened read-only; we do not modify it during hashing.
     // On Linux a concurrent write could theoretically cause SIGBUS — acceptable
     // for the model-dedup use-case where files are not actively written.
-    let mmap = unsafe {
-        Mmap::map(&file).with_context(|| format!("Failed to mmap {}", path.display()))?
-    };
+    let mmap =
+        unsafe { Mmap::map(&file).with_context(|| format!("Failed to mmap {}", path.display()))? };
 
     let mut hasher = Hasher::new();
     // update_rayon() uses Rayon's work-stealing pool to compute the BLAKE3

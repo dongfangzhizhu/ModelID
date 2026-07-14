@@ -51,11 +51,8 @@ async fn main() -> Result<()> {
 
     let (state, _) = modeld_webui::AppState::new(db, args.store, None, None);
 
-    let config = modeld_webui::WebUiConfig {
-        host: args.host,
-        port: args.port,
-        open_browser: args.open,
-    };
+    let config =
+        modeld_webui::WebUiConfig { host: args.host, port: args.port, open_browser: args.open };
 
     modeld_webui::run(state, config).await
 }

@@ -40,11 +40,8 @@ pub struct UnlinkResult {
 /// This operation is safe even if it is interrupted mid-way: if the rename
 /// step fails, the original hardlink/symlink is left untouched and the
 /// temporary file is cleaned up.
-pub fn unlink_path(
-    db: &mut Database,
-    store_path: &Path,
-    path: &Path,
-) -> Result<UnlinkResult> {
+#[allow(clippy::permissions_set_readonly_false)]
+pub fn unlink_path(db: &mut Database, store_path: &Path, path: &Path) -> Result<UnlinkResult> {
     let path_str = path.to_string_lossy().to_string();
 
     // ── Validate ─────────────────────────────────────────────────────────────
@@ -69,22 +66,14 @@ pub fn unlink_path(
         .len();
 
     // ── Copy CAS → temp file in same directory ────────────────────────────
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("Path has no parent directory: {}", path.display()))?;
-    let tmp_path = parent.join(format!(
-        ".modeld_unlink_{}.tmp",
-        alias.model_hash.as_hex()[..16].to_string()
-    ));
+    let parent =
+        path.parent().ok_or_else(|| anyhow!("Path has no parent directory: {}", path.display()))?;
+    let tmp_path = parent.join(format!(".modeld_unlink_{}.tmp", &alias.model_hash.as_hex()[..16]));
 
     // On Windows, CAS files are read-only; fs::copy does not propagate that
     // attribute to the destination, so the copy is writable by default — good.
     std::fs::copy(&cas_path, &tmp_path).with_context(|| {
-        format!(
-            "Failed to copy CAS {} to temp {}",
-            cas_path.display(),
-            tmp_path.display()
-        )
+        format!("Failed to copy CAS {} to temp {}", cas_path.display(), tmp_path.display())
     })?;
 
     // Ensure the destination is writable (CAS copy might have inherited attrs)
@@ -199,8 +188,7 @@ mod tests {
         std::fs::write(&f, b"data").unwrap();
         let hash = hash_file(&f).unwrap();
         db.insert_or_update_model(&hash, 4, None, None, None, None).unwrap();
-        db.insert_alias(&hash, &f.to_string_lossy(), Frontend::User, AliasType::Original)
-            .unwrap();
+        db.insert_alias(&hash, &f.to_string_lossy(), Frontend::User, AliasType::Original).unwrap();
 
         let result = unlink_path(&mut db, tmp.path(), &f);
         assert!(result.is_err(), "should error when alias_type is already Original");

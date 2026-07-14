@@ -67,9 +67,7 @@ impl MdnsAnnouncer {
     /// so that the TXT record lets remote clients verify configuration parity
     /// without exposing credentials.
     pub fn new_with_token(port: u16, token: Option<&str>) -> Self {
-        let fingerprint = token
-            .map(|t| hex_sha256(t))
-            .unwrap_or_else(|| "none".to_string());
+        let fingerprint = token.map(hex_sha256).unwrap_or_else(|| "none".to_string());
         let mut txt = HashMap::new();
         txt.insert("fingerprint".to_string(), fingerprint.clone());
         Self { port, txt, fingerprint, started: false }

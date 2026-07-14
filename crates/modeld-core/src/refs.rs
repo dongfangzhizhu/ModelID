@@ -40,10 +40,7 @@ pub fn explain_refs(db: &Database, hash: &Blake3Hash) -> Result<Vec<String>> {
     }
 
     if *workflow_ref_count > 0 {
-        reasons.push(format!(
-            "referenced by {} workflow file(s)",
-            workflow_ref_count
-        ));
+        reasons.push(format!("referenced by {} workflow file(s)", workflow_ref_count));
     }
 
     if *alias_count > 0 {

@@ -76,13 +76,21 @@ fn detect_symlink_privilege() -> bool {
 
 fn detect_primary_filesystem() -> String {
     #[cfg(windows)]
-    { "NTFS".to_string() }
+    {
+        "NTFS".to_string()
+    }
     #[cfg(target_os = "linux")]
-    { "ext4".to_string() }
+    {
+        "ext4".to_string()
+    }
     #[cfg(target_os = "macos")]
-    { "APFS".to_string() }
+    {
+        "APFS".to_string()
+    }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    { "unknown".to_string() }
+    {
+        "unknown".to_string()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,6 +154,7 @@ pub fn create_link(source: &Path, target: &Path, capability: &LinkCapability) ->
 /// CAS objects are made immutable (`set_readonly(true)`).  On Windows,
 /// `remove_file` on a read-only file returns `PermissionDenied`; we must
 /// clear the flag before deletion.
+#[allow(clippy::permissions_set_readonly_false)]
 fn remove_file_force(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -170,14 +179,17 @@ fn create_hardlink(source: &Path, target: &Path) -> LinkResult {
     if let Err(e) = remove_file_force(source) {
         return LinkResult::Failed(format!(
             "Failed to remove duplicate before hardlink ({}): {}",
-            source.display(), e
+            source.display(),
+            e
         ));
     }
     match std::fs::hard_link(target, source) {
         Ok(_) => LinkResult::Success(AliasType::Hardlink),
         Err(e) => LinkResult::Failed(format!(
             "Hardlink {} → {} failed after removing duplicate: {}",
-            source.display(), target.display(), e
+            source.display(),
+            target.display(),
+            e
         )),
     }
 }
@@ -187,7 +199,8 @@ fn create_symlink(source: &Path, target: &Path) -> LinkResult {
     if let Err(e) = remove_file_force(source) {
         return LinkResult::Failed(format!(
             "Failed to remove duplicate before symlink ({}): {}",
-            source.display(), e
+            source.display(),
+            e
         ));
     }
 

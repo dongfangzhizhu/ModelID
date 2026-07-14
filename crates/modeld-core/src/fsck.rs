@@ -125,20 +125,12 @@ pub fn run_fsck(db: &Database, store_path: &Path) -> Result<FsckReport> {
 
     let cas_root = store_path.join("cas").join("blake3");
     if cas_root.exists() {
-        for prefix_entry in std::fs::read_dir(&cas_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
+        for prefix_entry in std::fs::read_dir(&cas_root).into_iter().flatten().flatten() {
             let prefix_path = prefix_entry.path();
             if !prefix_path.is_dir() {
                 continue;
             }
-            for obj_entry in std::fs::read_dir(&prefix_path)
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
+            for obj_entry in std::fs::read_dir(&prefix_path).into_iter().flatten().flatten() {
                 let obj_path = obj_entry.path();
                 let hash_str = obj_path
                     .file_name()
@@ -245,8 +237,7 @@ pub fn run_verify(store: &Path, db: &Database, deep: bool) -> Result<VerifyRepor
 
     // ── 1 & 3: models vs CAS ─────────────────────────────────────────────────
     let models = db.list_models(None)?;
-    let mut known_hashes =
-        std::collections::HashSet::<String>::with_capacity(models.len());
+    let mut known_hashes = std::collections::HashSet::<String>::with_capacity(models.len());
 
     for model in &models {
         known_hashes.insert(model.blake3_hash.as_hex().to_string());
@@ -277,20 +268,13 @@ pub fn run_verify(store: &Path, db: &Database, deep: bool) -> Result<VerifyRepor
                                     report.hash_mismatches.push(HashMismatch {
                                         hash: model.blake3_hash.clone(),
                                         cas_path: cas_path.clone(),
-                                        expected_hex: model
-                                            .blake3_hash
-                                            .as_hex()
-                                            .to_string(),
+                                        expected_hex: model.blake3_hash.as_hex().to_string(),
                                         computed_hex: computed.as_hex().to_string(),
                                     });
                                 }
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "verify: failed to hash {}: {:#}",
-                                    cas_path.display(),
-                                    e
-                                );
+                                eprintln!("verify: failed to hash {}: {:#}", cas_path.display(), e);
                             }
                         }
                     }
@@ -335,7 +319,7 @@ fn collect_part_files(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect_part_files(&path, out);
-        } else if path.extension().map_or(false, |e| e == "part") {
+        } else if path.extension().is_some_and(|e| e == "part") {
             out.push(path);
         }
     }
@@ -343,21 +327,14 @@ fn collect_part_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Non-destructive repair: remove orphan DB alias records and clean staging
 /// residue.  **Never deletes user data (model files or CAS objects).**
-pub fn run_repair(
-    store: &Path,
-    db: &mut Database,
-    report: &VerifyReport,
-) -> Result<RepairResult> {
+pub fn run_repair(store: &Path, db: &mut Database, report: &VerifyReport) -> Result<RepairResult> {
     let mut result = RepairResult::default();
 
     // ── 1. Remove orphan alias DB records ─────────────────────────────────────
     for orphan in &report.orphan_db_records {
         match db.delete_alias(&orphan.alias_path) {
             Ok(_) => result.orphan_records_removed += 1,
-            Err(e) => result.errors.push(format!(
-                "delete alias {}: {:#}",
-                orphan.alias_path, e
-            )),
+            Err(e) => result.errors.push(format!("delete alias {}: {:#}", orphan.alias_path, e)),
         }
     }
 
@@ -365,11 +342,9 @@ pub fn run_repair(
     for part_path in &report.staging_residue {
         match std::fs::remove_file(part_path) {
             Ok(_) => result.staging_files_removed += 1,
-            Err(e) => result.errors.push(format!(
-                "remove staging {}: {:#}",
-                part_path.display(),
-                e
-            )),
+            Err(e) => {
+                result.errors.push(format!("remove staging {}: {:#}", part_path.display(), e))
+            }
         }
     }
 
@@ -534,8 +509,7 @@ mod tests {
         let size = std::fs::metadata(mf.path()).unwrap().len() as i64;
         db.insert_or_update_model(&hash, size, None, None, None, None).unwrap();
         // Do NOT store in CAS — alias points to a model whose CAS object is missing
-        db.insert_alias(&hash, "/some/alias/path", Frontend::User, AliasType::Original)
-            .unwrap();
+        db.insert_alias(&hash, "/some/alias/path", Frontend::User, AliasType::Original).unwrap();
 
         let report = run_verify(tmp.path(), &db, false).unwrap();
         assert_eq!(report.orphan_db_records.len(), 1);
@@ -558,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
     fn test_verify_deep_hash_check() {
         let tmp = TempDir::new().unwrap();
         let db_file = NamedTempFile::new().unwrap();
@@ -597,8 +572,7 @@ mod tests {
         // Create an orphan alias (model in DB, no CAS file)
         let fake_hash = Blake3Hash::from_hex(&"f".repeat(64)).unwrap();
         db.insert_or_update_model(&fake_hash, 10, None, None, None, None).unwrap();
-        db.insert_alias(&fake_hash, "/orphan/path", Frontend::User, AliasType::Original)
-            .unwrap();
+        db.insert_alias(&fake_hash, "/orphan/path", Frontend::User, AliasType::Original).unwrap();
 
         // Create a staging residue
         let staging = tmp.path().join("tmp").join("cas_staging").join("tx-123");

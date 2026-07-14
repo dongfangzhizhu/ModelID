@@ -93,9 +93,9 @@ export function render(container) {
 
     window.dryRunGroup = async (hash) => {
       try {
-        const res = await api.dedup({ dry_run: true, hashes: [hash] });
-        if (!res.operations.length) return;
-        const op = res.operations[0];
+        const res = await api.dedupPreview();
+        const op = res.operations.find(o => o.hash === hash);
+        if (!op) return;
         toast(t('dupes.preview.msg', {
           name: op.keep_path.split(/[\\/]/).pop(),
           size: fmtBytes(op.would_save_bytes),
@@ -111,14 +111,20 @@ export function render(container) {
 
   document.getElementById('btn-dedup-all').addEventListener('click', async () => {
     try {
-      const res = await api.dedup({ dry_run: true });
+      const res = await api.dedupPreview();
       if (!res.operations.length) { toast(t('dupes.empty'), 'info'); return; }
       const ok = await confirm(
         t('dupes.confirm.title'),
         t('dupes.confirm.body', { n: res.operations.length, size: fmtBytes(res.total_would_save_bytes) })
       );
       if (!ok) return;
-      toast(t('dupes.notice.wip'), 'info');
+      const hashes = res.operations.map(op => op.hash);
+      const applyRes = await api.dedupApply({ hashes });
+      toast(t('dupes.apply.done', {
+        n: applyRes.groups_succeeded,
+        size: fmtBytes(applyRes.space_saved),
+      }), 'success');
+      await loadDupes();
     } catch (e) {
       toast(t('dupes.fail', { msg: e.message }), 'error');
     }

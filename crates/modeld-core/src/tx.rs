@@ -6,7 +6,7 @@
 //! - `fail()` → FAILED
 //! - `rollback()` → ROLLED_BACK (idempotent, second call is no-op)
 //! - `recover()` → scans PENDING transactions left by crashed processes,
-//!                marks them FAILED and cleans up staging files
+//!   marks them FAILED and cleans up staging files
 //! - `list()` → query transaction history with optional filter
 //! - `cleanup_older_than()` → purge old transaction records
 
@@ -51,7 +51,7 @@ impl OpType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "dedup" => Some(OpType::Dedup),
             "unlink" => Some(OpType::Unlink),
@@ -233,14 +233,7 @@ impl<'a> TransactionManager<'a> {
     pub fn fail(&mut self, handle: TxHandle, err: &str) -> Result<()> {
         let end_time = Utc::now().to_rfc3339();
         self.db.update_wal_status(&handle.tx_id, TransactionStatus::Failed)?;
-        self.db.update_wal_extended(
-            &handle.tx_id,
-            None,
-            None,
-            None,
-            Some(&end_time),
-            Some(err),
-        )?;
+        self.db.update_wal_extended(&handle.tx_id, None, None, None, Some(&end_time), Some(err))?;
         Ok(())
     }
 
@@ -297,8 +290,7 @@ impl<'a> TransactionManager<'a> {
 
         for tx in incomplete {
             // Clean up per-transaction staging directory
-            let staging_dir =
-                self.store_path.join("tmp").join("cas_staging").join(&tx.tx_id);
+            let staging_dir = self.store_path.join("tmp").join("cas_staging").join(&tx.tx_id);
             if staging_dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&staging_dir) {
                     eprintln!(
@@ -337,10 +329,8 @@ impl<'a> TransactionManager<'a> {
                 Some("Recovered from crash: process was interrupted"),
             )?;
 
-            results.push(TxRecoveryResult {
-                tx_id: tx.tx_id,
-                action: RecoveryAction::MarkedFailed,
-            });
+            results
+                .push(TxRecoveryResult { tx_id: tx.tx_id, action: RecoveryAction::MarkedFailed });
         }
 
         Ok(results)
@@ -364,7 +354,7 @@ impl<'a> TransactionManager<'a> {
                     }
                 }
 
-                let op_type = tx.op_type.as_deref().and_then(OpType::from_str);
+                let op_type = tx.op_type.as_deref().and_then(OpType::parse_str);
 
                 // Op-type filter
                 if let Some(ref ot) = filter.op_type {
@@ -434,6 +424,7 @@ impl<'a> TransactionManager<'a> {
     ///
     /// For dedup rollback: copies the CAS object (`target`) back to the
     /// original path (`source`), converting the link back to an independent copy.
+    #[allow(clippy::permissions_set_readonly_false)]
     fn restore_entry(&self, entry: &PathEntry) -> Result<()> {
         // Nothing to do if source directory no longer exists
         if let Some(parent) = entry.source.parent() {
@@ -460,11 +451,7 @@ impl<'a> TransactionManager<'a> {
         // Write to a temp file, then atomically rename
         let tmp_path = entry.source.with_extension("rollback_tmp");
         std::fs::copy(&restore_from, &tmp_path).with_context(|| {
-            format!(
-                "rollback: copy {} → {}",
-                restore_from.display(),
-                tmp_path.display()
-            )
+            format!("rollback: copy {} → {}", restore_from.display(), tmp_path.display())
         })?;
         std::fs::rename(&tmp_path, &entry.source).with_context(|| {
             format!("rollback: rename {} → {}", tmp_path.display(), entry.source.display())
@@ -501,8 +488,8 @@ impl<'de> Deserialize<'de> for Blake3Hash {
 mod tests {
     use super::*;
     use crate::db::Database;
-    use std::io::Write;
-    use tempfile::{NamedTempFile, TempDir};
+
+    use tempfile::TempDir;
 
     fn make_manager(tmp: &TempDir) -> (Database, PathBuf) {
         let db_file = tmp.path().join("test.db");
@@ -600,11 +587,7 @@ mod tests {
         let tx_id = handle.tx_id.clone();
 
         // Simulate staging dir left by a crash
-        let staging = tmp
-            .path()
-            .join("tmp")
-            .join("cas_staging")
-            .join(&tx_id);
+        let staging = tmp.path().join("tmp").join("cas_staging").join(&tx_id);
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("object.part"), b"partial").unwrap();
 
@@ -644,12 +627,10 @@ mod tests {
         tm.commit(h1).unwrap();
         tm.commit(h2).unwrap();
 
-        let gc_only =
-            tm.list(TxFilter { op_type: Some(OpType::Gc), status: None }).unwrap();
+        let gc_only = tm.list(TxFilter { op_type: Some(OpType::Gc), status: None }).unwrap();
         assert!(gc_only.iter().all(|r| r.op_type == Some(OpType::Gc)));
 
-        let dedup_only =
-            tm.list(TxFilter { op_type: Some(OpType::Dedup), status: None }).unwrap();
+        let dedup_only = tm.list(TxFilter { op_type: Some(OpType::Dedup), status: None }).unwrap();
         assert!(dedup_only.iter().all(|r| r.op_type == Some(OpType::Dedup)));
     }
 }

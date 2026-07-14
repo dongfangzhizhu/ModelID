@@ -163,9 +163,8 @@ impl CasStore {
 
         // ── 1. Prepare staging path ───────────────────────────────────────
         let staging_dir = self.root.join("tmp").join("cas_staging").join(tx_id);
-        fs::create_dir_all(&staging_dir).with_context(|| {
-            format!("Failed to create staging dir: {}", staging_dir.display())
-        })?;
+        fs::create_dir_all(&staging_dir)
+            .with_context(|| format!("Failed to create staging dir: {}", staging_dir.display()))?;
 
         let object_id = expected_hash.as_hex();
         let staging_path = staging_dir.join(format!("{}.part", object_id));
@@ -182,9 +181,8 @@ impl CasStore {
             let src_file = fs::File::open(source)
                 .with_context(|| format!("Open source: {}", source.display()))?;
             let mut reader = BufReader::new(src_file);
-            let mut dst_file = fs::File::create(&staging_path).with_context(|| {
-                format!("Create staging file: {}", staging_path.display())
-            })?;
+            let mut dst_file = fs::File::create(&staging_path)
+                .with_context(|| format!("Create staging file: {}", staging_path.display()))?;
 
             let mut buf = vec![0u8; 256 * 1024]; // 256 KiB buffer
             loop {
@@ -193,9 +191,7 @@ impl CasStore {
                     break;
                 }
                 hasher.update(&buf[..n]);
-                dst_file
-                    .write_all(&buf[..n])
-                    .with_context(|| "Write staging")?;
+                dst_file.write_all(&buf[..n]).with_context(|| "Write staging")?;
                 bytes_written += n as u64;
             }
 
@@ -214,7 +210,7 @@ impl CasStore {
             ));
         }
 
-        let computed = Blake3Hash::from_hex(&hasher.finalize().to_hex().to_string())
+        let computed = Blake3Hash::from_hex(hasher.finalize().to_hex().as_ref())
             .expect("blake3 output is always valid hex");
         if computed.as_hex() != expected_hash.as_hex() {
             let _ = fs::remove_file(&staging_path);
@@ -227,9 +223,8 @@ impl CasStore {
 
         // ── 5. Ensure destination CAS directory exists ────────────────────
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Create CAS dir: {}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Create CAS dir: {}", parent.display()))?;
         }
 
         // ── 6. Atomic rename (with cross-fs fallback) ─────────────────────
@@ -264,8 +259,8 @@ impl CasStore {
 #[cfg(unix)]
 fn fsync_dir(dir: &Path) -> Result<()> {
     use std::os::unix::io::AsRawFd;
-    let dir_file = fs::File::open(dir)
-        .with_context(|| format!("Open dir for fsync: {}", dir.display()))?;
+    let dir_file =
+        fs::File::open(dir).with_context(|| format!("Open dir for fsync: {}", dir.display()))?;
     let ret = unsafe { libc_fsync(dir_file.as_raw_fd()) };
     if ret != 0 {
         return Err(anyhow!(
@@ -392,9 +387,7 @@ mod tests {
         test_file.flush().unwrap();
 
         let hash = hash_file(test_file.path()).unwrap();
-        let stored = store
-            .store_crash_safe(test_file.path(), &hash, "test-tx-001")
-            .unwrap();
+        let stored = store.store_crash_safe(test_file.path(), &hash, "test-tx-001").unwrap();
 
         assert!(stored.exists());
         assert!(store.contains(&hash));
@@ -417,12 +410,8 @@ mod tests {
         let hash = hash_file(test_file.path()).unwrap();
 
         // Store twice — second call should reuse the existing object
-        let p1 = store
-            .store_crash_safe(test_file.path(), &hash, "tx-idem-1")
-            .unwrap();
-        let p2 = store
-            .store_crash_safe(test_file.path(), &hash, "tx-idem-2")
-            .unwrap();
+        let p1 = store.store_crash_safe(test_file.path(), &hash, "tx-idem-1").unwrap();
+        let p2 = store.store_crash_safe(test_file.path(), &hash, "tx-idem-2").unwrap();
 
         assert_eq!(p1, p2);
     }
@@ -438,8 +427,7 @@ mod tests {
         test_file.flush().unwrap();
 
         // Provide a wrong (all-zeros) expected hash
-        let wrong_hash =
-            Blake3Hash::from_hex(&"0".repeat(64)).unwrap();
+        let wrong_hash = Blake3Hash::from_hex(&"0".repeat(64)).unwrap();
 
         let result = store.store_crash_safe(test_file.path(), &wrong_hash, "tx-mismatch");
         assert!(result.is_err(), "Should fail on hash mismatch");
@@ -461,11 +449,7 @@ mod tests {
         store.store_crash_safe(test_file.path(), &hash, tx_id).unwrap();
 
         // Staging directory should be cleaned up after successful store
-        let staging = temp_dir
-            .path()
-            .join("tmp")
-            .join("cas_staging")
-            .join(tx_id);
+        let staging = temp_dir.path().join("tmp").join("cas_staging").join(tx_id);
         // After rename the .part file should not exist (staging dir may or may not exist)
         let part = staging.join(format!("{}.part", hash.as_hex()));
         assert!(!part.exists(), "Staging .part file should be cleaned up");

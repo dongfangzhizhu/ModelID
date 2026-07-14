@@ -28,8 +28,10 @@ use uuid::Uuid;
 /// How duplicates should be replaced after deduplication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DedupStrategy {
     /// Replace duplicates with a hard link to the CAS object (same volume only).
+    #[default]
     Hardlink,
     /// Replace duplicates with a symbolic link to the CAS object.
     Symlink,
@@ -37,12 +39,6 @@ pub enum DedupStrategy {
     CopyToCas,
     /// Record the duplicate in the DB only — no filesystem change.
     VirtualAlias,
-}
-
-impl Default for DedupStrategy {
-    fn default() -> Self {
-        DedupStrategy::Hardlink
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,11 +289,7 @@ impl DedupEngine {
                 }
             }
             if files.len() >= 2 {
-                groups.push(DuplicateGroup {
-                    hash,
-                    files,
-                    total_size: size_bytes as u64,
-                });
+                groups.push(DuplicateGroup { hash, files, total_size: size_bytes as u64 });
             }
         }
         Ok(groups)
@@ -336,8 +328,7 @@ impl DedupEngine {
 
         for group in &groups {
             let selection = self.select_canonical(&group.files);
-            let estimated_savings =
-                group.total_size * (selection.duplicates.len() as u64);
+            let estimated_savings = group.total_size * (selection.duplicates.len() as u64);
 
             let reversible = matches!(strategy, DedupStrategy::Hardlink | DedupStrategy::Symlink);
             let risk_level = compute_risk_level(&strategy);
@@ -383,7 +374,7 @@ impl DedupEngine {
         // Priority 0: ephemeral pin paths (--pin CLI flag)
         if !self.pin_paths.is_empty() {
             for file in files {
-                let is_pinned_path = self.pin_paths.iter().any(|p| file.path == *p);
+                let is_pinned_path = self.pin_paths.contains(&file.path);
                 if is_pinned_path {
                     let duplicates = files
                         .iter()
@@ -421,11 +412,8 @@ impl DedupEngine {
         let cas_prefix = self.store_path.join("cas");
         for file in files {
             if file.path.starts_with(&cas_prefix) {
-                let duplicates = files
-                    .iter()
-                    .filter(|f| f.path != file.path)
-                    .map(|f| f.path.clone())
-                    .collect();
+                let duplicates =
+                    files.iter().filter(|f| f.path != file.path).map(|f| f.path.clone()).collect();
                 return CanonicalSelection {
                     canonical: file.path.clone(),
                     duplicates,
@@ -436,16 +424,10 @@ impl DedupEngine {
 
         // Priority 3: file in a protected directory
         for file in files {
-            let in_protected = self
-                .protected_paths
-                .iter()
-                .any(|p| file.path.starts_with(p));
+            let in_protected = self.protected_paths.iter().any(|p| file.path.starts_with(p));
             if in_protected {
-                let duplicates = files
-                    .iter()
-                    .filter(|f| f.path != file.path)
-                    .map(|f| f.path.clone())
-                    .collect();
+                let duplicates =
+                    files.iter().filter(|f| f.path != file.path).map(|f| f.path.clone()).collect();
                 return CanonicalSelection {
                     canonical: file.path.clone(),
                     duplicates,
@@ -488,10 +470,7 @@ impl DedupEngine {
 
     /// Calculate potential space savings (sum of duplicate sizes, one copy kept per group).
     pub fn calculate_savings(&self, groups: &[DuplicateGroup]) -> u64 {
-        groups
-            .iter()
-            .map(|g| g.total_size * (g.files.len() as u64 - 1))
-            .sum()
+        groups.iter().map(|g| g.total_size * (g.files.len() as u64 - 1)).sum()
     }
 
     /// Execute two-phase commit dedup for a single group.
@@ -579,8 +558,8 @@ impl DedupEngine {
             })
             .collect();
         let affected_json = serde_json::to_string(&affected_entries).unwrap_or_default();
-        let rollback_json = serde_json::to_string(&RollbackPlan { entries: rollback_entries })
-            .unwrap_or_default();
+        let rollback_json =
+            serde_json::to_string(&RollbackPlan { entries: rollback_entries }).unwrap_or_default();
         self.db.update_wal_extended(
             &tx_id,
             Some("dedup"),
@@ -608,10 +587,8 @@ impl DedupEngine {
                 // Fail via TransactionManager for proper lifecycle recording
                 {
                     let mut tm = TransactionManager::new(&mut self.db, &self.store_path);
-                    let _ = tm.fail(
-                        TxHandle { tx_id: tx_id.clone() },
-                        "Hash mismatch during staging",
-                    );
+                    let _ =
+                        tm.fail(TxHandle { tx_id: tx_id.clone() }, "Hash mismatch during staging");
                 }
                 return Err(anyhow!(
                     "Hash mismatch during staging: expected {}, got {}",
@@ -735,9 +712,7 @@ impl DedupEngine {
                 let canonical_link =
                     create_link(&selection.canonical, &cas_path, &self.link_capability);
                 match &canonical_link {
-                    LinkResult::Success(atype)
-                        if !matches!(atype, AliasType::ReferenceOnly) =>
-                    {
+                    LinkResult::Success(atype) if !matches!(atype, AliasType::ReferenceOnly) => {
                         let _ = self.db.delete_alias(&canonical_str);
                         self.db.insert_alias(
                             &group.hash,
@@ -870,8 +845,7 @@ impl DedupEngine {
                     if let (Some(ref hash_str), Some(ref source_path)) =
                         (&tx.target_hash, &tx.source_path)
                     {
-                        let staging_path =
-                            staging_dir.join(format!("{}.tmp", hash_str));
+                        let staging_path = staging_dir.join(format!("{}.tmp", hash_str));
 
                         if let Ok(hash) = Blake3Hash::from_hex(hash_str) {
                             let cas_path = self.cas_path_for_hash(&hash);
@@ -881,10 +855,10 @@ impl DedupEngine {
                                 if let Some(d) = cas_path.parent() {
                                     let _ = std::fs::create_dir_all(d);
                                 }
-                                if std::fs::rename(&staging_path, &cas_path).is_err() {
-                                    if std::fs::copy(&staging_path, &cas_path).is_ok() {
-                                        let _ = std::fs::remove_file(&staging_path);
-                                    }
+                                if std::fs::rename(&staging_path, &cas_path).is_err()
+                                    && std::fs::copy(&staging_path, &cas_path).is_ok()
+                                {
+                                    let _ = std::fs::remove_file(&staging_path);
                                 }
                                 if cas_path.exists() {
                                     if let Ok(mut perms) =
@@ -910,11 +884,17 @@ impl DedupEngine {
                                     };
                                     let _ = self.db.delete_alias(source_path);
                                     let _ = self.db.insert_alias(
-                                        &hash, source_path, Frontend::User, atype,
+                                        &hash,
+                                        source_path,
+                                        Frontend::User,
+                                        atype,
                                     );
                                 } else if src.exists() {
                                     let _ = self.db.insert_alias(
-                                        &hash, source_path, Frontend::User, AliasType::Original,
+                                        &hash,
+                                        source_path,
+                                        Frontend::User,
+                                        AliasType::Original,
                                     );
                                 }
 
@@ -922,9 +902,7 @@ impl DedupEngine {
                                 let dup_paths: Vec<PathBuf> = tx
                                     .metadata
                                     .as_deref()
-                                    .and_then(|m| {
-                                        serde_json::from_str::<Vec<String>>(m).ok()
-                                    })
+                                    .and_then(|m| serde_json::from_str::<Vec<String>>(m).ok())
                                     .unwrap_or_default()
                                     .into_iter()
                                     .map(PathBuf::from)
@@ -932,17 +910,13 @@ impl DedupEngine {
 
                                 for dup_path in &dup_paths {
                                     if dup_path.exists() {
-                                        let link_res = create_link(
-                                            dup_path,
-                                            &cas_path,
-                                            &self.link_capability,
-                                        );
+                                        let link_res =
+                                            create_link(dup_path, &cas_path, &self.link_capability);
                                         let atype = match link_res {
                                             LinkResult::Success(t) => t,
                                             LinkResult::Failed(_) => AliasType::ReferenceOnly,
                                         };
-                                        let dup_str =
-                                            dup_path.to_string_lossy().to_string();
+                                        let dup_str = dup_path.to_string_lossy().to_string();
                                         let _ = self.db.delete_alias(&dup_str);
                                         let _ = self.db.insert_alias(
                                             &hash,
@@ -967,28 +941,23 @@ impl DedupEngine {
                     self.db.delete_wal_transaction(&tx.tx_id)?;
                 }
 
-                TransactionStatus::Committed | TransactionStatus::Failed | TransactionStatus::RolledBack => {
+                TransactionStatus::Committed
+                | TransactionStatus::Failed
+                | TransactionStatus::RolledBack => {
                     self.db.delete_wal_transaction(&tx.tx_id)?;
                 }
             }
         }
 
         if count > 0 {
-            eprintln!(
-                "{}",
-                crate::i18n::tf("warn.recover_processed", &[("count", &count)])
-            );
+            eprintln!("{}", crate::i18n::tf("warn.recover_processed", &[("count", &count)]));
         }
         Ok(count)
     }
 
     /// CAS path for a given hash.
     pub fn cas_path_for_hash(&self, hash: &Blake3Hash) -> PathBuf {
-        self.store_path
-            .join("cas")
-            .join("blake3")
-            .join(hash.prefix())
-            .join(hash.as_hex())
+        self.store_path.join("cas").join("blake3").join(hash.prefix()).join(hash.as_hex())
     }
 }
 
@@ -1073,8 +1042,14 @@ mod tests {
         let size = 11u64;
 
         engine.db.insert_or_update_model(&hash, size as i64, None, None, None, None).unwrap();
-        engine.db.insert_alias(&hash, &f1.to_string_lossy(), Frontend::User, AliasType::Original).unwrap();
-        engine.db.insert_alias(&hash, &f2.to_string_lossy(), Frontend::User, AliasType::Original).unwrap();
+        engine
+            .db
+            .insert_alias(&hash, &f1.to_string_lossy(), Frontend::User, AliasType::Original)
+            .unwrap();
+        engine
+            .db
+            .insert_alias(&hash, &f2.to_string_lossy(), Frontend::User, AliasType::Original)
+            .unwrap();
 
         // Override: pretend they're on different volumes so link degrades to reference-only
         // We just check that the engine doesn't double-count when mode = Auto
@@ -1089,17 +1064,15 @@ mod tests {
         let tmp = tempdir().unwrap();
         let (engine, _db) = make_engine(&tmp);
 
-        let groups = vec![
-            DuplicateGroup {
-                hash: Blake3Hash::from_hex(&"a".repeat(64)).unwrap(),
-                files: vec![
-                    FileInfo { path: PathBuf::from("a"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
-                    FileInfo { path: PathBuf::from("b"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
-                    FileInfo { path: PathBuf::from("c"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
-                ],
-                total_size: 1000,
-            },
-        ];
+        let groups = vec![DuplicateGroup {
+            hash: Blake3Hash::from_hex(&"a".repeat(64)).unwrap(),
+            files: vec![
+                FileInfo { path: PathBuf::from("a"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
+                FileInfo { path: PathBuf::from("b"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
+                FileInfo { path: PathBuf::from("c"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
+            ],
+            total_size: 1000,
+        }];
 
         // 3 files, keep 1 → save 2 × 1000
         assert_eq!(engine.calculate_savings(&groups), 2000);

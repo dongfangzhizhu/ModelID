@@ -3,15 +3,13 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
-    add_tag, build_model_lookup, classify_refs, explain_refs, favorite_model,
-    find_workflow_files, get_tags_for_model, hash_file,
-    index_workflow, list_all_tags, list_orphans, list_pinned, parse_workflow, pin_model,
-    remove_tag, run_fsck, run_doctor, load_config, save_config, resolve_store_path,
-    scan_workflow_refs, set_note, t, tf, unfavorite_model, unlink_path, unpin_model,
-    Blake3Hash, CasStore, CheckStatus, Database, DedupEngine, DedupMode, DedupStrategy,
-    Downloader, GcEngine, HfCache, QuarantineManager, RefStatus, Scanner, ScanOptions,
-    TransactionManager, TxFilter,
-    token_remove, token_set, token_status,
+    add_tag, build_model_lookup, classify_refs, explain_refs, favorite_model, find_workflow_files,
+    get_tags_for_model, hash_file, index_workflow, list_all_tags, list_orphans, list_pinned,
+    load_config, parse_workflow, pin_model, remove_tag, resolve_store_path, run_doctor, run_fsck,
+    save_config, scan_workflow_refs, set_note, t, tf, token_remove, token_set, token_status,
+    unfavorite_model, unlink_path, unpin_model, Blake3Hash, CasStore, CheckStatus, Database,
+    DedupEngine, DedupMode, DedupStrategy, Downloader, GcEngine, HfCache, QuarantineManager,
+    RefStatus, ScanOptions, Scanner, TransactionManager, TxFilter,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -792,17 +790,53 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init { path, interactive } => init_command(path, interactive)?,
         Commands::Scan { path, store, incremental, full, exclude_globs, follow_symlinks } => {
-            scan_command(path, resolve_store(store), incremental, full, exclude_globs, follow_symlinks)?
+            scan_command(
+                path,
+                resolve_store(store),
+                incremental,
+                full,
+                exclude_globs,
+                follow_symlinks,
+            )?
         }
         Commands::Status { store } => status_command(resolve_store(store))?,
         Commands::Stats { store } => stats_command(resolve_store(store))?,
-        Commands::Dupes { store, min_size, json } => dupes_command(resolve_store(store), min_size, json)?,
-        Commands::List { store, limit, json, export_csv } => list_command(resolve_store(store), limit, json, export_csv)?,
+        Commands::Dupes { store, min_size, json } => {
+            dupes_command(resolve_store(store), min_size, json)?
+        }
+        Commands::List { store, limit, json, export_csv } => {
+            list_command(resolve_store(store), limit, json, export_csv)?
+        }
         Commands::Info { hash, store, json } => info_command(resolve_store(store), &hash, json)?,
         Commands::Hash { file } => hash_command(file)?,
-        Commands::Dedup { store, dry_run, auto, apply, report, strategy, min_size, include_globs, exclude_globs, protect, pin, yes, json } => {
-            dedup_command(resolve_store(store), dry_run, auto || apply, report, strategy, min_size, include_globs, exclude_globs, protect, pin, yes, json)?
-        }
+        Commands::Dedup {
+            store,
+            dry_run,
+            auto,
+            apply,
+            report,
+            strategy,
+            min_size,
+            include_globs,
+            exclude_globs,
+            protect,
+            pin,
+            yes,
+            json,
+        } => dedup_command(
+            resolve_store(store),
+            dry_run,
+            auto || apply,
+            report,
+            strategy,
+            min_size,
+            include_globs,
+            exclude_globs,
+            protect,
+            pin,
+            yes,
+            json,
+        )?,
         Commands::Quarantine { store, action } => quarantine_command(resolve_store(store), action)?,
         Commands::HfCheck { repo_id, filename, revision, json, store } => {
             hf_check_command(resolve_store(store), &repo_id, &filename, &revision, json)?
@@ -810,10 +844,16 @@ fn main() -> Result<()> {
         Commands::HfDownload { repo_id, filename, revision, token, json, store } => {
             hf_download_command(resolve_store(store), &repo_id, &filename, &revision, token, json)?
         }
-        Commands::HfSetup { print_path, store } => hf_setup_command(resolve_store(store), print_path)?,
+        Commands::HfSetup { print_path, store } => {
+            hf_setup_command(resolve_store(store), print_path)?
+        }
         Commands::HfStatus { store } => hf_status_command(resolve_store(store))?,
-        Commands::WorkflowScan { path, store } => workflow_scan_command(resolve_store(store), path)?,
-        Commands::WorkflowDeps { file, store } => workflow_deps_command(resolve_store(store), file)?,
+        Commands::WorkflowScan { path, store } => {
+            workflow_scan_command(resolve_store(store), path)?
+        }
+        Commands::WorkflowDeps { file, store } => {
+            workflow_deps_command(resolve_store(store), file)?
+        }
         Commands::RefsOrphans { store, json } => refs_orphans_command(resolve_store(store), json)?,
         Commands::Gc { store, preview, cleanup_quarantine, cleanup_tmp } => {
             gc_command(resolve_store(store), preview, cleanup_quarantine, cleanup_tmp)?
@@ -884,18 +924,15 @@ fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<()> {
     // Warn if the store already exists
     let already_exists = store_path.join("modeld.db").exists();
     if already_exists {
+        println!("{}", format!("⚠  Store already exists at: {}", store_path.display()).yellow());
         println!(
             "{}",
-            format!("⚠  Store already exists at: {}", store_path.display()).yellow()
+            "   Re-initializing will add missing components but won't delete data.".dimmed()
         );
-        println!("{}", "   Re-initializing will add missing components but won't delete data.".dimmed());
         println!();
     }
 
-    println!(
-        "{}",
-        tf("init.at", &[("path", &store_path.display())]).green().bold()
-    );
+    println!("{}", tf("init.at", &[("path", &store_path.display())]).green().bold());
 
     // Gather settings — interactive mode asks the user, otherwise use defaults.
     let mut config = if already_exists {
@@ -910,10 +947,7 @@ fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<()> {
         println!("{}", "─".repeat(40).cyan());
 
         // 1. Store path
-        println!(
-            "{}",
-            format!("Store path [{}]: ", store_path.display()).bold()
-        );
+        println!("{}", format!("Store path [{}]: ", store_path.display()).bold());
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         let input = input.trim();
@@ -968,7 +1002,14 @@ fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<()> {
     Ok(())
 }
 
-fn scan_command(scan_path: PathBuf, store_path: PathBuf, incremental: bool, full: bool, exclude_globs: Vec<String>, follow_symlinks: bool) -> Result<()> {
+fn scan_command(
+    scan_path: PathBuf,
+    store_path: PathBuf,
+    incremental: bool,
+    full: bool,
+    exclude_globs: Vec<String>,
+    follow_symlinks: bool,
+) -> Result<()> {
     println!("{}", tf("scan.scanning", &[("path", &scan_path.display())]).cyan().bold());
 
     // Exclude the store directory from scanning to prevent CAS objects,
@@ -994,12 +1035,7 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf, incremental: bool, full
     let scanner = Scanner::new()
         .with_excluded_dirs(vec![store_canonical])
         .with_preindexed(preindexed)
-        .with_scan_options(ScanOptions {
-            incremental,
-            full,
-            exclude_globs,
-            follow_symlinks,
-        });
+        .with_scan_options(ScanOptions { incremental, full, exclude_globs, follow_symlinks });
 
     // Quick count first
     let (file_count, total_size) = scanner.count_files(&scan_path)?;
@@ -1010,15 +1046,9 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf, incremental: bool, full
     }
 
     let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
-    println!(
-        "{}\n",
-        tf("scan.found", &[("count", &file_count), ("gb", &gb)]).bold()
-    );
+    println!("{}\n", tf("scan.found", &[("count", &file_count), ("gb", &gb)]).bold());
     if cached_count > 0 {
-        println!(
-            "  {}",
-            tf("scan.incremental", &[("count", &cached_count)]).dimmed()
-        );
+        println!("  {}", tf("scan.incremental", &[("count", &cached_count)]).dimmed());
     }
 
     // Create progress bar
@@ -1040,44 +1070,32 @@ fn scan_command(scan_path: PathBuf, store_path: PathBuf, incremental: bool, full
 
     pb.finish_with_message(t("progress.done"));
 
-    // Store in CAS and database
+    // Store in CAS and database via the shared ingestion function so that
+    // CLI scans and WebUI scans produce identical CAS/DB state (audit
+    // Wave 1). `scan_id` is generated here since a CLI scan_command run has
+    // no pre-existing scan_id, and is passed through to
+    // `CasStore::store_crash_safe` as the tx_id (audit Wave 5.4).
     println!("\n{}", t("scan.processing").cyan().bold());
-    let mut processed = 0;
-    for file in &results {
-        // Store in CAS
-        cas.store(&file.path, &file.hash)?;
-
-        // Record in database
-        db.insert_or_update_model(&file.hash, file.size as i64, None, None, None, None)?;
-
-        // Record original alias
-        let path_str = file.path.to_string_lossy().to_string();
-        if db.get_alias_by_path(&path_str)?.is_none() {
-            db.insert_alias(
-                &file.hash,
-                &path_str,
-                modeld_core::db::Frontend::User,
-                modeld_core::db::AliasType::Original,
-            )?;
-        }
-
-        // Update incremental scan index with mtime + inode for future scans
-        db.upsert_path_index(
-            &path_str,
-            &file.hash,
-            file.size as i64,
-            file.mtime,
-            file.inode,
-            file.device_id,
-        )?;
-
-        processed += 1;
-    }
+    let scan_id = Uuid::new_v4().to_string();
+    let ingest_result = modeld_core::ingest_scan_results(&store_path, &mut db, &results, &scan_id)?;
 
     println!("\n{}", t("scan.complete").green().bold());
     let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
-    println!("  {}", tf("scan.processed", &[("count", &processed)]).bold());
+    println!("  {}", tf("scan.processed", &[("count", &ingest_result.processed_count)]).bold());
     println!("  {}", tf("scan.total_size", &[("gb", &gb)]));
+
+    if !ingest_result.errors.is_empty() {
+        println!(
+            "  {}",
+            tf("scan.errors_header", &[("count", &ingest_result.errors.len())]).red().bold()
+        );
+        for err in &ingest_result.errors {
+            println!(
+                "{}",
+                tf("scan.error_line", &[("path", &err.path), ("reason", &err.reason)]).red()
+            );
+        }
+    }
 
     Ok(())
 }
@@ -1122,10 +1140,7 @@ fn status_command(store_path: PathBuf) -> Result<()> {
             let mb = format!("{:.2}", qstats.total_size as f64 / 1_048_576.0);
             println!("  {}", tf("status.q_size", &[("mb", &mb)]));
             if qstats.expired_files > 0 {
-                println!(
-                    "  {}",
-                    tf("status.q_expired", &[("count", &qstats.expired_files)]).red()
-                );
+                println!("  {}", tf("status.q_expired", &[("count", &qstats.expired_files)]).red());
             }
         }
     }
@@ -1222,7 +1237,12 @@ fn dupes_command(store_path: PathBuf, min_size: Option<String>, json_output: boo
     Ok(())
 }
 
-fn list_command(store_path: PathBuf, limit: Option<i64>, json_output: bool, export_csv: Option<PathBuf>) -> Result<()> {
+fn list_command(
+    store_path: PathBuf,
+    limit: Option<i64>,
+    json_output: bool,
+    export_csv: Option<PathBuf>,
+) -> Result<()> {
     let db_path = require_store_db(&store_path)?;
     let db = Database::open(&db_path)?;
     let models = db.list_models(limit)?;
@@ -1243,9 +1263,7 @@ fn list_command(store_path: PathBuf, limit: Option<i64>, json_output: bool, expo
             let source_type = csv_escape(m.source_type.as_deref().unwrap_or("local"));
             let hf_repo_id = csv_escape(m.hf_repo_id.as_deref().unwrap_or(""));
             let license = csv_escape(m.license.as_deref().unwrap_or(""));
-            let downloaded_at = m.downloaded_at
-                .map(|d| d.to_rfc3339())
-                .unwrap_or_default();
+            let downloaded_at = m.downloaded_at.map(|d| d.to_rfc3339()).unwrap_or_default();
             writeln!(
                 file,
                 "{},{},{},{},{},{},{}",
@@ -1377,8 +1395,16 @@ fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Resul
 
     // ── Governance ──────────────────────────────────────────────────────────
     println!("\n{}", "Governance".cyan());
-    let pin_icon = if model.pinned { "📌 pinned".green().to_string() } else { "  not pinned".dimmed().to_string() };
-    let fav_icon = if model.favorited { "⭐ favorited".yellow().to_string() } else { "  not favorited".dimmed().to_string() };
+    let pin_icon = if model.pinned {
+        "📌 pinned".green().to_string()
+    } else {
+        "  not pinned".dimmed().to_string()
+    };
+    let fav_icon = if model.favorited {
+        "⭐ favorited".yellow().to_string()
+    } else {
+        "  not favorited".dimmed().to_string()
+    };
     println!("  {}", pin_icon);
     println!("  {}", fav_icon);
     if let Some(ref note) = model.note {
@@ -1430,10 +1456,7 @@ fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Resul
             let kind = alias.alias_type.as_str().to_string();
             println!(
                 "  {}",
-                tf(
-                    "info.alias_line",
-                    &[("path", &path), ("frontend", &frontend), ("kind", &kind)]
-                )
+                tf("info.alias_line", &[("path", &path), ("frontend", &frontend), ("kind", &kind)])
             );
         }
     }
@@ -1444,7 +1467,11 @@ fn info_command(store_path: PathBuf, hash_hex: &str, json_output: bool) -> Resul
 fn hash_command(file: PathBuf) -> Result<()> {
     if !file.exists() {
         let p = file.display().to_string();
-        eprintln!("{} {}", t("error.prefix").red().bold(), tf("error.file_not_found", &[("path", &p)]));
+        eprintln!(
+            "{} {}",
+            t("error.prefix").red().bold(),
+            tf("error.file_not_found", &[("path", &p)])
+        );
         std::process::exit(1);
     }
 
@@ -1465,7 +1492,21 @@ fn hash_command(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, strategy_str: Option<String>, min_size: Option<String>, include_globs: Vec<String>, exclude_globs: Vec<String>, protect: Vec<PathBuf>, pin: Vec<PathBuf>, yes: bool, json: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn dedup_command(
+    store_path: PathBuf,
+    dry_run: bool,
+    auto: bool,
+    report: bool,
+    strategy_str: Option<String>,
+    min_size: Option<String>,
+    include_globs: Vec<String>,
+    exclude_globs: Vec<String>,
+    protect: Vec<PathBuf>,
+    pin: Vec<PathBuf>,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
     let db_path = store_path.join("modeld.db");
 
     if !db_path.exists() {
@@ -1512,7 +1553,8 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, s
 
     // Apply optional strategy override
     if let Some(ref s) = strategy_str {
-        let strategy: DedupStrategy = s.parse().with_context(|| format!("Invalid dedup strategy: {s}"))?;
+        let strategy: DedupStrategy =
+            s.parse().with_context(|| format!("Invalid dedup strategy: {s}"))?;
         engine = engine.with_strategy(strategy);
     }
 
@@ -1632,9 +1674,7 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, s
     // In JSON mode without --yes: require --yes to prevent silent destructive ops.
     if !yes {
         if json {
-            anyhow::bail!(
-                "dedup --json --apply requires --yes to confirm destructive operation"
-            );
+            anyhow::bail!("dedup --json --apply requires --yes to confirm destructive operation");
         }
         println!(
             "\n{}",
@@ -1699,20 +1739,23 @@ fn dedup_command(store_path: PathBuf, dry_run: bool, auto: bool, report: bool, s
         // Human-readable final report
         println!("\n{}", "─".repeat(40).cyan());
         println!("{}", t("dedup.complete").green().bold());
-        println!("  {}", tf("dedup.groups_processed", &[("count", &stats.groups_processed)]).bold());
+        println!(
+            "  {}",
+            tf("dedup.groups_processed", &[("count", &stats.groups_processed)]).bold()
+        );
         println!(
             "  {}",
             tf("dedup.groups_succeeded", &[("count", &stats.groups_succeeded)]).green().bold()
         );
         if stats.groups_failed > 0 {
-            println!("  {}", tf("dedup.groups_failed", &[("count", &stats.groups_failed)]).red().bold());
+            println!(
+                "  {}",
+                tf("dedup.groups_failed", &[("count", &stats.groups_failed)]).red().bold()
+            );
         }
         println!("  {}", tf("dedup.files_dedup", &[("count", &stats.files_deduplicated)]).bold());
         let gb = format!("{:.2}", stats.space_saved as f64 / 1_073_741_824.0);
-        println!(
-            "  {}",
-            tf("dedup.space_saved", &[("gb", &gb)]).green().bold()
-        );
+        println!("  {}", tf("dedup.space_saved", &[("gb", &gb)]).green().bold());
         if stats.locked_files_skipped > 0 {
             println!(
                 "  {}",
@@ -1750,12 +1793,17 @@ fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Result<(
 
             for entry in &entries {
                 let status = match entry.days_remaining {
-                    Some(d) => tf("quarantine.days_remaining", &[("count", &d)]).yellow().to_string(),
+                    Some(d) => {
+                        tf("quarantine.days_remaining", &[("count", &d)]).yellow().to_string()
+                    }
                     None => t("quarantine.expired").red().to_string(),
                 };
                 let qpath = entry.quarantine_path.display().to_string();
 
-                println!("\n  {}", tf("quarantine.entry_header", &[("path", &qpath), ("status", &status)]).bold());
+                println!(
+                    "\n  {}",
+                    tf("quarantine.entry_header", &[("path", &qpath), ("status", &status)]).bold()
+                );
                 let orig = entry.meta.original_path.clone();
                 println!("    {}", tf("quarantine.original", &[("path", &orig)]).dimmed());
                 let h = entry.meta.blake3_hash[..16].to_string();
@@ -1815,8 +1863,7 @@ fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Result<(
             println!(
                 "{} {}",
                 "✓".green().bold(),
-                tf("quarantine.restore.done", &[("path", &restored.display().to_string())])
-                    .bold()
+                tf("quarantine.restore.done", &[("path", &restored.display().to_string())]).bold()
             );
         }
     }
@@ -2031,8 +2078,7 @@ fn hf_status_command(store: PathBuf) -> Result<()> {
         println!();
         println!(
             "  {}",
-            tf("hf.status.downloads", &[("total", &downloads.len()), ("done", &done_count)])
-                .bold()
+            tf("hf.status.downloads", &[("total", &downloads.len()), ("done", &done_count)]).bold()
         );
     }
 
@@ -2270,17 +2316,19 @@ fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
 
     println!();
     let size = format_bytes(total_size as u64);
-    println!(
-        "  {}",
-        tf("orphans.summary", &[("count", &orphans.len()), ("size", &size)]).bold()
-    );
+    println!("  {}", tf("orphans.summary", &[("count", &orphans.len()), ("size", &size)]).bold());
     println!();
     println!("{}", t("orphans.tip").dimmed());
 
     Ok(())
 }
 
-fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool, cleanup_tmp: bool) -> Result<()> {
+fn gc_command(
+    store: PathBuf,
+    preview: bool,
+    cleanup_quarantine: bool,
+    cleanup_tmp: bool,
+) -> Result<()> {
     let db_path = store.join("modeld.db");
     if !db_path.exists() {
         anyhow::bail!("{}", t("store.not_initialized_exit"));
@@ -2333,8 +2381,11 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool, cleanup_t
                 let size = format_bytes(item.size_bytes as u64);
                 println!(
                     "    {}",
-                    tf("gc.preview.quarantine_line", &[("prefix", &item.hash_prefix), ("size", &size)])
-                        .red()
+                    tf(
+                        "gc.preview.quarantine_line",
+                        &[("prefix", &item.hash_prefix), ("size", &size)]
+                    )
+                    .red()
                 );
             }
             let size = format_bytes(plan.total_reclaimable_bytes as u64);
@@ -2394,10 +2445,7 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool, cleanup_t
         println!("{}", t("gc.cleanup_header").bold());
         let cleaned = gc.cleanup_quarantine()?;
         if cleaned > 0 {
-            println!(
-                "  {}",
-                tf("gc.cleanup_done", &[("count", &cleaned)]).green().bold()
-            );
+            println!("  {}", tf("gc.cleanup_done", &[("count", &cleaned)]).green().bold());
         } else {
             println!("  {}", t("gc.cleanup_none"));
         }
@@ -2409,10 +2457,7 @@ fn gc_command(store: PathBuf, preview: bool, cleanup_quarantine: bool, cleanup_t
         // Staging files: keep for 1 day (should be renamed to CAS quickly)
         let removed = modeld_core::GcEngine::cleanup_tmp(&store, 7 * 24, 24)?;
         if removed > 0 {
-            println!(
-                "  {}",
-                tf("gc.cleanup_tmp_done", &[("count", &removed)]).green().bold()
-            );
+            println!("  {}", tf("gc.cleanup_tmp_done", &[("count", &removed)]).green().bold());
         } else {
             println!("  {}", t("gc.cleanup_tmp_none"));
         }
@@ -2464,21 +2509,37 @@ fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
     println!("{}", "─".repeat(50).yellow());
 
     if !report.missing_cas.is_empty() {
-        println!("\n  {} {}", "✗".red(), tf("verify.missing_cas", &[("count", &report.missing_cas.len())]).red().bold());
+        println!(
+            "\n  {} {}",
+            "✗".red(),
+            tf("verify.missing_cas", &[("count", &report.missing_cas.len())]).red().bold()
+        );
         for h in &report.missing_cas {
             println!("    {}", h.as_hex()[..16].to_string().dimmed());
         }
     }
 
     if !report.dangling_aliases.is_empty() {
-        println!("\n  {} {}", "✗".red(), tf("verify.dangling_aliases", &[("count", &report.dangling_aliases.len())]).red().bold());
+        println!(
+            "\n  {} {}",
+            "✗".red(),
+            tf("verify.dangling_aliases", &[("count", &report.dangling_aliases.len())])
+                .red()
+                .bold()
+        );
         for a in &report.dangling_aliases {
             println!("    {}", a.path.dimmed());
         }
     }
 
     if !report.size_mismatches.is_empty() {
-        println!("\n  {} {}", "⚠".yellow(), tf("verify.size_mismatches", &[("count", &report.size_mismatches.len())]).yellow().bold());
+        println!(
+            "\n  {} {}",
+            "⚠".yellow(),
+            tf("verify.size_mismatches", &[("count", &report.size_mismatches.len())])
+                .yellow()
+                .bold()
+        );
         for s in &report.size_mismatches {
             println!(
                 "    {} db={} disk={}",
@@ -2490,7 +2551,11 @@ fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
     }
 
     if !report.orphan_cas.is_empty() {
-        println!("\n  {} {}", "•".blue(), tf("verify.orphan_cas", &[("count", &report.orphan_cas.len())]).bold());
+        println!(
+            "\n  {} {}",
+            "•".blue(),
+            tf("verify.orphan_cas", &[("count", &report.orphan_cas.len())]).bold()
+        );
     }
 
     println!();
@@ -2549,7 +2614,11 @@ fn serve_command(
                 .yellow()
                 .bold()
         );
-        println!("{}", "   Restrict access with a firewall if this machine is reachable from the internet.".yellow());
+        println!(
+            "{}",
+            "   Restrict access with a firewall if this machine is reachable from the internet."
+                .yellow()
+        );
         println!();
     }
 
@@ -2593,10 +2662,9 @@ fn serve_command(
 
 fn proxy_command(action: ProxyAction) -> Result<()> {
     match action {
-        ProxyAction::Start { bind, port, store, token, allow_anonymous: _, config: _ } => {
-            // `modeld proxy start` is a compatibility alias for `modeld serve`.
-            let host = if bind == "0.0.0.0" { bind } else { bind };
-            serve_command(host, port, false, store, false)
+        ProxyAction::Start { bind, port, store, token, allow_anonymous, config } => {
+            // `modeld proxy start` is a compatibility alias for the legacy proxy server.
+            proxy_start_command(bind, port, store, token, allow_anonymous, config)
         }
         ProxyAction::Discover { timeout } => proxy_discover_command(timeout),
         ProxyAction::Status { url, token } => proxy_status_command(&url, token),
@@ -2660,11 +2728,7 @@ fn proxy_discover_command(timeout: u64) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{} {}",
-        "✓".green().bold(),
-        tf("proxy.discover.found", &[("count", &servers.len())])
-    );
+    println!("{} {}", "✓".green().bold(), tf("proxy.discover.found", &[("count", &servers.len())]));
     println!();
     for s in &servers {
         let url = format!("http://{}:{}", s.address, s.port);
@@ -2748,10 +2812,7 @@ fn proxy_token_rotate_command(store_path: PathBuf) -> Result<()> {
 
     println!("{}", "✓ Bearer token rotated successfully.".green().bold());
     println!("  {}", format!("New token: {}", new_token).bold());
-    println!(
-        "  {}",
-        "Restart the proxy server for the change to take effect.".dimmed()
-    );
+    println!("  {}", "Restart the proxy server for the change to take effect.".dimmed());
     Ok(())
 }
 
@@ -2793,10 +2854,7 @@ fn doctor_command(store_path: PathBuf, json_output: bool) -> Result<()> {
     // Human-readable output
     println!("{}", "modeld doctor".cyan().bold());
     println!("{}", "─".repeat(50).cyan());
-    println!(
-        "  version      : {}",
-        report.version
-    );
+    println!("  version      : {}", report.version);
     let git_hash = option_env!("GIT_HASH").unwrap_or("unknown");
     println!("  git hash     : {}", git_hash);
     println!("  build target : {}", report.build_target);
@@ -2854,9 +2912,7 @@ fn store_command(action: StoreAction) -> Result<()> {
             let path = resolve_store(store);
             verify_command(path, json)
         }
-        StoreAction::Migrate { from, to } => {
-            store_migrate_command(from, to)
-        }
+        StoreAction::Migrate { from, to } => store_migrate_command(from, to),
     }
 }
 
@@ -2877,13 +2933,11 @@ fn store_migrate_command(from: PathBuf, to: PathBuf) -> Result<()> {
     copy_dir_all(&from, &to)?;
 
     println!("{}", "✓ Migration complete.".green().bold());
+    println!("  {}", format!("New store: {}", to.display()).dimmed());
     println!(
         "  {}",
-        format!("New store: {}", to.display()).dimmed()
-    );
-    println!(
-        "  {}",
-        "You can now update your MODELD_STORE or modeld.toml to point to the new location.".dimmed()
+        "You can now update your MODELD_STORE or modeld.toml to point to the new location."
+            .dimmed()
     );
 
     Ok(())
@@ -2904,12 +2958,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         } else if ty.is_file() {
             // CAS objects are read-only; copy with overwrite
             if let Err(e) = std::fs::copy(entry.path(), &dst_path) {
-                eprintln!(
-                    "  {} skipping {}: {}",
-                    "⚠".yellow(),
-                    entry.path().display(),
-                    e
-                );
+                eprintln!("  {} skipping {}: {}", "⚠".yellow(), entry.path().display(), e);
             }
         }
     }
@@ -2934,12 +2983,7 @@ fn config_command(action: ConfigAction) -> Result<()> {
             let mut config = load_config(&store_path)?;
             config_set_value(&mut config, &key, &value)?;
             save_config(&store_path, &config)?;
-            println!(
-                "{} {} = {}",
-                "✓".green().bold(),
-                key.bold(),
-                value
-            );
+            println!("{} {} = {}", "✓".green().bold(), key.bold(), value);
             Ok(())
         }
     }
@@ -2962,11 +3006,7 @@ fn config_get_value(config: &modeld_core::ModeldConfig, key: &str) -> Result<Str
 }
 
 /// Write a config value by dotted key.
-fn config_set_value(
-    config: &mut modeld_core::ModeldConfig,
-    key: &str,
-    value: &str,
-) -> Result<()> {
+fn config_set_value(config: &mut modeld_core::ModeldConfig, key: &str, value: &str) -> Result<()> {
     match key {
         "store.path" => {
             config.store.path = if value.is_empty() { None } else { Some(value.to_string()) };
@@ -3051,15 +3091,9 @@ fn hf_subcommand_snapshot(
         );
     }
 
-    println!(
-        "{} {}",
-        "Fetching file list for".cyan().bold(),
-        repo_id.bold()
-    );
+    println!("{} {}", "Fetching file list for".cyan().bold(), repo_id.bold());
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_read(std::time::Duration::from_secs(30))
-        .build();
+    let agent = ureq::AgentBuilder::new().timeout_read(std::time::Duration::from_secs(30)).build();
     let api_url = format!("https://huggingface.co/api/models/{}", repo_id);
     let mut req = agent.get(&api_url);
     if let Some(ref t) = token {
@@ -3084,10 +3118,7 @@ fn hf_subcommand_snapshot(
         return Ok(());
     }
 
-    println!(
-        "{}",
-        format!("Found {} files. Starting download...", files.len()).bold()
-    );
+    println!("{}", format!("Found {} files. Starting download...", files.len()).bold());
 
     let mut ok = 0usize;
     let mut failed = 0usize;
@@ -3184,8 +3215,7 @@ fn hf_token_command(action: HfTokenAction) -> Result<()> {
     match action {
         HfTokenAction::Set { store } => {
             let store_path = resolve_store(store);
-            std::fs::create_dir_all(&store_path)
-                .context("Failed to create store directory")?;
+            std::fs::create_dir_all(&store_path).context("Failed to create store directory")?;
 
             print!("Enter your HuggingFace token: ");
             std::io::Write::flush(&mut std::io::stdout())?;
@@ -3201,7 +3231,8 @@ fn hf_token_command(action: HfTokenAction) -> Result<()> {
             println!("{}", "Token stored successfully.".green().bold());
             println!(
                 "{}",
-                "Tip: You can also set HF_TOKEN in your environment for a session-scoped token.".dimmed()
+                "Tip: You can also set HF_TOKEN in your environment for a session-scoped token."
+                    .dimmed()
             );
             Ok(())
         }
@@ -3229,9 +3260,7 @@ fn read_secret_from_stdin() -> Result<String> {
     // On Windows: `rpassword` is not a dependency, so we do a plain read.
     // The task specification explicitly avoids adding `keyring` or complex deps.
     let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("Failed to read token from stdin")?;
+    std::io::stdin().read_line(&mut line).context("Failed to read token from stdin")?;
     Ok(line.trim().to_string())
 }
 
@@ -3261,10 +3290,8 @@ fn tag_command(action: TagAction) -> Result<()> {
             let db = Database::open(&db_path)?;
             let tags = list_all_tags(&db)?;
             if json {
-                let j: Vec<_> = tags
-                    .iter()
-                    .map(|(t, c)| serde_json::json!({"tag": t, "count": c}))
-                    .collect();
+                let j: Vec<_> =
+                    tags.iter().map(|(t, c)| serde_json::json!({"tag": t, "count": c})).collect();
                 println!("{}", serde_json::to_string_pretty(&j)?);
             } else {
                 for (tag, count) in &tags {
@@ -3472,31 +3499,24 @@ fn refs_graph_command(db: &Database, json_output: bool) -> Result<()> {
     for (model, alias_count, wf_count) in &sorted {
         let status = classify_refs(db, &model.blake3_hash);
         let (status_str, colored_status) = match status {
-            RefStatus::HardReference  => ("hard-ref ",  "hard-ref ".green().to_string()),
-            RefStatus::SoftReference  => ("soft-ref ",  "soft-ref ".yellow().to_string()),
-            RefStatus::Pinned         => ("pinned   ",  "pinned   ".cyan().to_string()),
-            RefStatus::RecentlyUsed   => ("recent   ",  "recent   ".blue().to_string()),
-            RefStatus::Unknown        => ("unknown  ",  "unknown  ".dimmed().to_string()),
-            RefStatus::OrphanCandidate=> ("orphan   ",  "orphan   ".red().to_string()),
+            RefStatus::HardReference => ("hard-ref ", "hard-ref ".green().to_string()),
+            RefStatus::SoftReference => ("soft-ref ", "soft-ref ".yellow().to_string()),
+            RefStatus::Pinned => ("pinned   ", "pinned   ".cyan().to_string()),
+            RefStatus::RecentlyUsed => ("recent   ", "recent   ".blue().to_string()),
+            RefStatus::Unknown => ("unknown  ", "unknown  ".dimmed().to_string()),
+            RefStatus::OrphanCandidate => ("orphan   ", "orphan   ".red().to_string()),
         };
         let _ = status_str;
         let size_str = format_bytes(model.size_bytes as u64);
         let hash_prefix = &model.blake3_hash.as_hex()[..16];
         println!(
             "  {}...  {:>7}  {:>8}  {:>8}  {}",
-            hash_prefix,
-            size_str,
-            alias_count,
-            wf_count,
-            colored_status,
+            hash_prefix, size_str, alias_count, wf_count, colored_status,
         );
     }
 
     println!("{}", "─".repeat(70).dimmed());
-    println!(
-        "  Total: {} model(s)",
-        sorted.len()
-    );
+    println!("  Total: {} model(s)", sorted.len());
     Ok(())
 }
 
@@ -3562,7 +3582,10 @@ fn tx_command(action: TxAction) -> Result<()> {
                 } else {
                     println!("tx_id:  {}", r.tx_id);
                     println!("status: {:?}", r.status);
-                    println!("op:     {}", r.op_type.as_ref().map(|o| o.as_str()).unwrap_or("unknown"));
+                    println!(
+                        "op:     {}",
+                        r.op_type.as_ref().map(|o| o.as_str()).unwrap_or("unknown")
+                    );
                     println!("start:  {}", r.start_time);
                     if let Some(end) = r.end_time {
                         println!("end:    {}", end);
@@ -3701,10 +3724,7 @@ fn db_command(action: DbAction) -> Result<()> {
                     version_before, version_after
                 );
             } else if version_after >= latest {
-                println!(
-                    "✓ Database is already at the latest schema version (v{})",
-                    version_after
-                );
+                println!("✓ Database is already at the latest schema version (v{})", version_after);
             } else {
                 println!("  Database is at schema version {} (latest: {})", version_after, latest);
             }

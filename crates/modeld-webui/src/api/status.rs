@@ -37,8 +37,7 @@ pub async fn get_status(State(state): State<AppState>) -> ApiResult<Json<StatusR
     for model in &models {
         let aliases = db.get_aliases_for_model(&model.blake3_hash).unwrap_or_default();
         if aliases.len() >= 2 {
-            dedup_savings_bytes +=
-                model.size_bytes as u64 * (aliases.len() as u64 - 1);
+            dedup_savings_bytes += model.size_bytes as u64 * (aliases.len() as u64 - 1);
         }
     }
 

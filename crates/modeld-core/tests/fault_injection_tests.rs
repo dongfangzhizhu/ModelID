@@ -8,8 +8,8 @@
 
 use modeld_core::{
     db::{Database, TransactionStatus},
-    hash_file, Blake3Hash, CasStore, OpType, PathEntry, RollbackPlan, TransactionManager,
-    TxFilter, TxPlan, TxStatus,
+    hash_file, Blake3Hash, CasStore, OpType, PathEntry, RollbackPlan, TransactionManager, TxFilter,
+    TxPlan, TxStatus,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -66,10 +66,7 @@ fn test_recover_cleans_part_file_and_marks_failed() {
     let results = tm2.recover().unwrap();
 
     // Step 5: staging directory must be gone
-    assert!(
-        !staging_dir.exists(),
-        "staging directory should have been removed by recover()"
-    );
+    assert!(!staging_dir.exists(), "staging directory should have been removed by recover()");
 
     // Transaction must now be FAILED
     let records = tm2.list(TxFilter::default()).unwrap();
@@ -154,8 +151,7 @@ fn test_disk_full_no_partial_cas_object() {
     let real_hash = hash_file(&src).unwrap();
 
     // Wrong hash simulates writing failure / premature EOF detected via checksum
-    let wrong_hash =
-        Blake3Hash::from_hex(&"0".repeat(64)).unwrap();
+    let wrong_hash = Blake3Hash::from_hex(&"0".repeat(64)).unwrap();
 
     let tx_id = "disk-full-test-tx-001";
 
@@ -171,22 +167,13 @@ fn test_disk_full_no_partial_cas_object() {
     assert!(store_result.is_err(), "store_crash_safe should fail on hash mismatch");
 
     // No partial object committed to CAS under the wrong hash
-    let would_be_cas_path = store
-        .join("cas")
-        .join("blake3")
-        .join(&wrong_hash.as_hex()[..2])
-        .join(wrong_hash.as_hex());
-    assert!(
-        !would_be_cas_path.exists(),
-        "no partial CAS object should exist after failed store"
-    );
+    let would_be_cas_path =
+        store.join("cas").join("blake3").join(&wrong_hash.as_hex()[..2]).join(wrong_hash.as_hex());
+    assert!(!would_be_cas_path.exists(), "no partial CAS object should exist after failed store");
 
     // No partial object under the real hash either (we never used it)
-    let real_cas_path = store
-        .join("cas")
-        .join("blake3")
-        .join(&real_hash.as_hex()[..2])
-        .join(real_hash.as_hex());
+    let real_cas_path =
+        store.join("cas").join("blake3").join(&real_hash.as_hex()[..2]).join(real_hash.as_hex());
     assert!(!real_cas_path.exists(), "real CAS path should not exist yet");
 
     // Staging .part file should be cleaned up by store_crash_safe
@@ -199,17 +186,9 @@ fn test_disk_full_no_partial_cas_object() {
 
     // Verify the transaction is FAILED
     let records = tm.list(TxFilter::default()).unwrap();
-    let rec = records
-        .iter()
-        .find(|r| r.tx_id == actual_tx_id)
-        .expect("transaction not found");
+    let rec = records.iter().find(|r| r.tx_id == actual_tx_id).expect("transaction not found");
     assert_eq!(rec.status, TxStatus::Failed);
-    assert!(
-        rec.error_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("hash mismatch")
-    );
+    assert!(rec.error_message.as_deref().unwrap_or("").contains("hash mismatch"));
 }
 
 /// Additional disk-full variant: verify that a successful store followed by
@@ -273,21 +252,22 @@ fn test_permission_denied_transaction_fails_original_unchanged() {
 
     // Begin transaction
     let mut tm = TransactionManager::new(&mut db, &store);
-    let handle = tm.begin(
-        OpType::CasPromotion,
-        TxPlan {
-            op_type: OpType::CasPromotion,
-            affected_paths: vec![PathEntry {
-                source: src.clone(),
-                target: None,
-                original_hash: Some(real_hash.clone()),
-                new_hash: None,
-                size: original_content.len() as u64,
-            }],
-            rollback_plan: RollbackPlan::default(),
-        },
-    )
-    .unwrap();
+    let handle = tm
+        .begin(
+            OpType::CasPromotion,
+            TxPlan {
+                op_type: OpType::CasPromotion,
+                affected_paths: vec![PathEntry {
+                    source: src.clone(),
+                    target: None,
+                    original_hash: Some(real_hash.clone()),
+                    new_hash: None,
+                    size: original_content.len() as u64,
+                }],
+                rollback_plan: RollbackPlan::default(),
+            },
+        )
+        .unwrap();
     let tx_id = handle.tx_id.clone();
 
     // Simulate permission failure: use a wrong hash to trigger store_crash_safe's error path.
@@ -317,11 +297,8 @@ fn test_permission_denied_transaction_fails_original_unchanged() {
     assert!(rec.error_message.is_some(), "error message should be set");
 
     // CAS must NOT contain the file under the wrong hash
-    let wrong_cas = store
-        .join("cas")
-        .join("blake3")
-        .join(&wrong_hash.as_hex()[..2])
-        .join(wrong_hash.as_hex());
+    let wrong_cas =
+        store.join("cas").join("blake3").join(&wrong_hash.as_hex()[..2]).join(wrong_hash.as_hex());
     assert!(!wrong_cas.exists(), "no CAS object should exist under the wrong hash");
 }
 
@@ -356,17 +333,12 @@ fn test_recover_cleans_legacy_tmp_staging_file() {
     let results = tm.recover().unwrap();
 
     // Legacy .tmp file should be removed
-    assert!(
-        !legacy_tmp.exists(),
-        "legacy .tmp staging file should be cleaned up by recover()"
-    );
+    assert!(!legacy_tmp.exists(), "legacy .tmp staging file should be cleaned up by recover()");
 
     // Transaction should be FAILED
     let records = tm.list(TxFilter::default()).unwrap();
-    let rec = records
-        .iter()
-        .find(|r| r.tx_id == "legacy-staging-tx-001")
-        .expect("transaction not found");
+    let rec =
+        records.iter().find(|r| r.tx_id == "legacy-staging-tx-001").expect("transaction not found");
     assert_eq!(rec.status, TxStatus::Failed);
 
     assert!(!results.is_empty(), "should have at least one recovery result");

@@ -52,10 +52,7 @@ impl ProxyServer {
         let server = Server::http(bind.as_str())
             .map_err(|e| anyhow!("Failed to bind proxy server to {}: {}", bind, e))?;
         let store = self.store_path.display().to_string();
-        eprintln!(
-            "{}",
-            modeld_core::tf("proxy.listening", &[("bind", &bind), ("store", &store)])
-        );
+        eprintln!("{}", modeld_core::tf("proxy.listening", &[("bind", &bind), ("store", &store)]));
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_handler = shutdown.clone();

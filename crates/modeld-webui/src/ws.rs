@@ -32,12 +32,12 @@ impl WsBroadcaster {
 }
 
 /// WebSocket upgrade handler — each client gets a dedicated task.
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    let rx = state.event_tx.subscribe();
-    ws.on_upgrade(move |socket| handle_socket(socket, rx))
+///
+/// Authentication is enforced via the `require_bearer_token` middleware
+/// applied at the router level (see `server.rs`).
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    let tx = state.event_tx.clone();
+    ws.on_upgrade(move |socket| handle_socket(socket, tx.subscribe()))
 }
 
 async fn handle_socket(socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) {

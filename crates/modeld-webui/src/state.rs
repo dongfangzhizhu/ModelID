@@ -30,16 +30,17 @@ pub struct AppState {
 pub enum WsEvent {
     /// File-system scan progress.
     ScanProgress {
-        path: String,
-        done: u64,
-        total: u64,
+        scan_id: String,
+        /// One of: "walking" | "hashing" | "indexing" | "done" | "error"
+        phase: String,
+        current_path: Option<String>,
+        files_scanned: u64,
+        files_total: u64,
+        bytes_scanned: u64,
+        bytes_total: u64,
     },
     /// Deduplication progress.
-    DedupProgress {
-        group: String,
-        done: usize,
-        total: usize,
-    },
+    DedupProgress { group: String, done: usize, total: usize },
     /// Per-download transfer progress.
     DownloadProgress {
         download_id: String,
@@ -49,20 +50,11 @@ pub enum WsEvent {
         speed_bps: u64,
     },
     /// Garbage-collection progress.
-    GcProgress {
-        done: usize,
-        total: usize,
-    },
+    GcProgress { done: usize, total: usize },
     /// Emitted when a background operation finishes.
-    OperationComplete {
-        operation: String,
-        success: bool,
-        message: String,
-    },
+    OperationComplete { operation: String, success: bool, message: String },
     /// Emitted when a background operation encounters a fatal error.
-    Error {
-        message: String,
-    },
+    Error { message: String },
     /// Daemon heartbeat / status snapshot.
     DaemonStatus(DaemonStatusPayload),
 }
@@ -95,5 +87,173 @@ impl AppState {
             rate_limit_per_min,
         };
         (state, event_rx)
+    }
+}
+
+// ─── Serialization stability tests (audit Wave 3, Req 3.11) ───────────────────
+//
+// These tests exist as a regression guard: the WebUI frontend (`ui/main.js`
+// and `ui/pages/dashboard.js`) deserializes WsEvent JSON messages and reads
+// these exact field names. If a field is renamed or removed here without
+// updating the frontend, these tests should fail first.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_event_scan_progress_field_names_are_stable() {
+        let event = WsEvent::ScanProgress {
+            scan_id: "scan-abc123".to_string(),
+            phase: "hashing".to_string(),
+            current_path: Some("/models/file.safetensors".to_string()),
+            files_scanned: 42,
+            files_total: 100,
+            bytes_scanned: 1024,
+            bytes_total: 2048,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize WsEvent::ScanProgress");
+        let obj = value.as_object().expect("WsEvent::ScanProgress serializes to an object");
+
+        // Check the "type" tag field (from #[serde(tag = "type")])
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("scan_progress"),
+            "WsEvent::ScanProgress type tag must be 'scan_progress'"
+        );
+
+        // Check all variant fields
+        for field in [
+            "scan_id",
+            "phase",
+            "current_path",
+            "files_scanned",
+            "files_total",
+            "bytes_scanned",
+            "bytes_total",
+        ] {
+            assert!(obj.contains_key(field), "WsEvent::ScanProgress missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn ws_event_dedup_progress_field_names_are_stable() {
+        let event = WsEvent::DedupProgress { group: "group-1".to_string(), done: 5, total: 10 };
+
+        let value = serde_json::to_value(&event).expect("serialize WsEvent::DedupProgress");
+        let obj = value.as_object().expect("WsEvent::DedupProgress serializes to an object");
+
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("dedup_progress"),
+            "WsEvent::DedupProgress type tag must be 'dedup_progress'"
+        );
+
+        for field in ["group", "done", "total"] {
+            assert!(obj.contains_key(field), "WsEvent::DedupProgress missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn ws_event_download_progress_field_names_are_stable() {
+        let event = WsEvent::DownloadProgress {
+            download_id: "dl-xyz".to_string(),
+            bytes_done: 512,
+            bytes_total: 1024,
+            speed_bps: 2048,
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize WsEvent::DownloadProgress");
+        let obj = value.as_object().expect("WsEvent::DownloadProgress serializes to an object");
+
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("download_progress"),
+            "WsEvent::DownloadProgress type tag must be 'download_progress'"
+        );
+
+        for field in ["download_id", "bytes_done", "bytes_total", "speed_bps"] {
+            assert!(obj.contains_key(field), "WsEvent::DownloadProgress missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn ws_event_gc_progress_field_names_are_stable() {
+        let event = WsEvent::GcProgress { done: 7, total: 14 };
+
+        let value = serde_json::to_value(&event).expect("serialize WsEvent::GcProgress");
+        let obj = value.as_object().expect("WsEvent::GcProgress serializes to an object");
+
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("gc_progress"),
+            "WsEvent::GcProgress type tag must be 'gc_progress'"
+        );
+
+        for field in ["done", "total"] {
+            assert!(obj.contains_key(field), "WsEvent::GcProgress missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn ws_event_operation_complete_field_names_are_stable() {
+        let event = WsEvent::OperationComplete {
+            operation: "scan".to_string(),
+            success: true,
+            message: "Scan completed successfully".to_string(),
+        };
+
+        let value = serde_json::to_value(&event).expect("serialize WsEvent::OperationComplete");
+        let obj = value.as_object().expect("WsEvent::OperationComplete serializes to an object");
+
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("operation_complete"),
+            "WsEvent::OperationComplete type tag must be 'operation_complete'"
+        );
+
+        for field in ["operation", "success", "message"] {
+            assert!(obj.contains_key(field), "WsEvent::OperationComplete missing field `{field}`");
+        }
+    }
+
+    #[test]
+    fn ws_event_error_field_names_are_stable() {
+        let event = WsEvent::Error { message: "An error occurred".to_string() };
+
+        let value = serde_json::to_value(&event).expect("serialize WsEvent::Error");
+        let obj = value.as_object().expect("WsEvent::Error serializes to an object");
+
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("error"),
+            "WsEvent::Error type tag must be 'error'"
+        );
+
+        assert!(obj.contains_key("message"), "WsEvent::Error missing field `message`");
+    }
+
+    #[test]
+    fn ws_event_daemon_status_field_names_are_stable() {
+        let event = WsEvent::DaemonStatus(DaemonStatusPayload {
+            scanning: true,
+            deduping: false,
+            uptime_secs: 3600,
+        });
+
+        let value = serde_json::to_value(&event).expect("serialize WsEvent::DaemonStatus");
+        let obj = value.as_object().expect("WsEvent::DaemonStatus serializes to an object");
+
+        assert_eq!(
+            obj.get("type").and_then(|v| v.as_str()),
+            Some("daemon_status"),
+            "WsEvent::DaemonStatus type tag must be 'daemon_status'"
+        );
+
+        // For this variant, the DaemonStatusPayload is flattened into the object
+        // (it's a tuple variant containing the payload, so check for the payload fields)
+        for field in ["scanning", "deduping", "uptime_secs"] {
+            assert!(obj.contains_key(field), "WsEvent::DaemonStatus missing field `{field}`");
+        }
     }
 }

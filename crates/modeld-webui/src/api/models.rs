@@ -116,9 +116,9 @@ pub async fn list_models(
 
     // Sorting
     match params.sort.as_deref() {
-        Some("size") => items.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes)),
+        Some("size") => items.sort_by_key(|b| std::cmp::Reverse(b.size_bytes)),
         Some("name") => items.sort_by(|a, b| a.name.cmp(&b.name)),
-        Some("ref_count") => items.sort_by(|a, b| b.ref_count.cmp(&a.ref_count)),
+        Some("ref_count") => items.sort_by_key(|b| std::cmp::Reverse(b.ref_count)),
         _ => items.sort_by(|a, b| b.last_seen.cmp(&a.last_seen)),
     }
     if params.order.as_deref() == Some("asc") {
@@ -163,8 +163,7 @@ pub async fn get_model(
 
     let aliases = db.get_aliases_for_model(&hash_obj).unwrap_or_default();
     let ref_count = aliases.len();
-    let frontends: Vec<String> =
-        aliases.iter().map(|a| a.frontend.as_str().to_string()).collect();
+    let frontends: Vec<String> = aliases.iter().map(|a| a.frontend.as_str().to_string()).collect();
     let paths: Vec<String> = aliases.iter().map(|a| a.path.clone()).collect();
 
     let name = paths

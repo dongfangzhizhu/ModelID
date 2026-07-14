@@ -59,10 +59,11 @@ export function render(container) {
                 <tr><td><span class="badge badge-green">GET</span></td>  <td class="mono">/api/v1/models</td>          <td>${t('proxy.api.models')}</td></tr>
                 <tr><td><span class="badge badge-green">GET</span></td>  <td class="mono">/api/v1/models/:hash</td>    <td>${t('proxy.api.model')}</td></tr>
                 <tr><td><span class="badge badge-green">GET</span></td>  <td class="mono">/api/v1/dupes</td>           <td>${t('proxy.api.dupes')}</td></tr>
-                <tr><td><span class="badge badge-blue">POST</span></td>  <td class="mono">/api/v1/dupes/dedup</td>     <td>${t('proxy.api.dedup')}</td></tr>
+                <tr><td><span class="badge badge-blue">POST</span></td>  <td class="mono">/api/v1/dedup/preview</td>   <td>${t('proxy.api.dedup')}</td></tr>
+                <tr><td><span class="badge badge-blue">POST</span></td>  <td class="mono">/api/v1/dedup/apply</td>     <td>${t('proxy.api.dedup')}</td></tr>
                 <tr><td><span class="badge badge-green">GET</span></td>  <td class="mono">/api/v1/downloads</td>       <td>${t('proxy.api.dls')}</td></tr>
-                <tr><td><span class="badge badge-blue">POST</span></td>  <td class="mono">/api/v1/scan/trigger</td>   <td>${t('proxy.api.scan')}</td></tr>
-                <tr><td><span class="badge badge-blue">POST</span></td>  <td class="mono">/api/v1/gc/preview</td>     <td>${t('proxy.api.gcprev')}</td></tr>
+                <tr><td><span class="badge badge-blue">POST</span></td>  <td class="mono">/api/v1/scan</td>           <td>${t('proxy.api.scan')}</td></tr>
+                <tr><td><span class="badge badge-green">GET</span></td>  <td class="mono">/api/v1/gc/preview</td>     <td>${t('proxy.api.gcprev')}</td></tr>
                 <tr><td><span class="badge badge-blue">POST</span></td>  <td class="mono">/api/v1/gc/run</td>         <td>${t('proxy.api.gc')}</td></tr>
                 <tr><td><span class="badge badge-green">GET</span></td>  <td class="mono">/api/v1/settings</td>       <td>${t('proxy.api.set_get')}</td></tr>
                 <tr><td><span class="badge badge-orange">PUT</span></td> <td class="mono">/api/v1/settings</td>       <td>${t('proxy.api.set_put')}</td></tr>

@@ -185,6 +185,8 @@ fn en(key: &str) -> Option<&'static str> {
         "scan.complete" => "✓ Scan complete",
         "scan.processed" => "  Processed: {count}",
         "scan.total_size" => "  Total size: {gb} GB",
+        "scan.errors_header" => "  Errors: {count}",
+        "scan.error_line" => "    {path}: {reason}",
         "scan.progress_msg" => "{name} ({mb} MB)",
         "progress.done" => "Done",
         "progress.processing" => "Processing {prefix} ({current}/{total})",
@@ -457,6 +459,8 @@ fn zh(key: &str) -> Option<&'static str> {
         "scan.complete" => "✓ 扫描完成",
         "scan.processed" => "  已处理：{count}",
         "scan.total_size" => "  总大小：{gb} GB",
+        "scan.errors_header" => "  错误：{count}",
+        "scan.error_line" => "    {path}：{reason}",
         "scan.progress_msg" => "{name}（{mb} MB）",
         "progress.done" => "完成",
         "progress.processing" => "正在处理 {prefix}（{current}/{total}）",
@@ -551,7 +555,9 @@ fn zh(key: &str) -> Option<&'static str> {
         "quarantine.quarantined_at" => "    隔离时间：{value}",
         "quarantine.total" => "  总计：{count} 个文件",
         "quarantine.size_line" => "  大小：{mb} MB",
-        "quarantine.cleanup_expired_hint" => "\n  {count} 个已过期文件 - 运行 'modeld quarantine cleanup'",
+        "quarantine.cleanup_expired_hint" => {
+            "\n  {count} 个已过期文件 - 运行 'modeld quarantine cleanup'"
+        }
         "quarantine.cleanup.start" => "正在清理已过期的隔离条目…",
         "quarantine.cleanup.none" => "✓ 没有需要清理的过期条目",
         "quarantine.cleanup.done" => "✓ 已移除 {count} 个过期的隔离条目",
@@ -622,8 +628,9 @@ fn zh(key: &str) -> Option<&'static str> {
         "orphans.col_size" => "大小",
         "orphans.col_format" => "格式",
         "orphans.summary" => "  {count} 个孤立模型，可回收 {size}",
-        "orphans.tip" =>
-            "提示：运行 `modeld gc --preview` 查看 GC 计划，或运行 `modeld gc` 隔离这些模型。",
+        "orphans.tip" => {
+            "提示：运行 `modeld gc --preview` 查看 GC 计划，或运行 `modeld gc` 隔离这些模型。"
+        }
 
         // ── gc ──
         "gc.preview.header" => "GC 预览（不会做任何更改）：",
@@ -680,12 +687,11 @@ fn zh(key: &str) -> Option<&'static str> {
         "warn.recover_move_failed" => "恢复：事务 {tx} 的暂存文件移至 CAS 失败：{error}",
         "warn.recover_phase_b_done" => "恢复：事务 {tx} 的阶段 B 已完成",
         "warn.recover_processed" => "恢复：已处理 {count} 个未完成的事务",
-        "warn.quarantine_cleanup_failed" =>
-            "警告：清理过期隔离条目 {path} 失败：{error}",
-        "warn.mdns_announce" =>
-            "modeld mDNS：服务 modeld.{stype} 在 :{port} 上 [TXT: {txt}]",
-        "warn.mdns_announce_hint" =>
-            "  （通过宿主 mDNS 守护进程发布：avahi-publish / dns-sd / Bonjour）",
+        "warn.quarantine_cleanup_failed" => "警告：清理过期隔离条目 {path} 失败：{error}",
+        "warn.mdns_announce" => "modeld mDNS：服务 modeld.{stype} 在 :{port} 上 [TXT: {txt}]",
+        "warn.mdns_announce_hint" => {
+            "  （通过宿主 mDNS 守护进程发布：avahi-publish / dns-sd / Bonjour）"
+        }
 
         _ => return None,
     })
