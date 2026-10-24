@@ -128,8 +128,8 @@ pub fn recover_store(
                 // An interrupted ingest is worth finishing: the CAS object may
                 // already be published, and without the DB rows nothing would
                 // ever reference it again.
-                if tx.operation == "ingest" {
-                    if let Some(report) = roll_forward_ingest(db, store_path, &tx) {
+                if tx.operation == "ingest" || tx.operation == "download" {
+                    if let Some(report) = roll_forward_file_import(db, store_path, &tx) {
                         reports.push(report);
                         continue;
                     }
@@ -346,7 +346,7 @@ pub fn recover_store(
 ///
 /// Returns `None` when the transaction cannot be completed (no usable hash, no
 /// object, or the source vanished); the caller then rolls it back.
-fn roll_forward_ingest(
+fn roll_forward_file_import(
     db: &mut Database,
     store_path: &Path,
     tx: &crate::db::WalTransaction,
@@ -360,15 +360,22 @@ fn roll_forward_ingest(
 
     let size = std::fs::metadata(&cas_path).map(|m| m.len() as i64).unwrap_or(0);
     db.insert_or_update_model(&hash, size, None, None, None, None).ok()?;
-    let alias_type = tx
-        .metadata
-        .as_deref()
-        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-        .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(str::to_string))
-        .map(|mode| if mode == "adopt" { AliasType::Hardlink } else { AliasType::Original })
-        .unwrap_or(AliasType::Original);
+    // A downloaded file is referenced through the HF cache (symlink); an
+    // ingested one through its own path.
+    let (frontend, alias_type) = if tx.operation == "download" {
+        (Frontend::HfCache, AliasType::Symlink)
+    } else {
+        let alias_type = tx
+            .metadata
+            .as_deref()
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(str::to_string))
+            .map(|mode| if mode == "adopt" { AliasType::Hardlink } else { AliasType::Original })
+            .unwrap_or(AliasType::Original);
+        (Frontend::User, alias_type)
+    };
     if db.get_alias_by_path(source).ok().flatten().is_none() {
-        let _ = db.insert_alias(&hash, source, Frontend::User, alias_type);
+        let _ = db.insert_alias(&hash, source, frontend, alias_type);
     }
 
     let mut report = RecoveryReport::new(&tx.tx_id, &tx.operation, TxAction::RolledForward);
@@ -478,6 +485,36 @@ mod tests {
         assert!(reports[0].paths.iter().any(|p| p.action == PathAction::RolledForward));
         // The DB rows the crashed ingest never wrote are now there.
         assert!(db.get_alias_by_path(source.to_string_lossy().as_ref()).unwrap().is_some());
+        assert!(db.get_incomplete_wal_transactions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn interrupted_download_is_finished() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut db, store_path) = store(&tmp);
+        let content = vec![3u8; 1024];
+        let hash = hash_of(&content);
+        let cas_path = cas_path_for(&store_path, &hash);
+        std::fs::create_dir_all(cas_path.parent().unwrap()).unwrap();
+        std::fs::write(&cas_path, &content).unwrap();
+        // The HF snapshot path the download would have linked.
+        let snapshot = store_path.join("hf").join("models--org--repo").join("blob");
+        std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+        std::fs::write(&snapshot, &content).unwrap();
+
+        db.insert_wal_transaction(
+            "tx-dl",
+            "download",
+            TransactionStatus::Pending,
+            Some(snapshot.to_string_lossy().as_ref()),
+            Some(hash.as_hex()),
+            Some("{\"repo\":\"org/repo\",\"file\":\"m.bin\"}"),
+        )
+        .unwrap();
+
+        let reports = recover_store(&mut db, &store_path, &LinkCapability::detect()).unwrap();
+        assert_eq!(reports[0].action, TxAction::RolledForward);
+        assert!(db.get_alias_by_path(snapshot.to_string_lossy().as_ref()).unwrap().is_some());
         assert!(db.get_incomplete_wal_transactions().unwrap().is_empty());
     }
 

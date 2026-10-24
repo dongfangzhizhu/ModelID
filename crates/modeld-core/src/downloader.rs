@@ -22,7 +22,9 @@
 //! - Token values are never written to any log output.
 
 use crate::cas::CasStore;
-use crate::db::{AliasType, Database, DownloadStatus, Frontend};
+use crate::db::{
+    TransactionStatus, {AliasType, Database, DownloadStatus, Frontend},
+};
 use crate::hash::{hash_file, Blake3Hash};
 use crate::hf_cache::HfCache;
 use anyhow::{anyhow, Context, Result};
@@ -275,6 +277,22 @@ impl Downloader {
         // Step 5: Compute BLAKE3
         let blake3 = hash_file(&tmp_file).context("Failed to hash downloaded file")?;
 
+        // Record the intent before the bytes become visible. A crash between
+        // the CAS write and the rows below leaves this row behind; recovery
+        // finishes the import when the object exists and rolls it back when it
+        // does not.
+        let tx_id = uuid::Uuid::new_v4().to_string();
+        let snapshot_path =
+            hf_cache.snapshot_file_path(repo_id, filename, rev).to_string_lossy().to_string();
+        db.insert_wal_transaction(
+            &tx_id,
+            "download",
+            TransactionStatus::Pending,
+            Some(&snapshot_path),
+            Some(blake3.as_hex()),
+            Some(&serde_json::json!({ "repo": repo_id, "file": filename }).to_string()),
+        )?;
+
         // Step 6: CAS dedup — skip copy if content already known
         let cas_path = if db.get_model(&blake3)?.is_some() {
             let _ = fs::remove_file(&tmp_file);
@@ -315,6 +333,11 @@ impl Downloader {
         if db.get_alias_by_path(&snapshot_str)?.is_none() {
             db.insert_alias(&blake3, &snapshot_str, Frontend::HfCache, AliasType::Symlink)?;
         }
+
+        // The import is complete: the model, the mapping, the download record
+        // and the HfCache alias all exist.
+        db.update_wal_status(&tx_id, TransactionStatus::Committed)?;
+        db.delete_wal_transaction(&tx_id)?;
 
         // Build provenance
         let provenance = Some(Provenance {

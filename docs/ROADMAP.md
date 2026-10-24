@@ -452,7 +452,7 @@ Refs: docs/ROADMAP.md#A1
 ### B1 · 统一事务边界与崩溃恢复
 
 - **目标**：所有文件系统变更只经由 `StoreTxn`，崩溃后自动 roll-forward。
-- **状态**：🟡 进行中 —— 恢复语义已统一、跨进程锁与目录 fsync 已落地；`ingest`/`downloader` 尚未改走 `StoreTxn`（见下）
+- **状态**：✅ 已完成（`1b289e5` + `b1dl`）—— 恢复语义统一、跨进程锁、目录 fsync、WAL 原子写入，`ingest` 与 `download` 均已纳入 WAL
 - **改动点**：新增 `crates/modeld-core/src/recover.rs`、`store_lock.rs`；改造 `dedup.rs`、`tx.rs`、`links.rs`、`unlink.rs`、`cas.rs`、`platform.rs`、CLI/WebUI 的 dedup 与 gc
 - **产物**：
   - `recover::recover_store`：唯一的恢复实现，`DedupEngine` 与 `modeld tx recover` 都调它
@@ -486,7 +486,7 @@ Refs: docs/ROADMAP.md#A1
   - [x] 并发两个 dedup 进程：一个获锁、另一个等待或明确失败 —— `StoreLock` 6 个单测（含等待后获锁、遗留锁打破）
   - [x] `begin/commit` 包在单个 SQLite 事务内 —— `Database::in_transaction` 2 个单测（成功提交 / 失败回滚且连接仍可用）
   - [x] `ingest` 纳入 WAL 并可前滚 —— 新测试 `interrupted_ingest_is_finished`
-  - [ ] `downloader` 纳入 WAL —— 未做，留待 B1 收尾
+  - [x] `downloader` 纳入 WAL —— 下载前落 pending，写完 model/mapping/alias 后提交；崩溃后由 `recover_store` 前滚（HfCache + Symlink 别名）
 - **测试**：`store_lock` 6 个、`recover` 3 个、原有 `tx` 与 fault-injection 全部通过；`cargo test --workspace --locked` 全绿
 - **验收证据**（2026-10-24，Windows 11）：
   - `cargo test -p modeld-core --lib` → 191 通过（新增 `store_lock` 6 个 + `recover` 3 个 + `in_transaction` 2 个）；
@@ -496,7 +496,8 @@ Refs: docs/ROADMAP.md#A1
   - 恢复：`copied` 事务在 CAS 对象存在时被前滚（dup 路径重新链接），CAS 缺失时降级为 `skipped` 并标 failed；
     报告里每个路径都有处置结果。
   - ingest：模拟「CAS 对象已发布、DB 行未写」的崩溃后，`recover_store` 返回 `rolled-forward`，model 与 alias 行被补上，WAL 无残留。
-  - **未实测**：三平台中断点矩阵（只有 Windows），以及 `downloader` 的 WAL 改造。
+  - download：模拟「CAS 对象已发布、alias 未写」的崩溃后，恢复补上 HfCache/Symlink 别名并清空 WAL。
+  - **未实测**：三平台中断点矩阵（只有 Windows）。
 - **估算**：8 人日 ｜ **依赖**：A1
 
 ### B2 · CLI 拆分与输出层
@@ -706,7 +707,7 @@ Refs: docs/ROADMAP.md#A1
 
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
-| B1 | 统一事务边界与崩溃恢复 | doing | AI agent | 2026-10-24 | — | — |
+| B1 | 统一事务边界与崩溃恢复 | done | AI agent | 2026-10-24 | 2026-10-24 | `1b289e5` |
 | B2 | CLI 拆分与输出层 | todo | — | — | — | — |
 | B3 | 日志与可观测性 | todo | — | — | — | — |
 | B4 | 下载器加固 | todo | — | — | — | — |
@@ -753,9 +754,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 0 | 0% |
+| B 架构收敛 | 9 | 1 | 11% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **8** | **33%** |
+| **合计** | **24** | **9** | **38%** |
 
 ---
 
@@ -810,7 +811,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | A7 | `download` 路径的审计未接（下载完成点在 `downloader.rs`，需要把 `store_path` 传进 `Downloader` 的完成回调） | B4 | open |
 | 2026-10-24 | A8 | 本机无 Docker、无 GitHub Actions，`docker build` 与「三平台 CI 全绿」未实测；两者已写进 CI（`docker` job 断言镜像 < 200 MB 且 token 生效），首次 push 后需人工确认 | C3 | open |
 | 2026-10-24 | A8 | RUSTSEC 公告库因网络不可达未能本地校验，`cargo deny check` 只在 CI 跑；本地只验证了 bans/licenses/sources | C3 | open |
-| 2026-10-24 | B1 | `downloader.rs` 仍未纳入 WAL（`ingest` 已在 2c3072b 之后的提交中补齐），B1 的「所有文件系统变更只经由 StoreTxn」未完成 | B1 收尾 | open |
+| 2026-10-24 | B1 | `downloads` 表与 WAL 是两套状态（`insert_download`/`complete_download` 与 WAL 并存），未来可合并为单一状态机 | C2 | open |
 | 2026-10-24 | B1 | 中断点矩阵只在 Windows 跑过，三平台需 CI | C3 | open |
 | 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | open |
 

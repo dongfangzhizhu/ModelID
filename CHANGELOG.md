@@ -83,6 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call it, and it reports what happened to *every* path it touched
   (`rolled-forward` / `rolled-back` / `skipped`) instead of a bare count.
   (ROADMAP B1)
+- **Downloads are recorded in the write-ahead log too** — `download_hf_file` writes
+  a `pending` `download` transaction (snapshot path, BLAKE3, repo/file) before the
+  CAS write and commits it after the model, mapping, download record and HfCache
+  alias exist. Recovery finishes the import with the HfCache/Symlink alias when
+  the object is on disk. (ROADMAP B1)
 - **Ingest is recorded in the write-ahead log** — `ingest_scan_results` writes a
   `pending` transaction (source path, hash, ingest mode) before the CAS write and
   commits it after the DB rows; recovery finishes an interrupted ingest by
