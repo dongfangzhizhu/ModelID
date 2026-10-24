@@ -452,7 +452,7 @@ Refs: docs/ROADMAP.md#A1
 ### B1 · 统一事务边界与崩溃恢复
 
 - **目标**：所有文件系统变更只经由 `StoreTxn`，崩溃后自动 roll-forward。
-- **状态**：✅ 已完成（`1b289e5` + `b1dl`）—— 恢复语义统一、跨进程锁、目录 fsync、WAL 原子写入，`ingest` 与 `download` 均已纳入 WAL
+- **状态**：✅ 已完成（`1b289e5` + `be7ceee`）—— 恢复语义统一、跨进程锁、目录 fsync、WAL 原子写入，`ingest` 与 `download` 均已纳入 WAL
 - **改动点**：新增 `crates/modeld-core/src/recover.rs`、`store_lock.rs`；改造 `dedup.rs`、`tx.rs`、`links.rs`、`unlink.rs`、`cas.rs`、`platform.rs`、CLI/WebUI 的 dedup 与 gc
 - **产物**：
   - `recover::recover_store`：唯一的恢复实现，`DedupEngine` 与 `modeld tx recover` 都调它
@@ -707,7 +707,7 @@ Refs: docs/ROADMAP.md#A1
 
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
-| B1 | 统一事务边界与崩溃恢复 | done | AI agent | 2026-10-24 | 2026-10-24 | `1b289e5` |
+| B1 | 统一事务边界与崩溃恢复 | done | AI agent | 2026-10-24 | 2026-10-24 | `be7ceee` |
 | B2 | CLI 拆分与输出层 | todo | — | — | — | — |
 | B3 | 日志与可观测性 | todo | — | — | — | — |
 | B4 | 下载器加固 | todo | — | — | — | — |
