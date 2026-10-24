@@ -470,6 +470,10 @@ Refs: docs/ROADMAP.md#A1
     `StoreLock`（最多等 30s），拿不到就带着持有者 pid/主机/操作报错退出；锁文件内容是可读的 JSON。
   - **目录 fsync**：`cas.rs` 原有的 Unix-only `fsync_dir` 提到 `platform` 并公开，`links.rs` 的原子替换与
     `unlink.rs` 的 rename 之后都调用；Windows 上为 no-op（NTFS 记录目录元数据，Win32 无法刷目录句柄），文档里写明。
+  - **ingest 纳入 WAL**：`ingest_scan_results` 在写 CAS 之前先落一条 `ingest` 的 pending 事务（带源路径、hash、
+    `{"mode":…}`），DB 行写完再置 committed 并删行；失败分支置 failed。恢复时 `recover_store` 看到 pending+ingest：
+    CAS 对象与源文件都在 → 补写 model/alias 行（前滚），否则回滚。改造前 ingest **完全不写 WAL**，崩溃只会留下
+    一个没有任何引用的 CAS 对象。
   - **WAL 写入原子化**：新增 `Database::in_transaction`（`BEGIN IMMEDIATE` + 成功 COMMIT / 失败 ROLLBACK），
     `TransactionManager::begin/commit/fail` 的两条语句各自包进一个 SQLite 事务——崩溃不会留下「有 WAL 行、没有
     affected_paths/rollback_plan」的半条记录，而恢复逻辑正是靠这两个字段决定怎么处置。
@@ -481,7 +485,8 @@ Refs: docs/ROADMAP.md#A1
   - [x] 恢复过程输出每个路径的处置结果 —— `modeld tx recover` 打印 `tx_id op [action]` 与逐条 `action path — note`
   - [x] 并发两个 dedup 进程：一个获锁、另一个等待或明确失败 —— `StoreLock` 6 个单测（含等待后获锁、遗留锁打破）
   - [x] `begin/commit` 包在单个 SQLite 事务内 —— `Database::in_transaction` 2 个单测（成功提交 / 失败回滚且连接仍可用）
-  - [ ] `ingest` / `downloader` 改走 `StoreTxn` —— 未做，留待 B1 收尾
+  - [x] `ingest` 纳入 WAL 并可前滚 —— 新测试 `interrupted_ingest_is_finished`
+  - [ ] `downloader` 纳入 WAL —— 未做，留待 B1 收尾
 - **测试**：`store_lock` 6 个、`recover` 3 个、原有 `tx` 与 fault-injection 全部通过；`cargo test --workspace --locked` 全绿
 - **验收证据**（2026-10-24，Windows 11）：
   - `cargo test -p modeld-core --lib` → 191 通过（新增 `store_lock` 6 个 + `recover` 3 个 + `in_transaction` 2 个）；
@@ -490,7 +495,8 @@ Refs: docs/ROADMAP.md#A1
     把锁文件 mtime 调到 24h 前或写入垃圾内容都会被判为遗留并打破。
   - 恢复：`copied` 事务在 CAS 对象存在时被前滚（dup 路径重新链接），CAS 缺失时降级为 `skipped` 并标 failed；
     报告里每个路径都有处置结果。
-  - **未实测**：三平台中断点矩阵（只有 Windows），以及 `ingest`/`downloader` 的 `StoreTxn` 改造。
+  - ingest：模拟「CAS 对象已发布、DB 行未写」的崩溃后，`recover_store` 返回 `rolled-forward`，model 与 alias 行被补上，WAL 无残留。
+  - **未实测**：三平台中断点矩阵（只有 Windows），以及 `downloader` 的 WAL 改造。
 - **估算**：8 人日 ｜ **依赖**：A1
 
 ### B2 · CLI 拆分与输出层
@@ -804,7 +810,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | A7 | `download` 路径的审计未接（下载完成点在 `downloader.rs`，需要把 `store_path` 传进 `Downloader` 的完成回调） | B4 | open |
 | 2026-10-24 | A8 | 本机无 Docker、无 GitHub Actions，`docker build` 与「三平台 CI 全绿」未实测；两者已写进 CI（`docker` job 断言镜像 < 200 MB 且 token 生效），首次 push 后需人工确认 | C3 | open |
 | 2026-10-24 | A8 | RUSTSEC 公告库因网络不可达未能本地校验，`cargo deny check` 只在 CI 跑；本地只验证了 bans/licenses/sources | C3 | open |
-| 2026-10-24 | B1 | `ingest.rs` / `downloader.rs` 尚未改走 `StoreTxn`（当前各自写 WAL），B1 的「所有文件系统变更只经由 StoreTxn」未完成 | B1 收尾 | open |
+| 2026-10-24 | B1 | `downloader.rs` 仍未纳入 WAL（`ingest` 已在 2c3072b 之后的提交中补齐），B1 的「所有文件系统变更只经由 StoreTxn」未完成 | B1 收尾 | open |
 | 2026-10-24 | B1 | 中断点矩阵只在 Windows 跑过，三平台需 CI | C3 | open |
 | 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | open |
 

@@ -125,6 +125,16 @@ pub fn recover_store(
     for tx in incomplete {
         let report = match tx.status {
             TransactionStatus::Pending => {
+                // An interrupted ingest is worth finishing: the CAS object may
+                // already be published, and without the DB rows nothing would
+                // ever reference it again.
+                if tx.operation == "ingest" {
+                    if let Some(report) = roll_forward_ingest(db, store_path, &tx) {
+                        reports.push(report);
+                        continue;
+                    }
+                }
+
                 let mut report =
                     RecoveryReport::new(&tx.tx_id, &tx.operation, TxAction::RolledBack);
 
@@ -332,6 +342,43 @@ pub fn recover_store(
     Ok(reports)
 }
 
+/// Finish an interrupted `ingest` if the CAS object made it to disk.
+///
+/// Returns `None` when the transaction cannot be completed (no usable hash, no
+/// object, or the source vanished); the caller then rolls it back.
+fn roll_forward_ingest(
+    db: &mut Database,
+    store_path: &Path,
+    tx: &crate::db::WalTransaction,
+) -> Option<RecoveryReport> {
+    let hash = tx.target_hash.as_deref().and_then(|h| Blake3Hash::from_hex(h).ok())?;
+    let source = tx.source_path.as_deref()?;
+    let cas_path = cas_path_for(store_path, &hash);
+    if !cas_path.exists() || !Path::new(source).exists() {
+        return None;
+    }
+
+    let size = std::fs::metadata(&cas_path).map(|m| m.len() as i64).unwrap_or(0);
+    db.insert_or_update_model(&hash, size, None, None, None, None).ok()?;
+    let alias_type = tx
+        .metadata
+        .as_deref()
+        .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(str::to_string))
+        .map(|mode| if mode == "adopt" { AliasType::Hardlink } else { AliasType::Original })
+        .unwrap_or(AliasType::Original);
+    if db.get_alias_by_path(source).ok().flatten().is_none() {
+        let _ = db.insert_alias(&hash, source, Frontend::User, alias_type);
+    }
+
+    let mut report = RecoveryReport::new(&tx.tx_id, &tx.operation, TxAction::RolledForward);
+    report.record(&cas_path, PathAction::RolledForward, "CAS object was already published");
+    report.record(source, PathAction::RolledForward, "model and alias rows restored");
+    let _ = db.update_wal_status(&tx.tx_id, TransactionStatus::Committed);
+    let _ = db.delete_wal_transaction(&tx.tx_id);
+    Some(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +448,36 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].action, TxAction::RolledForward);
         assert!(reports[0].paths.iter().any(|p| p.action == PathAction::RolledForward));
+        assert!(db.get_incomplete_wal_transactions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn interrupted_ingest_is_finished() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut db, store_path) = store(&tmp);
+        let content = vec![9u8; 2048];
+        let hash = hash_of(&content);
+        let cas_path = cas_path_for(&store_path, &hash);
+        std::fs::create_dir_all(cas_path.parent().unwrap()).unwrap();
+        std::fs::write(&cas_path, &content).unwrap();
+        let source = store_path.join("model.safetensors");
+        std::fs::write(&source, &content).unwrap();
+
+        db.insert_wal_transaction(
+            "tx-ingest",
+            "ingest",
+            TransactionStatus::Pending,
+            Some(source.to_string_lossy().as_ref()),
+            Some(hash.as_hex()),
+            Some("{\"mode\":\"copy\"}"),
+        )
+        .unwrap();
+
+        let reports = recover_store(&mut db, &store_path, &LinkCapability::detect()).unwrap();
+        assert_eq!(reports[0].action, TxAction::RolledForward);
+        assert!(reports[0].paths.iter().any(|p| p.action == PathAction::RolledForward));
+        // The DB rows the crashed ingest never wrote are now there.
+        assert!(db.get_alias_by_path(source.to_string_lossy().as_ref()).unwrap().is_some());
         assert!(db.get_incomplete_wal_transactions().unwrap().is_empty());
     }
 

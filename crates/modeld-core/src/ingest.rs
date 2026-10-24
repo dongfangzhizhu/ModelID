@@ -3,7 +3,7 @@
 //! Database state (audit Wave 1).
 
 use crate::cas::CasStore;
-use crate::db::{AliasType, Database, Frontend};
+use crate::db::{AliasType, Database, Frontend, TransactionStatus};
 use crate::hash::hash_file;
 use crate::scanner::ScannedFile;
 use anyhow::Result;
@@ -141,9 +141,26 @@ pub fn ingest_scan_results(
             continue;
         }
 
+        let path_str = file.path.to_string_lossy().to_string();
+
+        // Record the intent *before* the bytes become visible: if the process
+        // dies between the CAS write and the DB rows, recovery finds this row
+        // and finishes the ingest instead of leaving an orphaned object.
+        let tx_id = uuid::Uuid::new_v4().to_string();
+        let metadata = serde_json::json!({ "mode": mode.as_str() }).to_string();
+        db.insert_wal_transaction(
+            &tx_id,
+            "ingest",
+            TransactionStatus::Pending,
+            Some(&path_str),
+            Some(file.hash.as_hex()),
+            Some(&metadata),
+        )?;
+
         if let Err(e) =
             db.insert_or_update_model(&file.hash, file.size as i64, None, None, None, None)
         {
+            let _ = db.update_wal_status(&tx_id, TransactionStatus::Failed);
             result.errors.push(IngestError {
                 path: file.path.display().to_string(),
                 reason: format!("DB insert_or_update_model failed: {e}"),
@@ -151,7 +168,6 @@ pub fn ingest_scan_results(
             continue;
         }
 
-        let path_str = file.path.to_string_lossy().to_string();
         if db.get_alias_by_path(&path_str).ok().flatten().is_none() {
             // An adopted file *is* a link to the CAS object; an indexed or copied
             // one is an independent copy, which is what `Original` means here.
@@ -168,12 +184,16 @@ pub fn ingest_scan_results(
             file.inode,
             file.device_id,
         ) {
+            let _ = db.update_wal_status(&tx_id, TransactionStatus::Failed);
             result.errors.push(IngestError {
                 path: path_str,
                 reason: format!("DB upsert_path_index failed: {e}"),
             });
             continue;
         }
+
+        let _ = db.update_wal_status(&tx_id, TransactionStatus::Committed);
+        let _ = db.delete_wal_transaction(&tx_id);
 
         result.processed_count += 1;
         result.bytes_processed += file.size;

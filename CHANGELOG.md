@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call it, and it reports what happened to *every* path it touched
   (`rolled-forward` / `rolled-back` / `skipped`) instead of a bare count.
   (ROADMAP B1)
+- **Ingest is recorded in the write-ahead log** — `ingest_scan_results` writes a
+  `pending` transaction (source path, hash, ingest mode) before the CAS write and
+  commits it after the DB rows; recovery finishes an interrupted ingest by
+  restoring the model and alias rows when the CAS object made it to disk. Before
+  this the ingest path wrote no WAL at all, so a crash left a CAS object that
+  nothing referenced. (ROADMAP B1)
 - **`Database::in_transaction`** — `TransactionManager::begin`, `commit` and `fail` each write two
   rows (status + plan / end time); they now share one SQLite transaction
   (`BEGIN IMMEDIATE`), so a crash cannot leave a WAL row whose
