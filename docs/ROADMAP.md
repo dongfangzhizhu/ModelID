@@ -537,7 +537,7 @@ Refs: docs/ROADMAP.md#A1
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
 | A1 | 原子链接替换 | done | AI agent | 2026-10-24 | 2026-10-24 | `a5a0876` |
-| A2 | 代理流式 + 线程池 + panic 隔离 | done | AI agent | 2026-10-24 | 2026-10-24 | 见下 |
+| A2 | 代理流式 + 线程池 + panic 隔离 | done | AI agent | 2026-10-24 | 2026-10-24 | `c60d5dd` |
 | A3 | 服务端鉴权基线 | todo | — | — | — | — |
 | A4 | WebUI 与 CLI 打通 | todo | — | — | — | — |
 | A5 | 扫描摄取模式 | todo | — | — | — | — |
@@ -579,7 +579,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
-| 2026-10-24 | A2 | 代理流式响应 + 线程池 + panic 隔离 + Range 分片 + 压力脚本 | 见下 | `proxy/server.rs`、`proxy/config.rs`、`tests/proxy_integration.rs`、`scripts/bench-proxy-streaming.ps1`、`docs/proxy-api.md`、`CHANGELOG.md` |
+| 2026-10-24 | A2 | 代理流式响应 + 线程池 + panic 隔离 + Range 分片 + 压力脚本 | `c60d5dd` | `proxy/server.rs`、`proxy/config.rs`、`tests/proxy_integration.rs`、`scripts/bench-proxy-streaming.ps1`、`docs/proxy-api.md`、`CHANGELOG.md` |
 | 2026-10-24 | A1 | 原子链接替换：暂存 + 原子 rename，消除「先删后建」数据丢失窗口 | `a5a0876` | `core/links.rs`、`core/unlink.rs`、`tests/fault_injection_tests.rs`、`CHANGELOG.md` |
 | 2026-10-24 | — | 创建本文档（基线：全量审核报告） | — | 文档 |
 
@@ -592,7 +592,7 @@ Refs: docs/ROADMAP.md#A1
 | A 止血 | 8 | 2 | 25% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **0** | **0%** |
+| **合计** | **24** | **2** | **8%** |
 
 ---
 
