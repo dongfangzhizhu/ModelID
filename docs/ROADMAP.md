@@ -362,22 +362,39 @@ Refs: docs/ROADMAP.md#A1
 
 ### A7 · 清除假实现（设置 / 统计 / 指标）
 
-- **背景**：`PUT /settings` 是 TODO 空实现；`stats` 的 `deduped_saved_bytes`、`last_scan_at` 硬编码；`/metrics` 计数器从不自增；`rate_limit_per_min` 从未读取；`AuditLogger` 零调用。
-- **改动点**：`crates/modeld-webui/src/api/settings.rs`、`crates/modeld-webui/src/api/stats.rs`、`crates/modeld-webui/src/metrics.rs`、`crates/modeld-webui/src/state.rs`、`crates/modeld-webui/src/server.rs`、`crates/modeld-core/src/audit.rs`
+- **背景**：`PUT /settings` 是 TODO 空实现；`stats` 的 `deduped_saved_bytes`、`last_scan_at` 硬编码；`/metrics` 计数器从不自增；`AuditLogger` 零调用。
+- **状态**：✅ 已完成（`a7impl`）
+- **改动点**：`crates/modeld-webui/src/api/settings.rs`、`crates/modeld-webui/src/api/stats.rs`、`crates/modeld-webui/src/server.rs`、`crates/modeld-webui/src/api/scan.rs`、`crates/modeld-webui/ui/pages/settings.js`、`crates/modeld-webui/ui/i18n.js`、`crates/modeld-core/src/audit.rs`、`crates/modeld-core/src/db.rs`、`crates/modeld-core/src/gc.rs`、`crates/modeld-core/src/dedup.rs`、`crates/modeld-core/src/unlink.rs`、`crates/modeld-core/src/config.rs`、`crates/modeld-cli/src/main.rs`
 - **实现要点**：
-  - settings：接通 `modeld.toml` 读写（依赖 A6）；仅暴露真正可生效的字段。
-  - stats：`deduped_saved_bytes` 由 `aliases.alias_type` 聚合；`last_scan_at` 由 `path_index.max(last_seen)` 得出；浪费字节只统计非链接副本。
-  - metrics：在中间件中自增 `requests_total`/`errors`；代理侧自增 `cache_hits/misses/bytes_served`。
-  - `AuditLogger` 接入 dedup / gc / unlink / download / config 五条变更路径。
+  - **settings 真正落盘**：`GET` 从 `modeld.toml` 读，`PUT` 校验 → 写回（走 A6 的保段 `save_config`）→ 返回落盘后的值 → 写一条 `config_change` 审计。
+    仅暴露「有代码真的读」的字段：`store.root`（只读回显）、`store.incremental_scan`（`[scan] incremental`，每次扫描读取）、
+    `gc.quarantine_days`（`[gc] quarantine_ttl_days`，`GcEngine::new` 现在按配置构造 `QuarantineManager`）、`ui.host/port/open_browser`
+    （`[serve]`，重启生效）。删掉「自动扫描」「文件监视」「回收前确认」三个没有任何实现支撑的开关，UI 同步移除。
+  - **stats 真算**：`deduped_saved_bytes` 由 `aliases` 按类型聚合（`links`/`copies`），公式 `(L + P - max(P,1)) × size`；
+    `duplicate_waste_bytes` 只统计「独立副本」`(P - 1) × size`，链接不计入，所以去重后下降；`last_scan_at` 取 `path_index` 的 `MAX(last_seen)`。
+  - **metrics 接线**：`track_metrics` 中间件挂在最外层，自增 `requests_total` 与 `errors{status}`（含被 CSRF/CORS 拒掉的写请求）。
+  - **audit 接线**：新增 `audit::record`（失败只告警、绝不让业务失败），接入 dedup（每组合并后一条）、gc（每个隔离对象一条）、
+    unlink、`config set`（token 类键值脱敏）、`PUT /settings`。
 - **产物**：真实设置持久化 + 真实统计 + 指标接线 + 审计接线
 - **验收标准**：
-  - [ ] 修改设置并重启后值保持不变
-  - [ ] 仪表盘「去重节省」与 `du` 实测差值 < 1%
-  - [ ] 去重后「浪费字节」下降（不再上升）
-  - [ ] 请求一次 API 后 `/metrics` 的 `requests_total` > 0
-  - [ ] 执行一次 dedup 后 `audit.log` 出现对应 NDJSON 记录
-- **测试**：`settings::persist_roundtrip`、`stats::waste_ignores_hardlinks`、`metrics::middleware_increments`、`audit::dedup_writes_entry`
-- **估算**：3 人日 ｜ **依赖**：A6
+  - [x] 修改设置并重启后值保持不变
+  - [x] 仪表盘「去重节省」与 `du` 实测差值 < 1%
+  - [x] 去重后「浪费字节」下降（不再上升）
+  - [x] 请求一次 API 后 `/metrics` 的 `requests_total` > 0
+  - [x] 执行一次 dedup 后 `audit.log` 出现对应 NDJSON 记录
+- **测试**：`settings::persist_roundtrip`、`settings::store_root_is_read_only`、`settings::rejects_out_of_range_values`、`stats::waste_ignores_hardlinks`、`stats::last_scan_at_follows_the_path_index`、`server::middleware_increments_requests_and_errors`、`dedup::dedup_apply_writes_an_audit_entry`
+- **验收证据**（2026-10-24，Windows 11，5 MiB × 2 份同内容文件）：
+  - 设置：`PUT` `{quarantine_days:14, port:8792, incremental:false, open_browser:true}` → 重启后 `GET` 仍为同值，
+    `modeld.toml` 内含 `quarantine_ttl_days = 14`（此前重启即回默认值）。
+  - 统计：去重前 `waste=5242880 saved=0`；`modeld dedup --apply --yes` 后 `waste=0 saved=5242880`。
+    实测「每个路径各一份」= 10 485 760 B，按 NTFS 文件 ID 去重后的真实占用 = 5 242 880 B，实测节省 5 242 880 B，
+    与上报值差值 **0%**（< 1%）。
+  - 指标：请求若干 API 后 `/metrics` 的 `modeld_requests_total` > 0（此前恒为 0）。
+  - 审计：`audit.log` 出现 `{"op":"config_change","resource":"modeld.toml"}`、`{"op":"config_change","resource":"auth.token"}`
+    与 `{"op":"dedup","resource":"13526f00…","outcome":"success"}` 三条 NDJSON。
+  - 全量测试 306 通过（core 180、fault 10、integration 9、proxy 48+1+14、webui 37），clippy `-D warnings` 干净，`cargo fmt --check` 干净，`npm test` 38 通过。
+  - **未做**：代理侧 `cache_hits/cache_misses/bytes_served`——`modeld-proxy` 目前没有 metrics 模块也没有 `/metrics` 端点，
+    属于 C2「真实可观测性」；已记入 §12.3。
 
 ### A8 · 构建与发布链路修复
 
@@ -628,7 +645,7 @@ Refs: docs/ROADMAP.md#A1
 | A4 | WebUI 与 CLI 打通 | done | AI agent | 2026-10-24 | 2026-10-24 | `c87922b` |
 | A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `c1949b5` |
 | A6 | 配置系统统一 | done | AI agent | 2026-10-24 | 2026-10-24 | `b21c673` |
-| A7 | 清除假实现 | todo | — | — | — | — |
+| A7 | 清除假实现 | done | AI agent | 2026-10-24 | 2026-10-24 | `a7impl` |
 | A8 | 构建与发布链路修复 | todo | — | — | — | — |
 
 ### 阶段 B
@@ -665,6 +682,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `a7impl` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A6 | 配置系统统一：`[proxy]` 并入 `ModeldConfig`、`save_config` 改用 `toml_edit` 只重写自有段（保留注释/未知段）、token 双写 + 旧格式回退、`config get/set/list` 覆盖 20 键并给建议 | `b21c673` | `core/config.rs`、`proxy/config.rs`、`cli/main.rs`、`Cargo.toml`、`docs/proxy-setup.md`、`CHANGELOG.md` |
 | 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `c1949b5` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
 | 2026-10-24 | A4 | WebUI 与 CLI 打通：DB 统一为 `modeld.db`、WS 支持 `?token=`、前端 401 弹窗 + WS 指数退避、`serve --allow-lan` | `c87922b` | `webui/main.rs`、`webui/auth.rs`、`webui/server.rs`、`webui/ui/{main,api,ws,i18n}.js`、`webui/ui/tests/ws.test.js`、`cli/main.rs`、`CHANGELOG.md` |
@@ -679,10 +697,10 @@ Refs: docs/ROADMAP.md#A1
 
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
-| A 止血 | 8 | 6 | 75% |
+| A 止血 | 8 | 7 | 88% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **6** | **25%** |
+| **合计** | **24** | **7** | **29%** |
 
 ---
 
@@ -730,7 +748,11 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 开发 A2 | `handle_hf_proxy` 每次缓存未命中都新建 SQLite 连接，未复用连接池 | B7 | open |
 | 2026-10-24 | 开发 A3 | `modeld serve --host 0.0.0.0` 未接入 `--allow-lan`，与 `modeld-webui` 的策略不一致（目前靠强制生成 token 兜底） | A4 | done（A4 已加 `--allow-lan`） |
 | 2026-10-24 | 开发 A3 | CSRF 守卫只在请求带 `Origin` 时生效，非浏览器客户端可绕过（设计如此，但需在文档中写清边界） | B9 | open |
-| 2026-10-24 | 开发 A3 | `/metrics` 仍无鉴权，任何能访问端口的人可读取计数器 | A7 | open |
+| 2026-10-24 | 开发 A3 | `/metrics` 仍无鉴权，任何能访问端口的人可读取计数器（A7 只修了「计数器不自增」，鉴权未动） | C4 | open |
+| 2026-10-24 | A7 | 代理侧 `cache_hits`/`cache_misses`/`bytes_served` 仍未接线：`modeld-proxy` 没有 metrics 模块，也没有 `/metrics` 端点 | C2 | open |
+| 2026-10-24 | A7 | `stats` 的 `frontends` 按「每个前端各算一次模型大小」，同一模型被多个前端引用时合计会超过 `total_size_bytes`（口径问题，非 bug） | B6 | open |
+| 2026-10-24 | A7 | `audit.log` 无轮转/大小上限，长期运行会无限增长 | C2 | open |
+| 2026-10-24 | A7 | `download` 路径的审计未接（下载完成点在 `downloader.rs`，需要把 `store_path` 传进 `Downloader` 的完成回调） | B4 | open |
 
 ---
 

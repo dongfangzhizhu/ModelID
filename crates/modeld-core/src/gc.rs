@@ -138,11 +138,24 @@ pub struct GcEngine<'a> {
     db: &'a mut Database,
     cas: CasStore,
     quarantine: QuarantineManager,
+    store_path: std::path::PathBuf,
 }
 
 impl<'a> GcEngine<'a> {
+    /// Build a GC engine for `store_path`.
+    ///
+    /// The quarantine TTL comes from `modeld.toml [gc] quarantine_ttl_days` (default
+    /// 30), so the value shown in the settings UI is the one GC actually uses.
     pub fn new(db: &'a mut Database, store_path: &std::path::Path) -> Self {
-        Self { db, cas: CasStore::new(store_path), quarantine: QuarantineManager::new(store_path) }
+        let ttl_days = crate::config::load_config(store_path)
+            .map(|cfg| i64::from(cfg.gc.quarantine_ttl_days))
+            .unwrap_or(30);
+        Self {
+            db,
+            cas: CasStore::new(store_path),
+            quarantine: QuarantineManager::with_ttl(store_path, ttl_days),
+            store_path: store_path.to_path_buf(),
+        }
     }
 
     /// List all models with their protection status (single batch query).
@@ -247,6 +260,18 @@ impl<'a> GcEngine<'a> {
                         Ok(_qpath) => {
                             result.quarantined.push(hash_prefix);
                             result.bytes_recovered += c.model.size_bytes;
+
+                            // Audit trail for a destructive operation.
+                            crate::audit::record(
+                                &self.store_path,
+                                crate::audit::AuditEntry {
+                                    details: Some(format!(
+                                        "quarantined {} bytes: no workflow refs, no aliases",
+                                        c.model.size_bytes
+                                    )),
+                                    ..crate::audit::AuditEntry::success("gc", hash_str.clone())
+                                },
+                            );
 
                             // ── Write-back: mark quarantined in DB ──────────
                             if let Err(e) =

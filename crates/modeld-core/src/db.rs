@@ -736,6 +736,63 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
+    // ── Aggregate statistics (A7) ────────────────────────────────────────
+
+    /// Timestamp of the most recent scan that touched `path_index`, if any.
+    ///
+    /// This is the real "last scan" signal; the WebUI used to hard-code `None`.
+    pub fn last_scan_at(&self) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare("SELECT MAX(last_seen) FROM path_index")?;
+        let value: Option<String> = stmt.query_row([], |row| row.get(0))?;
+        Ok(value.filter(|v| !v.is_empty()))
+    }
+
+    /// Bytes that deduplication has saved.
+    ///
+    /// A content with `L` link aliases and `P` independent copies occupies `max(P, 1)`
+    /// physical copies, so the saving over "every path is its own file" is
+    /// `(L + P - max(P, 1)) * size`. The `-1` matters: the first link points at the
+    /// inode that already existed, so only the *additional* links save space.
+    /// Getting this wrong double-counts, which is how the dashboard ended up
+    /// claiming twice the space that was actually freed.
+    pub fn deduped_saved_bytes(&self) -> Result<u64> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(SUM(m.size_bytes * CASE \
+                 WHEN c.links = 0 THEN 0 \
+                 WHEN c.copies > 0 THEN c.links \
+                 ELSE c.links - 1 \
+             END), 0) FROM ( \
+                 SELECT model_hash, \
+                        SUM(CASE WHEN alias_type IN ('hardlink', 'symlink', 'junction') \
+                                 THEN 1 ELSE 0 END) AS links, \
+                        SUM(CASE WHEN alias_type IN ('original', 'reference_only') \
+                                 THEN 1 ELSE 0 END) AS copies \
+                 FROM aliases GROUP BY model_hash \
+             ) c JOIN models m ON m.blake3_hash = c.model_hash \
+             WHERE m.quarantined_at IS NULL",
+        )?;
+        let bytes: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(bytes.max(0) as u64)
+    }
+
+    /// Bytes still wasted by independent copies of the same content.
+    ///
+    /// Links are free, so only `original`/`reference_only` aliases count: for a
+    /// model with `n` such copies, `(n - 1) * size` bytes are redundant. The metric
+    /// therefore *falls* after dedup instead of rising.
+    pub fn duplicate_waste_bytes(&self) -> Result<u64> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(SUM(m.size_bytes * (c.copies - 1)), 0) FROM ( \
+                 SELECT model_hash, COUNT(*) AS copies FROM aliases \
+                 WHERE alias_type IN ('original', 'reference_only') \
+                 GROUP BY model_hash HAVING COUNT(*) > 1 \
+             ) c JOIN models m ON m.blake3_hash = c.model_hash \
+             WHERE m.quarantined_at IS NULL",
+        )?;
+        let bytes: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(bytes.max(0) as u64)
+    }
+
     /// Get model by hash
     pub fn get_model(&self, hash: &Blake3Hash) -> Result<Option<Model>> {
         let mut stmt = self.conn.prepare(

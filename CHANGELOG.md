@@ -65,7 +65,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`modeld config list` and a wider `config get/set`** — 20 keys are covered
+- **`/metrics` counts requests and errors** — a middleware installed as the outermost
+  layer increments `modeld_requests_total` and `modeld_errors_total{status}` for every
+  request, including the ones the CSRF/CORS guards reject. Before this the
+  counters existed but nothing ever incremented them. (ROADMAP A7)
+- **`audit.log` is written again** — `audit::record` appends an NDJSON line for dedup
+  (per committed group), GC (per quarantined object), `unlink`, `config set` (token
+  values redacted) and `PUT /settings`. Auditing never fails the operation it
+  records; a write error goes to stderr. (ROADMAP A7)
+- **`[scan] incremental` and `[serve] open_browser`** — two settings the Web UI
+  exposed but nothing read are now real: the scan endpoint re-hashes only
+  changed files unless the setting (or `force_rehash`) says otherwise, and
+  `modeld serve` opens the browser when the config asks for it. Both are editable
+  through `modeld config set`. (ROADMAP A7)
+- **`modeld config list` and a wider `config get/set`** — 20 keys are covered — 20 keys are covered
   (store, serve, dedup, gc, auth, scan, proxy), an unknown key now gets a
   "did you mean" suggestion, and `auth.token` is masked when read.
   (ROADMAP A6)
@@ -80,6 +93,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`PUT /api/v1/settings` was a no-op** — it returned `204` and wrote nothing, while
+  `GET` returned hard-coded defaults (`port: 8234`, `quarantine_days: 30`,
+  `incremental_scan: true`). Settings are now read from and written to
+  `modeld.toml`, validated (`port` ≠ 0, `quarantine_days` 1–3650, non-empty
+  host) and survive a restart. (ROADMAP A7)
+- **The settings page showed toggles that did nothing** — "Auto-scan on Start",
+  "File Watch (inotify)" and "Confirm before GC" had no implementation behind
+  them; they were removed from the API and the UI rather than persisted as
+  decoration. The store root is now marked read-only, because it mirrors the
+  `--store` the server was started with. (ROADMAP A7)
+- **"Dedup saved" reported twice the space actually freed** — every link alias was
+  counted as saved bytes, so a content with two hard links claimed `2 × size` while
+  only `1 × size` was freed (the first link points at an inode that already existed).
+  The figure is now `(links + copies - max(copies, 1)) × size`; verified against NTFS
+  file ids: measured 5 242 880 B, reported 5 242 880 B (0% difference). (ROADMAP A7)
+- **"Wasted space" grew after a successful dedup** — it multiplied the model size
+  by `alias_count - 1`, and dedup *adds* aliases. Only independent copies
+  (`original`/`reference_only`) count now, so the figure falls to zero when the
+  duplicates become links. (ROADMAP A7)
+- **`last_scan_at` was always `null`** — it is now `MAX(path_index.last_seen)`.
+  (ROADMAP A7)
+- **`[gc] quarantine_ttl_days` was ignored by GC** — `GcEngine` always used a
+  hard-coded 30-day TTL; it now builds its `QuarantineManager` from the config, so
+  the value in the settings page is the one GC uses. (ROADMAP A7)
 - **`config set` deleted every section it did not know about** — `save_config`
   serialized the whole struct and overwrote the file, so a hand-written `[proxy]`
   table, an experimental `[my.experiment]` block or a comment above a section was

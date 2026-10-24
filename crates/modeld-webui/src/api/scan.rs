@@ -60,7 +60,11 @@ pub async fn trigger_scan(
     let store_path = state.store_path.clone();
     let event_tx = state.event_tx.clone();
     let sid = scan_id.clone();
-    let force_rehash = req.force_rehash.unwrap_or(false);
+    // `[scan] incremental` (default true) decides whether a scan re-hashes
+    // everything; an explicit `force_rehash` in the request still wins.
+    let incremental_default =
+        modeld_core::load_config(&state.store_path).map(|cfg| cfg.scan.incremental).unwrap_or(true);
+    let force_rehash = req.force_rehash.unwrap_or(!incremental_default);
     let follow_symlinks = req.follow_symlinks.unwrap_or(false);
     let exclude_globs = req.exclude_globs.unwrap_or_default();
 

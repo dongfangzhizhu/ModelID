@@ -56,6 +56,16 @@ impl AuditEntry {
     }
 }
 
+/// Append `entry` to `<store_path>/audit.log`, ignoring failures.
+///
+/// Auditing must never break the operation it records: a full disk or a
+/// permission problem is reported on stderr and the caller carries on.
+pub fn record(store_path: &Path, entry: AuditEntry) {
+    if let Err(e) = AuditLogger::new(store_path).log(&entry) {
+        eprintln!("warning: could not write audit log: {e}");
+    }
+}
+
 /// Writes audit entries as NDJSON to `<store>/audit.log`.
 ///
 /// The file is opened in append mode on every write, making it safe to use

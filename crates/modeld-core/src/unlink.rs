@@ -127,6 +127,15 @@ pub fn unlink_path(db: &mut Database, store_path: &Path, path: &Path) -> Result<
     db.delete_alias(&path_str)?;
     db.insert_alias(&alias.model_hash, &path_str, Frontend::User, AliasType::Original)?;
 
+    // Audit trail: the file is no longer store-managed.
+    crate::audit::record(
+        store_path,
+        crate::audit::AuditEntry {
+            details: Some(format!("restored an independent copy from {}", prev.as_str())),
+            ..crate::audit::AuditEntry::success("unlink", path.display().to_string())
+        },
+    );
+
     Ok(UnlinkResult {
         path: path.to_path_buf(),
         hash: alias.model_hash,

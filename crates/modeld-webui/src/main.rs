@@ -95,10 +95,14 @@ async fn main() -> Result<()> {
         );
     }
 
+    // `[serve] open_browser` in modeld.toml is a persisted default; the CLI
+    // flag still wins.
+    let open_browser = args.open
+        || modeld_core::load_config(&args.store).map(|cfg| cfg.serve.open_browser).unwrap_or(false);
+
     let (state, _) = modeld_webui::AppState::new(db, args.store, token, None);
 
-    let config =
-        modeld_webui::WebUiConfig { host: args.host, port: args.port, open_browser: args.open };
+    let config = modeld_webui::WebUiConfig { host: args.host, port: args.port, open_browser };
 
     modeld_webui::run(state, config).await
 }

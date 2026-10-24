@@ -35,6 +35,9 @@ pub struct ServeConfig {
     /// Enable HF proxy (default: true)
     #[serde(default = "ServeConfig::default_proxy")]
     pub proxy: bool,
+    /// Open the Web UI in the default browser on start (default: false)
+    #[serde(default)]
+    pub open_browser: bool,
 }
 
 impl ServeConfig {
@@ -59,6 +62,7 @@ impl Default for ServeConfig {
             port: Self::default_port(),
             webui: Self::default_webui(),
             proxy: Self::default_proxy(),
+            open_browser: false,
         }
     }
 }
@@ -113,12 +117,28 @@ impl Default for GcConfig {
 }
 
 /// `[scan]` section
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScanConfig {
     /// File extensions (without the leading dot) treated as model files.
     /// Empty means `scanner::MODEL_EXTENSIONS` (the built-in default list).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
+    /// Re-hash only files whose size/mtime changed since the last scan (default:
+    /// true). The WebUI scan endpoint uses this unless the request says otherwise.
+    #[serde(default = "ScanConfig::default_incremental")]
+    pub incremental: bool,
+}
+
+impl ScanConfig {
+    fn default_incremental() -> bool {
+        true
+    }
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self { extensions: Vec::new(), incremental: true }
+    }
 }
 
 /// [auth] section

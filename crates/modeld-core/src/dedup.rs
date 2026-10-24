@@ -734,6 +734,20 @@ impl DedupEngine {
             tm.commit(TxHandle { tx_id: tx_id.clone() })?;
         }
 
+        // Audit trail: which content was deduplicated and how much it saved.
+        crate::audit::record(
+            &self.store_path,
+            crate::audit::AuditEntry {
+                details: Some(format!(
+                    "{} link(s), {} byte(s) saved, strategy {:?}",
+                    links_created.len(),
+                    space_saved,
+                    self.effective_strategy()
+                )),
+                ..crate::audit::AuditEntry::success("dedup", group.hash.as_hex().to_string())
+            },
+        );
+
         if !locked_files.is_empty() {
             eprintln!(
                 "dedup: {} file(s) were locked and skipped in group {}",
@@ -1057,6 +1071,36 @@ mod tests {
         let groups = engine.find_duplicates().unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].files.len(), 2);
+    }
+
+    /// `execute_dedup_group` must leave an NDJSON record in `audit.log` (A7).
+    #[test]
+    fn dedup_apply_writes_an_audit_entry() {
+        let tmp = tempdir().unwrap();
+        let (mut engine, _db) = make_engine(&tmp);
+
+        let f1 = tmp.path().join("one.bin");
+        let f2 = tmp.path().join("two.bin");
+        fs::write(&f1, b"identical content").unwrap();
+        fs::write(&f2, b"identical content").unwrap();
+
+        let hash = crate::hash::hash_file(&f1).unwrap();
+        engine.db.insert_or_update_model(&hash, 17, None, None, None, None).unwrap();
+        for path in [&f1, &f2] {
+            engine
+                .db
+                .insert_alias(&hash, &path.to_string_lossy(), Frontend::User, AliasType::Original)
+                .unwrap();
+        }
+
+        let stats = engine.run_dedup(DedupMode::Auto, |_, _, _| {}).unwrap();
+        assert_eq!(stats.groups_succeeded, 1, "the group should be deduplicated");
+
+        let entries = crate::audit::AuditLogger::new(tmp.path()).recent(10).unwrap();
+        let entry = entries.iter().find(|e| e.op == "dedup").expect("dedup audit entry");
+        assert_eq!(entry.outcome, "success");
+        assert_eq!(entry.resource, hash.as_hex());
+        assert!(entry.details.as_deref().unwrap_or_default().contains("byte(s) saved"));
     }
 
     #[test]

@@ -2731,6 +2731,7 @@ fn serve_command(
 
     let (state, _rx) = modeld_webui::AppState::new(db, store_path, Some(auth_token), None);
 
+    let open_browser = open_browser || config.serve.open_browser;
     let webui_config = modeld_webui::WebUiConfig { host, port, open_browser };
 
     // Run the async server on a fresh Tokio runtime.
@@ -3182,6 +3183,19 @@ fn config_command(action: ConfigAction) -> Result<()> {
             // `save_config` merges into the existing document, so unrelated
             // sections (`[proxy]`, experiments, comments) survive (A6).
             save_config(&store_path, &config)?;
+            // Config changes are security-relevant: record them, but never let a
+            // failed audit write fail the command.
+            modeld_core::audit::record(
+                &store_path,
+                modeld_core::AuditEntry {
+                    details: Some(if key == "auth.token" || key == "proxy.auth.tokens" {
+                        "value redacted".to_string()
+                    } else {
+                        value.clone()
+                    }),
+                    ..modeld_core::AuditEntry::success("config_change", key.clone())
+                },
+            );
             println!("{} {} = {}", "✓".green().bold(), key.bold(), value);
             Ok(())
         }
@@ -3211,6 +3225,7 @@ const CONFIG_KEYS: &[&str] = &[
     "serve.port",
     "serve.webui",
     "serve.proxy",
+    "serve.open_browser",
     "dedup.strategy",
     "dedup.min_size_bytes",
     "gc.quarantine_ttl_days",
@@ -3218,6 +3233,7 @@ const CONFIG_KEYS: &[&str] = &[
     "auth.token",
     "auth.allow_ips",
     "scan.extensions",
+    "scan.incremental",
     "proxy.port",
     "proxy.bind_address",
     "proxy.range_chunk_bytes",
@@ -3303,6 +3319,7 @@ fn config_get_value(config: &modeld_core::ModeldConfig, key: &str) -> Result<Str
         "serve.port" => Ok(config.serve.port.to_string()),
         "serve.webui" => Ok(config.serve.webui.to_string()),
         "serve.proxy" => Ok(config.serve.proxy.to_string()),
+        "serve.open_browser" => Ok(config.serve.open_browser.to_string()),
         "dedup.strategy" => Ok(config.dedup.strategy.clone()),
         "dedup.min_size_bytes" => Ok(config.dedup.min_size_bytes.to_string()),
         "gc.quarantine_ttl_days" => Ok(config.gc.quarantine_ttl_days.to_string()),
@@ -3310,6 +3327,7 @@ fn config_get_value(config: &modeld_core::ModeldConfig, key: &str) -> Result<Str
         "auth.token" => Ok(mask_secret(&config.auth.token)),
         "auth.allow_ips" => Ok(config.auth.allow_ips.join(",")),
         "scan.extensions" => Ok(config.scan_extensions().join(",")),
+        "scan.incremental" => Ok(config.scan.incremental.to_string()),
         "proxy.port" => Ok(config.proxy.port.to_string()),
         "proxy.bind_address" => Ok(config.proxy.bind_address.clone()),
         "proxy.range_chunk_bytes" => Ok(config.proxy.range_chunk_bytes.to_string()),
@@ -3337,6 +3355,7 @@ fn config_set_value(config: &mut modeld_core::ModeldConfig, key: &str, value: &s
         }
         "serve.webui" => config.serve.webui = parse_bool(key, value)?,
         "serve.proxy" => config.serve.proxy = parse_bool(key, value)?,
+        "serve.open_browser" => config.serve.open_browser = parse_bool(key, value)?,
         "dedup.strategy" => match value {
             "hardlink" | "symlink" | "copy_to_cas" | "virtual_alias" => {
                 config.dedup.strategy = value.to_string();
@@ -3368,6 +3387,7 @@ fn config_set_value(config: &mut modeld_core::ModeldConfig, key: &str, value: &s
         }
         "auth.allow_ips" => config.auth.allow_ips = parse_list(value),
         "scan.extensions" => config.scan.extensions = parse_list(value),
+        "scan.incremental" => config.scan.incremental = parse_bool(key, value)?,
         "proxy.port" => {
             config.proxy.port =
                 value.parse::<u16>().with_context(|| format!("Invalid port number: {}", value))?;

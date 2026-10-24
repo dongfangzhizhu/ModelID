@@ -92,6 +92,20 @@ async fn require_csrf_guard(allowed: Arc<Vec<String>>, request: Request, next: N
     next.run(request).await
 }
 
+/// Count every request and every error response.
+///
+/// Installed as the outermost layer so rejected writes (CSRF, CORS) and 404s
+/// are counted too — `/metrics` used to report zeros forever.
+async fn track_metrics(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    state.metrics.inc_requests();
+    let status = response.status().as_u16();
+    if status >= 400 {
+        state.metrics.inc_error(status);
+    }
+    response
+}
+
 /// Build the router with CORS, CSRF and auth middleware applied.
 ///
 /// Split out from `run` so tests can drive it through `tower::ServiceExt::oneshot`
@@ -130,6 +144,8 @@ pub fn build_router(state: AppState, host: &str, port: u16) -> Router {
         .route("/ws", get(ws_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer_token));
 
+    let metrics_state = state.clone();
+
     Router::new()
         // Prometheus metrics (not behind auth — restrict at network level)
         .route("/metrics", get(metrics_handler))
@@ -147,6 +163,8 @@ pub fn build_router(state: AppState, host: &str, port: u16) -> Router {
         // for our own origins (previously: every origin).
         .layer(cors)
         .layer(CompressionLayer::new())
+        // Very outermost: request/error counters for /metrics.
+        .layer(middleware::from_fn_with_state(metrics_state, track_metrics))
 }
 
 /// Build and run the axum HTTP server.
@@ -196,6 +214,31 @@ mod tests {
             .method(Method::POST)
             .uri(path)
             .header(header::CONTENT_TYPE, "application/json")
+    }
+
+    /// The metrics layer must count requests and error statuses (A7): before
+    /// this, `/metrics` reported zeros no matter how much traffic the server saw.
+    #[tokio::test]
+    async fn middleware_increments_requests_and_errors() {
+        use std::sync::atomic::Ordering;
+
+        let (state, _dir) = test_state();
+        let app = build_router(state.clone(), "127.0.0.1", 8234);
+
+        let ok = Request::builder().uri("/api/v1/status").body(Body::empty()).unwrap();
+        assert_eq!(status_of(app.clone(), ok).await, StatusCode::OK);
+
+        // A cross-origin write is rejected by the CSRF guard before any handler
+        // runs; the counter must still see it.
+        let rejected = post("/api/v1/gc/run")
+            .header(header::ORIGIN, "http://evil.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(app, rejected).await, StatusCode::FORBIDDEN);
+
+        assert_eq!(state.metrics.requests_total.load(Ordering::Relaxed), 2);
+        assert_eq!(*state.metrics.errors.get(&403).expect("403 counted"), 1);
+        assert!(state.metrics.errors.get(&200).is_none(), "successes are not errors");
     }
 
     async fn status_of(app: Router, request: Request<Body>) -> StatusCode {

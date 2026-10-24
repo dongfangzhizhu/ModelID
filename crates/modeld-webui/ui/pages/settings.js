@@ -43,33 +43,7 @@ export function render(container) {
             <div class="settings-desc">${t('set.store.root.desc')}</div>
           </div>
           <div class="settings-control">
-            <input class="input" id="s-root" value="${escHtml(cfg.store.root)}" style="width:260px">
-          </div>
-        </div>
-
-        <div class="settings-row">
-          <div>
-            <div class="settings-label">${t('set.store.autoscan')}</div>
-            <div class="settings-desc">${t('set.store.autoscan.desc')}</div>
-          </div>
-          <div class="settings-control">
-            <label class="toggle">
-              <input type="checkbox" id="s-auto-scan" ${cfg.store.auto_scan_on_start ? 'checked' : ''}>
-              <span class="toggle-track"></span>
-            </label>
-          </div>
-        </div>
-
-        <div class="settings-row">
-          <div>
-            <div class="settings-label">${t('set.store.watch')}</div>
-            <div class="settings-desc">${t('set.store.watch.desc')}</div>
-          </div>
-          <div class="settings-control">
-            <label class="toggle">
-              <input type="checkbox" id="s-watch" ${cfg.store.watch_enabled ? 'checked' : ''}>
-              <span class="toggle-track"></span>
-            </label>
+            <input class="input" id="s-root" value="${escHtml(cfg.store.root)}" style="width:260px" readonly title="${t('set.store.root.ro')}">
           </div>
         </div>
 
@@ -102,18 +76,6 @@ export function render(container) {
           </div>
         </div>
 
-        <div class="settings-row">
-          <div>
-            <div class="settings-label">${t('set.gc.confirm')}</div>
-            <div class="settings-desc">${t('set.gc.confirm.desc')}</div>
-          </div>
-          <div class="settings-control">
-            <label class="toggle">
-              <input type="checkbox" id="s-gc-confirm" ${cfg.gc.confirm_before_gc ? 'checked' : ''}>
-              <span class="toggle-track"></span>
-            </label>
-          </div>
-        </div>
       </div>
 
       <!-- Web UI -->
@@ -208,13 +170,10 @@ export function render(container) {
     const body = {
       store: {
         root:               document.getElementById('s-root').value,
-        auto_scan_on_start: document.getElementById('s-auto-scan').checked,
-        watch_enabled:      document.getElementById('s-watch').checked,
         incremental_scan:   document.getElementById('s-incremental').checked,
       },
       gc: {
         quarantine_days:    parseInt(document.getElementById('s-gc-days').value),
-        confirm_before_gc:  document.getElementById('s-gc-confirm').checked,
       },
       ui: {
         port:         parseInt(document.getElementById('s-port').value),
