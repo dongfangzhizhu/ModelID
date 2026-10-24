@@ -16,6 +16,10 @@
 //! | 3 | `Partial` | the operation ran but some items failed |
 
 /// How a command should render its result on stdout.
+///
+/// The command modules use this as they move out of `main.rs`; until then the
+/// only consumer is the test module below, hence the `dead_code` allow.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     /// Human-readable tables and colours (the default).
@@ -27,6 +31,7 @@ pub enum OutputFormat {
     Csv,
 }
 
+#[allow(dead_code)]
 impl OutputFormat {
     /// Pick the format from the `--json` / `--csv` flags.
     ///

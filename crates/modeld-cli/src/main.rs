@@ -1,8 +1,10 @@
+mod commands;
 mod output;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
+use commands::store::{store_command, StoreAction};
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
     add_tag, build_model_lookup, classify_refs, explain_refs, favorite_model, find_workflow_files,
@@ -425,40 +427,6 @@ enum ProxyAction {
         /// Store directory
         #[arg(short = 's', long)]
         store: Option<PathBuf>,
-    },
-}
-
-#[derive(Subcommand)]
-enum StoreAction {
-    /// Print the resolved store path
-    Locate {
-        /// Store directory (if set, just prints this path)
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
-    /// Initialize the store (same as `modeld init`)
-    Init {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
-    /// Verify store consistency
-    Verify {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Migrate store from one location to another
-    Migrate {
-        /// Source store path
-        #[arg(long)]
-        from: PathBuf,
-        /// Destination store path
-        #[arg(long)]
-        to: PathBuf,
     },
 }
 
@@ -939,7 +907,7 @@ fn main() -> Result<()> {
 /// Resolve an optional CLI store override to a concrete PathBuf.
 ///
 /// Priority: `--store <path>` > `MODELD_STORE` env > `modeld.toml` > platform default.
-fn resolve_store(store: Option<PathBuf>) -> PathBuf {
+pub(crate) fn resolve_store(store: Option<PathBuf>) -> PathBuf {
     resolve_store_path(store.as_deref())
 }
 
@@ -973,7 +941,7 @@ fn parse_size(input: &str) -> Result<u64> {
     Ok((value * multiplier) as u64)
 }
 
-fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<()> {
+pub(crate) fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<()> {
     // Resolve store path: CLI arg > MODELD_STORE env > platform default
     let store_path = resolve_store_path(path.as_deref());
 
@@ -2562,7 +2530,7 @@ fn gc_command(
 // Verify (fsck) command
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
+pub(crate) fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
     let db_path = require_store_db(&store_path)?;
     let db = Database::open(&db_path)?;
 
@@ -3128,74 +3096,6 @@ fn doctor_command(store_path: PathBuf, json_output: bool) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 // store command
 // ─────────────────────────────────────────────────────────────────────────────
-
-fn store_command(action: StoreAction) -> Result<()> {
-    match action {
-        StoreAction::Locate { store } => {
-            let path = resolve_store(store);
-            println!("{}", path.display());
-            Ok(())
-        }
-        StoreAction::Init { store } => {
-            let path = resolve_store(store);
-            init_command(Some(path), false)
-        }
-        StoreAction::Verify { store, json } => {
-            let path = resolve_store(store);
-            verify_command(path, json)
-        }
-        StoreAction::Migrate { from, to } => store_migrate_command(from, to),
-    }
-}
-
-fn store_migrate_command(from: PathBuf, to: PathBuf) -> Result<()> {
-    if !from.exists() {
-        anyhow::bail!("Source store not found: {}", from.display());
-    }
-
-    println!(
-        "{}",
-        format!("Migrating store from {} to {}", from.display(), to.display()).cyan().bold()
-    );
-
-    // Simple migration: copy the entire store directory tree
-    std::fs::create_dir_all(&to)
-        .with_context(|| format!("Failed to create destination: {}", to.display()))?;
-
-    copy_dir_all(&from, &to)?;
-
-    println!("{}", "✓ Migration complete.".green().bold());
-    println!("  {}", format!("New store: {}", to.display()).dimmed());
-    println!(
-        "  {}",
-        "You can now update your MODELD_STORE or modeld.toml to point to the new location."
-            .dimmed()
-    );
-
-    Ok(())
-}
-
-/// Recursively copy a directory tree (best-effort; skips CAS read-only files on Windows).
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(src)
-        .with_context(|| format!("Failed to read directory: {}", src.display()))?
-    {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            std::fs::create_dir_all(&dst_path)?;
-            copy_dir_all(&entry.path(), &dst_path)?;
-        } else if ty.is_file() {
-            // CAS objects are read-only; copy with overwrite
-            if let Err(e) = std::fs::copy(entry.path(), &dst_path) {
-                eprintln!("  {} skipping {}: {}", "⚠".yellow(), entry.path().display(), e);
-            }
-        }
-    }
-    Ok(())
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // config command

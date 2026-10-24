@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld store` moved to its own module** — `crates/modeld-cli/src/commands/store.rs`
+  holds `StoreAction`, `store_command`, `store_migrate_command` and `copy_dir_all`;
+  `main.rs` keeps the clap definition and dispatch. First step of the B2 split.
+  (ROADMAP B2)
 - **Directory fsync after every rename** — `platform::fsync_dir` (a real `fsync(2)` on
   Unix, a documented no-op on Windows) is called after the atomic replace in
   `links.rs`, the rename in `unlink.rs` and both CAS publish paths, so a crash right
