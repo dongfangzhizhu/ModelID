@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld db` moved to its own module** — `commands/db.rs` holds `DbAction` and
+  `db_command` (status, backup, restore, vacuum, migrate). (ROADMAP B2)
 - **`modeld store` moved to its own module** — `crates/modeld-cli/src/commands/store.rs`
   holds `StoreAction`, `store_command`, `store_migrate_command` and `copy_dir_all`;
   `main.rs` keeps the clap definition and dispatch. First step of the B2 split.

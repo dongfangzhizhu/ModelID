@@ -3,4 +3,5 @@
 //! `main.rs` keeps the clap definitions and the dispatch; everything else lives
 //! here, so a command can be read, tested and changed on its own.
 
+pub mod db;
 pub mod store;
