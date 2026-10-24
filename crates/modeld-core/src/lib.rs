@@ -67,7 +67,7 @@ pub use governance::{
 pub use hash::{hash_file, Blake3Hash};
 pub use hf_cache::{HfCache, HfCacheStats};
 pub use i18n::{detect, t, tf, Lang};
-pub use ingest::{ingest_scan_results, IngestError, IngestResult};
+pub use ingest::{ingest_scan_results, IngestError, IngestMode, IngestResult};
 pub use platform::{check_file_locked, detect_capabilities, is_same_volume, PlatformCapabilities};
 pub use quarantine::QuarantineManager;
 pub use refs::{explain_refs, list_orphans, scan_workflow_refs};

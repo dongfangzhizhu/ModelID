@@ -25,8 +25,16 @@ cargo install --locked modeld-cli
 # Initialize store (default: ~/.local/share/modeld on Linux/macOS, %LOCALAPPDATA%\modeld on Windows)
 modeld init
 
-# Scan models directory — hash, index, detect duplicates
+# Scan models directory — hash, index, detect duplicates.
+# By default nothing is copied: files are only catalogued (see docs/scan-modes.md).
 modeld scan ~/models/
+
+# Share the files with the store instead of duplicating them (same volume,
+# zero extra disk space; the files become read-only links)
+modeld scan ~/models/ --adopt
+
+# Copy the files into the store (needed across volumes, uses extra space)
+modeld scan ~/models/ --copy
 
 # Check store status and quarantine summary
 modeld status
@@ -60,6 +68,26 @@ modeld dedup --auto
 Dedup uses a crash-safe two-phase commit (WAL-backed) and chooses a canonical
 path per content group (CAS > oldest mtime > shortest path). Replaced files go
 to a 30-day quarantine that can be inspected and restored.
+
+## Scan modes
+
+`modeld scan` never duplicates your library by default:
+
+| Mode | Flag | Disk cost | When to use |
+| --- | --- | --- | --- |
+| Index | *(default)* / `--index-only` | 0 bytes | You only want the catalogue, tags and duplicate reports |
+| Adopt | `--adopt` | 0 bytes (hard link) | Store and models on the same volume; files become read-only |
+| Copy | `--copy` | full size | Store on another volume, or you want the store self-contained |
+
+Adopting across volumes fails with an explicit error instead of silently
+falling back to a copy. Model extensions are configurable:
+
+```toml
+[scan]
+extensions = ["safetensors", "gguf", "onnx"]
+```
+
+See [docs/scan-modes.md](docs/scan-modes.md) for details.
 
 ### Duplicate report
 

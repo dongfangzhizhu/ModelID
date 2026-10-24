@@ -246,6 +246,64 @@ impl CasStore {
 
         Ok(dest)
     }
+
+    /// Adopt an existing file into the CAS **without copying its bytes**.
+    ///
+    /// Hard-links `source` to the object path, so the store and the user's file
+    /// share one inode: adopting a 10 GiB model costs a directory entry, not
+    /// 10 GiB.  The object (and therefore `source`) is then marked read-only,
+    /// matching every other CAS object — this is the same trade-off `dedup`
+    /// makes when it hard-links a user file to an existing object.
+    ///
+    /// Returns the object path.  When the object already exists this is a no-op
+    /// that returns the existing path — the caller decides whether to re-point
+    /// `source` at it.
+    ///
+    /// # Errors
+    /// Fails with a `cross-volume` message when `source` and the store live on
+    /// different volumes (hard links cannot span volumes).  The caller must not
+    /// silently fall back to copying — see `IngestMode::Adopt`.
+    pub fn adopt_object(&self, source: &Path, expected_hash: &Blake3Hash) -> Result<PathBuf> {
+        let dest = self.path_for_hash(expected_hash);
+        if dest.exists() {
+            return Ok(dest);
+        }
+
+        let parent = dest
+            .parent()
+            .ok_or_else(|| anyhow!("CAS object path has no parent: {}", dest.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Create CAS dir: {}", parent.display()))?;
+
+        if !crate::links::is_same_volume(source, parent) {
+            return Err(anyhow!(
+                "cross-volume: {} and the store ({}) are on different volumes, \
+                 so it cannot be hard-linked; use --copy instead",
+                source.display(),
+                parent.display()
+            ));
+        }
+
+        // Stage the link next to the destination, then rename — same protocol as
+        // every other CAS write, so a failure never leaves a half-made object.
+        let tmp = parent.join(format!(".modeld_tmp_{}.tmp", uuid::Uuid::new_v4()));
+        fs::hard_link(source, &tmp).with_context(|| {
+            format!("Hard-link {} into the CAS at {}", source.display(), tmp.display())
+        })?;
+        if let Err(e) = fs::rename(&tmp, &dest) {
+            // Clean up the staging link; the source file is untouched.
+            let _ = fs::remove_file(&tmp);
+            return Err(anyhow!("Failed to publish CAS object {}: {}", dest.display(), e));
+        }
+
+        #[cfg(unix)]
+        if let Some(parent) = dest.parent() {
+            fsync_dir(parent)?;
+        }
+
+        Self::make_readonly(&dest)?;
+        Ok(dest)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

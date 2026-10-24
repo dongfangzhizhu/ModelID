@@ -28,6 +28,49 @@ pub struct IngestResult {
     pub errors: Vec<IngestError>,
 }
 
+/// What ingestion does with the bytes of each scanned file.
+///
+/// The default is `IngestMode::Index`: a scan that merely catalogues a model
+/// directory must not silently duplicate every model on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IngestMode {
+    /// Record the file in the database only. Nothing on disk is touched, so a
+    /// scanned directory costs zero extra bytes. The CAS object does not exist
+    /// until the file is downloaded, adopted, or copied.
+    #[default]
+    Index,
+    /// Hard-link the file into the CAS (same volume) and re-point the original
+    /// path at that object. Zero extra bytes, and the file becomes
+    /// store-managed (read-only, like every other CAS object).
+    Adopt,
+    /// Copy the file into the CAS. The only mode that works across volumes.
+    Copy,
+}
+
+impl IngestMode {
+    /// Stable lowercase name used in CLI output, JSON and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IngestMode::Index => "index",
+            IngestMode::Adopt => "adopt",
+            IngestMode::Copy => "copy",
+        }
+    }
+}
+
+impl std::str::FromStr for IngestMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "index" | "index-only" => Ok(IngestMode::Index),
+            "adopt" | "link" => Ok(IngestMode::Adopt),
+            "copy" => Ok(IngestMode::Copy),
+            other => Err(format!("unknown ingest mode '{other}' (expected index, adopt or copy)")),
+        }
+    }
+}
+
 /// Store `files` into CAS (crash-safe) and record them in `db`.
 ///
 /// This is the single code path used by both `modeld-cli::scan_command` and
@@ -50,6 +93,7 @@ pub fn ingest_scan_results(
     db: &mut Database,
     files: &[ScannedFile],
     scan_id: &str,
+    mode: IngestMode,
 ) -> Result<IngestResult> {
     let cas = CasStore::new(store_path);
     let mut result = IngestResult::default();
@@ -83,11 +127,17 @@ pub fn ingest_scan_results(
             }
         }
 
-        if let Err(e) = cas.store_crash_safe(&file.path, &file.hash, scan_id) {
-            result.errors.push(IngestError {
-                path: file.path.display().to_string(),
-                reason: format!("CAS store failed: {e}"),
-            });
+        // ── Materialise the bytes according to the ingest mode ────────────
+        let cas_error = match mode {
+            IngestMode::Index => None,
+            IngestMode::Copy => cas
+                .store_crash_safe(&file.path, &file.hash, scan_id)
+                .err()
+                .map(|e| format!("CAS store failed: {e}")),
+            IngestMode::Adopt => adopt_file(&cas, file),
+        };
+        if let Some(reason) = cas_error {
+            result.errors.push(IngestError { path: file.path.display().to_string(), reason });
             continue;
         }
 
@@ -103,7 +153,11 @@ pub fn ingest_scan_results(
 
         let path_str = file.path.to_string_lossy().to_string();
         if db.get_alias_by_path(&path_str).ok().flatten().is_none() {
-            let _ = db.insert_alias(&file.hash, &path_str, Frontend::User, AliasType::Original);
+            // An adopted file *is* a link to the CAS object; an indexed or copied
+            // one is an independent copy, which is what `Original` means here.
+            let alias_type =
+                if mode == IngestMode::Adopt { AliasType::Hardlink } else { AliasType::Original };
+            let _ = db.insert_alias(&file.hash, &path_str, Frontend::User, alias_type);
         }
 
         if let Err(e) = db.upsert_path_index(
@@ -128,6 +182,43 @@ pub fn ingest_scan_results(
     Ok(result)
 }
 
+/// Adopt one scanned file into the CAS, returning a human-readable error on
+/// failure (cross-volume, size drift, link failure).
+fn adopt_file(cas: &CasStore, file: &ScannedFile) -> Option<String> {
+    // The hash was computed during the scan; if the file changed since then the
+    // link would publish the wrong content under the right hash.
+    match std::fs::metadata(&file.path) {
+        Ok(meta) if meta.len() == file.size => {}
+        Ok(meta) => return Some(format!(
+            "file changed since it was scanned ({} bytes now, {} when scanned); re-run the scan",
+            meta.len(),
+            file.size
+        )),
+        Err(e) => return Some(format!("stat failed before adopt: {e}")),
+    }
+
+    let existed = cas.contains(&file.hash);
+    match cas.adopt_object(&file.path, &file.hash) {
+        Ok(object) => {
+            // When the object was just created from this very file, the path is
+            // already a link to it — re-pointing it at itself would be a no-op at
+            // best and a read-only rename failure at worst.
+            if existed {
+                match crate::links::replace_with_link(&file.path, &object, AliasType::Hardlink) {
+                    crate::links::LinkResult::Success(_) => {}
+                    crate::links::LinkResult::Failed(e) => {
+                        return Some(format!(
+                            "failed to link the file to the existing CAS object: {e}"
+                        ))
+                    }
+                }
+            }
+            None
+        }
+        Err(e) => Some(format!("adopt failed: {e}")),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Property-based tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +229,213 @@ mod tests {
     use crate::hash::Blake3Hash;
     use proptest::prelude::*;
     use std::fs;
+    use std::io::Write;
     use tempfile::TempDir;
+
+    // ── Ingest modes (ROADMAP A5) ─────────────────────────────────────────
+
+    fn setup() -> (TempDir, std::path::PathBuf, std::path::PathBuf, Vec<u8>) {
+        let dir = TempDir::new().unwrap();
+        let store = dir.path().join("store");
+        let models = dir.path().join("models");
+        fs::create_dir_all(&store).unwrap();
+        fs::create_dir_all(&models).unwrap();
+        let content = b"modeld ingest-mode test payload, deterministic bytes".to_vec();
+        (dir, store, models, content)
+    }
+
+    fn scan_one(path: &std::path::Path, size: u64, hash: Blake3Hash) -> ScannedFile {
+        ScannedFile {
+            path: path.to_path_buf(),
+            size,
+            hash,
+            from_cache: false,
+            mtime: 0,
+            inode: 0,
+            device_id: 0,
+        }
+    }
+
+    #[test]
+    fn index_mode_writes_no_blob() {
+        let (_dir, store, models, content) = setup();
+        let src = models.join("model.safetensors");
+        fs::write(&src, &content).unwrap();
+        let hash = hash_file(&src).unwrap();
+
+        let mut db = Database::open(&store.join("modeld.db")).unwrap();
+        let files = vec![scan_one(&src, content.len() as u64, hash.clone())];
+        let result =
+            ingest_scan_results(&store, &mut db, &files, "index-test", IngestMode::Index).unwrap();
+
+        assert!(result.errors.is_empty(), "index mode must not error: {:?}", result.errors);
+        assert_eq!(result.processed_count, 1);
+
+        // Catalogued in the database...
+        assert!(db.get_model(&hash).unwrap().is_some(), "model row must exist");
+        assert!(
+            db.get_alias_by_path(&src.to_string_lossy()).unwrap().is_some(),
+            "alias row must exist"
+        );
+        // ...but no bytes were copied into the store.
+        assert!(
+            !CasStore::new(&store).path_for_hash(&hash).exists(),
+            "index mode must not create a CAS object"
+        );
+    }
+
+    #[test]
+    fn copy_mode_writes_an_independent_blob() {
+        let (_dir, store, models, content) = setup();
+        let src = models.join("model.safetensors");
+        fs::write(&src, &content).unwrap();
+        let hash = hash_file(&src).unwrap();
+
+        let mut db = Database::open(&store.join("modeld.db")).unwrap();
+        let files = vec![scan_one(&src, content.len() as u64, hash.clone())];
+        let result =
+            ingest_scan_results(&store, &mut db, &files, "copy-test", IngestMode::Copy).unwrap();
+
+        assert!(result.errors.is_empty(), "copy mode must not error: {:?}", result.errors);
+        let object = CasStore::new(&store).path_for_hash(&hash);
+        assert!(object.exists(), "copy mode must create a CAS object");
+        assert_eq!(fs::read(&object).unwrap(), content);
+
+        // A copy: writing through the original must not change the stored object.
+        make_writable(&src);
+        fs::write(&src, b"DIFFERENT").unwrap();
+        assert_eq!(fs::read(&object).unwrap(), content, "copy mode must not share the inode");
+    }
+
+    #[test]
+    fn adopt_mode_shares_the_inode_with_the_cas_object() {
+        let (_dir, store, models, content) = setup();
+        let src = models.join("model.safetensors");
+        fs::write(&src, &content).unwrap();
+        let hash = hash_file(&src).unwrap();
+
+        let mut db = Database::open(&store.join("modeld.db")).unwrap();
+        let files = vec![scan_one(&src, content.len() as u64, hash.clone())];
+        let result =
+            ingest_scan_results(&store, &mut db, &files, "adopt-test", IngestMode::Adopt).unwrap();
+
+        assert!(result.errors.is_empty(), "adopt must succeed: {:?}", result.errors);
+        let object = CasStore::new(&store).path_for_hash(&hash);
+        assert!(object.exists(), "adopt must publish a CAS object");
+        assert_eq!(fs::read(&object).unwrap(), content);
+
+        // Same inode ⇒ a write through the original path shows up in the store.
+        make_writable(&src);
+        let mut f = fs::OpenOptions::new().write(true).open(&src).unwrap();
+        f.write_all(b"X").unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+
+        let stored = fs::read(&object).unwrap();
+        assert_eq!(stored.len(), content.len());
+        assert_eq!(
+            stored[0], b'X',
+            "adopt must hard-link instead of copying (a copy would keep the old first byte)"
+        );
+    }
+
+    #[test]
+    fn adopt_mode_rejects_a_file_that_changed_after_the_scan() {
+        let (_dir, store, models, content) = setup();
+        let src = models.join("model.safetensors");
+        fs::write(&src, &content).unwrap();
+        let hash = hash_file(&src).unwrap();
+        let scanned_size = content.len() as u64;
+
+        // Simulate a file that grew between the scan and the ingest. `from_cache`
+        // is what makes this dangerous: the scanner skips the re-hash, so only the
+        // size check stands between a stale hash and a corrupt CAS object.
+        fs::write(&src, b"a much longer payload than the scan recorded").unwrap();
+
+        let mut db = Database::open(&store.join("modeld.db")).unwrap();
+        let mut stale = scan_one(&src, scanned_size, hash.clone());
+        stale.from_cache = true;
+        let files = vec![stale];
+        let result =
+            ingest_scan_results(&store, &mut db, &files, "adopt-stale", IngestMode::Adopt).unwrap();
+
+        assert_eq!(result.processed_count, 0);
+        assert_eq!(result.errors.len(), 1);
+        assert!(
+            result.errors[0].reason.contains("changed since it was scanned"),
+            "unexpected reason: {}",
+            result.errors[0].reason
+        );
+        assert!(!CasStore::new(&store).path_for_hash(&hash).exists());
+    }
+
+    #[test]
+    fn adopt_mode_is_rejected_across_volumes() {
+        // Only meaningful when the machine actually has a second volume.
+        let Some(other_volume) = other_volume_dir() else {
+            return; // single-volume host: nothing to assert
+        };
+        let (_dir, store, _models, content) = setup();
+        let src = other_volume.join(format!("modeld_xvol_{}.safetensors", std::process::id()));
+        fs::write(&src, &content).unwrap();
+        let hash = hash_file(&src).unwrap();
+
+        let mut db = Database::open(&store.join("modeld.db")).unwrap();
+        let files = vec![scan_one(&src, content.len() as u64, hash.clone())];
+        let result =
+            ingest_scan_results(&store, &mut db, &files, "xvol-test", IngestMode::Adopt).unwrap();
+        let _ = fs::remove_file(&src);
+
+        assert_eq!(result.processed_count, 0, "cross-volume adopt must not silently copy");
+        assert_eq!(result.errors.len(), 1);
+        let reason = &result.errors[0].reason;
+        assert!(reason.contains("cross-volume"), "unexpected reason: {reason}");
+        assert!(reason.contains("--copy"), "the error must point at --copy: {reason}");
+        assert!(!CasStore::new(&store).path_for_hash(&hash).exists());
+    }
+
+    /// A writable directory on a different volume than the temp dir, if any.
+    fn other_volume_dir() -> Option<std::path::PathBuf> {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if cfg!(windows) {
+            candidates.push(std::path::PathBuf::from(r"C:\Users\Public"));
+            for drive in ["D:\\", "E:\\"] {
+                candidates.push(std::path::PathBuf::from(drive));
+            }
+        } else {
+            candidates.push(std::path::PathBuf::from("/dev/shm"));
+        }
+
+        let here = TempDir::new().ok()?.path().to_path_buf();
+        candidates.into_iter().find(|candidate| {
+            if !candidate.is_dir() || crate::links::is_same_volume(&here, candidate) {
+                return false;
+            }
+            // Only usable if we can actually write there.
+            let probe = candidate.join(format!(".modeld_probe_{}", std::process::id()));
+            let writable = fs::write(&probe, b"probe").is_ok();
+            let _ = fs::remove_file(&probe);
+            writable
+        })
+    }
+
+    fn make_writable(path: &std::path::Path) {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn ingest_mode_parses_from_strings() {
+        assert_eq!("index".parse::<IngestMode>().unwrap(), IngestMode::Index);
+        assert_eq!("index-only".parse::<IngestMode>().unwrap(), IngestMode::Index);
+        assert_eq!("ADOPT".parse::<IngestMode>().unwrap(), IngestMode::Adopt);
+        assert_eq!(" copy ".parse::<IngestMode>().unwrap(), IngestMode::Copy);
+        assert!("nope".parse::<IngestMode>().is_err());
+        assert_eq!(IngestMode::default(), IngestMode::Index);
+        assert_eq!(IngestMode::Adopt.as_str(), "adopt");
+    }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(20))]
@@ -191,7 +488,8 @@ mod tests {
             }
 
             let result =
-                ingest_scan_results(&store_dir, &mut db, &files, "prop-test-scan-id").unwrap();
+                ingest_scan_results(&store_dir, &mut db, &files, "prop-test-scan-id", IngestMode::Copy)
+                    .unwrap();
 
             // No errors, and every file counted as processed.
             prop_assert!(result.errors.is_empty());
@@ -323,8 +621,14 @@ mod tests {
             // The batch must still succeed at the outer `Result` level even
             // though some individual files fail.
             let result =
-                ingest_scan_results(&store_dir, &mut db, &files, "prop-partial-fail-scan-id")
-                    .expect("ingest_scan_results must return Ok even with per-file failures");
+                ingest_scan_results(
+                    &store_dir,
+                    &mut db,
+                    &files,
+                    "prop-partial-fail-scan-id",
+                    IngestMode::Copy,
+                )
+                .expect("ingest_scan_results must return Ok even with per-file failures");
 
             prop_assert_eq!(result.processed_count, valid_count);
             prop_assert_eq!(result.errors.len(), invalid_count);
@@ -468,8 +772,14 @@ mod tests {
                 .sum();
 
             let result =
-                ingest_scan_results(&store_dir, &mut db, &files, "prop-count-consistency-scan-id")
-                    .expect("ingest_scan_results must return Ok even with per-file failures");
+                ingest_scan_results(
+                    &store_dir,
+                    &mut db,
+                    &files,
+                    "prop-count-consistency-scan-id",
+                    IngestMode::Copy,
+                )
+                .expect("ingest_scan_results must return Ok even with per-file failures");
 
             // Core invariant: every input file is accounted for exactly once,
             // either as processed or as an error — none silently dropped or
@@ -581,8 +891,14 @@ mod tests {
 
             let valid_count = valid_contents.len();
 
-            let result = ingest_scan_results(&store_dir, &mut db, &files, "prop-hash-mismatch-scan-id")
-                .expect("ingest_scan_results must return Ok even with a hash-mismatched file");
+            let result = ingest_scan_results(
+                &store_dir,
+                &mut db,
+                &files,
+                "prop-hash-mismatch-scan-id",
+                IngestMode::Copy,
+            )
+            .expect("ingest_scan_results must return Ok even with a hash-mismatched file");
 
             // Every genuinely valid file is still processed normally.
             prop_assert_eq!(result.processed_count, valid_count);

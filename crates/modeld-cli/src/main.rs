@@ -8,8 +8,8 @@ use modeld_core::{
     load_config, parse_workflow, pin_model, remove_tag, resolve_store_path, run_doctor, run_fsck,
     save_config, scan_workflow_refs, set_note, t, tf, token_remove, token_set, token_status,
     unfavorite_model, unlink_path, unpin_model, Blake3Hash, CasStore, CheckStatus, Database,
-    DedupEngine, DedupMode, DedupStrategy, Downloader, GcEngine, HfCache, QuarantineManager,
-    RefStatus, ScanOptions, Scanner, TransactionManager, TxFilter,
+    DedupEngine, DedupMode, DedupStrategy, Downloader, GcEngine, HfCache, IngestMode,
+    QuarantineManager, RefStatus, ScanOptions, Scanner, TransactionManager, TxFilter,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -53,6 +53,15 @@ enum Commands {
         /// Follow symbolic links when traversing directories (default: false)
         #[arg(long)]
         follow_symlinks: bool,
+        /// Only catalogue files in the database; do not store their content (default)
+        #[arg(long, default_value = "false", conflicts_with_all = ["adopt", "copy"])]
+        index_only: bool,
+        /// Hard-link files into the store (same volume, zero extra space)
+        #[arg(long, default_value = "false", conflicts_with_all = ["index_only", "copy"])]
+        adopt: bool,
+        /// Copy files into the store (works across volumes, uses extra space)
+        #[arg(long, default_value = "false", conflicts_with_all = ["index_only", "adopt"])]
+        copy: bool,
     },
     /// Show store statistics
     Status {
@@ -798,7 +807,26 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { path, interactive } => init_command(path, interactive)?,
-        Commands::Scan { path, store, incremental, full, exclude_globs, follow_symlinks } => {
+        Commands::Scan {
+            path,
+            store,
+            incremental,
+            full,
+            exclude_globs,
+            follow_symlinks,
+            index_only,
+            adopt,
+            copy,
+        } => {
+            // Index is the default: a catalogue scan must not duplicate data.
+            let mode = if adopt {
+                IngestMode::Adopt
+            } else if copy {
+                IngestMode::Copy
+            } else {
+                let _ = index_only;
+                IngestMode::Index
+            };
             scan_command(
                 path,
                 resolve_store(store),
@@ -806,6 +834,7 @@ fn main() -> Result<()> {
                 full,
                 exclude_globs,
                 follow_symlinks,
+                mode,
             )?
         }
         Commands::Status { store } => status_command(resolve_store(store))?,
@@ -1018,6 +1047,7 @@ fn scan_command(
     full: bool,
     exclude_globs: Vec<String>,
     follow_symlinks: bool,
+    mode: IngestMode,
 ) -> Result<()> {
     println!("{}", tf("scan.scanning", &[("path", &scan_path.display())]).cyan().bold());
 
@@ -1041,7 +1071,13 @@ fn scan_command(
     let preindexed = db.get_all_indexed_paths().unwrap_or_default();
     let cached_count = preindexed.len();
 
+    // Extensions come from `modeld.toml [scan] extensions` when configured,
+    // otherwise the built-in default list (weights + exported graph formats).
+    let store_config = load_config(&store_path).unwrap_or_default();
+    let extensions = store_config.scan_extensions();
+
     let scanner = Scanner::new()
+        .with_extensions(extensions)
         .with_excluded_dirs(vec![store_canonical])
         .with_preindexed(preindexed)
         .with_scan_options(ScanOptions { incremental, full, exclude_globs, follow_symlinks });
@@ -1085,10 +1121,13 @@ fn scan_command(
     // no pre-existing scan_id, and is passed through to
     // `CasStore::store_crash_safe` as the tx_id (audit Wave 5.4).
     println!("\n{}", t("scan.processing").cyan().bold());
+    println!("  {}", ingest_mode_notice(mode).dimmed());
     let scan_id = Uuid::new_v4().to_string();
-    let ingest_result = modeld_core::ingest_scan_results(&store_path, &mut db, &results, &scan_id)?;
+    let ingest_result =
+        modeld_core::ingest_scan_results(&store_path, &mut db, &results, &scan_id, mode)?;
 
     println!("\n{}", t("scan.complete").green().bold());
+    println!("  {}", tf("scan.mode", &[("mode", &mode.as_str())]));
     let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
     println!("  {}", tf("scan.processed", &[("count", &ingest_result.processed_count)]).bold());
     println!("  {}", tf("scan.total_size", &[("gb", &gb)]));
@@ -1107,6 +1146,21 @@ fn scan_command(
     }
 
     Ok(())
+}
+
+/// One-line explanation of what the ingest mode does to the user's files.
+fn ingest_mode_notice(mode: IngestMode) -> &'static str {
+    match mode {
+        IngestMode::Index => {
+            "mode: index — files are catalogued only; nothing is copied or linked \
+             (use --adopt to share them, --copy to duplicate them into the store)"
+        }
+        IngestMode::Adopt => {
+            "mode: adopt — files are hard-linked into the store and become read-only \
+             (zero extra disk space; requires the store and the files on one volume)"
+        }
+        IngestMode::Copy => "mode: copy — files are copied into the store (needs extra disk space)",
+    }
 }
 
 fn status_command(store_path: PathBuf) -> Result<()> {

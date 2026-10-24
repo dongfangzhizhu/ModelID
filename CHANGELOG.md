@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld scan` no longer copies models into the store by default** — the new
+  `IngestMode` defaults to `Index`, which only writes the database. Copying is
+  opt-in via `--copy`, and `--adopt` hard-links the files instead (zero extra
+  disk space, same volume). **This is a breaking change**: a scanned-but-not-adopted
+  model has no CAS object, so `modeld proxy` cannot serve it until it is adopted,
+  copied or downloaded. See `docs/scan-modes.md`. (ROADMAP A5)
+- **Model extensions are configurable and broader** — `modeld.toml [scan] extensions`
+  overrides the list, and the defaults now also cover `onnx`, `tflite`, `h5`, `pb`,
+  `engine` and `npz` alongside the weight formats. Both the CLI and the WebUI
+  scanner read the same config. (ROADMAP A5)
 - **`modeld serve` requires `--allow-lan` for non-loopback hosts** — matching
   `modeld-webui` and `modeld proxy start`. A bearer token is always enforced.
   (ROADMAP A4)
@@ -49,8 +59,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HF-proxy downloads use their own SQLite connection** — a cache miss no longer
   holds the shared DB mutex for the whole upstream transfer. (ROADMAP A2)
 
+### Added
+
+- **`modeld scan --adopt`** — hard-links a model into the CAS and atomically
+  re-points the original path at the object (`hard_link` to a temporary name +
+  `rename`, the same protocol as A1). Adopting a 128 MiB model changed the volume's
+  free space by 0.3 MB and produced an object with the *same* file id. Adopting
+  across volumes fails with an explicit `cross-volume … use --copy instead` error
+  rather than silently falling back to a copy. (ROADMAP A5)
+- **`--index-only` / `--copy` scan flags and a WebUI `mode` field** — the three
+  modes are selectable from the CLI and from `POST /api/v1/scan`. (ROADMAP A5)
+
 ### Fixed
 
+- **`modeld scan --adopt` refuses a file that changed after it was scanned** —
+  the cached scan result skips the re-hash, so a size check now stands between a
+  stale hash and a corrupt CAS object. (ROADMAP A5)
 - **The Web UI opened the wrong database** — `modeld-webui` used
   `<store>/metadata.db`, so it showed an empty library next to a store that
   `modeld scan` had filled. It now uses `<store>/modeld.db` like every other

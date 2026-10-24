@@ -19,8 +19,25 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-/// Supported model file extensions
-const MODEL_EXTENSIONS: &[&str] = &["safetensors", "gguf", "ckpt", "pth", "pt", "bin"];
+/// Model file extensions scanned by default.
+///
+/// Weights (safetensors / gguf / ckpt / pth / pt / bin) plus the common
+/// exported-graph and runtime formats (onnx / tflite / h5 / pb / engine / npz).
+/// Override with `modeld.toml [scan] extensions`.
+pub const MODEL_EXTENSIONS: &[&str] = &[
+    "safetensors",
+    "gguf",
+    "ckpt",
+    "pth",
+    "pt",
+    "bin",
+    "onnx",
+    "tflite",
+    "h5",
+    "pb",
+    "engine",
+    "npz",
+];
 
 /// Options that control how a scan is performed.
 #[derive(Debug, Clone)]
@@ -594,6 +611,25 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].path.file_name().unwrap() == "model.custom");
+    }
+
+    #[test]
+    fn test_default_extensions_cover_exported_formats() {
+        let tmp = TempDir::new().unwrap();
+        for name in ["weights.safetensors", "graph.onnx", "mobile.tflite", "legacy.h5"] {
+            create_test_file(tmp.path(), name, b"payload");
+        }
+        create_test_file(tmp.path(), "notes.txt", b"not a model");
+
+        let mut found: Vec<String> = Scanner::new()
+            .scan(tmp.path(), |_, _| {})
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        found.sort();
+
+        assert_eq!(found, vec!["graph.onnx", "legacy.h5", "mobile.tflite", "weights.safetensors"]);
     }
 
     #[test]

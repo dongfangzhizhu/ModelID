@@ -112,6 +112,15 @@ impl Default for GcConfig {
     }
 }
 
+/// `[scan]` section
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ScanConfig {
+    /// File extensions (without the leading dot) treated as model files.
+    /// Empty means `scanner::MODEL_EXTENSIONS` (the built-in default list).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+}
+
 /// [auth] section
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct AuthConfig {
@@ -141,6 +150,26 @@ pub struct ModeldConfig {
     pub gc: GcConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub scan: ScanConfig,
+}
+
+impl ModeldConfig {
+    /// Extensions the scanner should accept, honouring `[scan] extensions`.
+    ///
+    /// Entries are normalised: a leading dot is stripped and case is lowered, so
+    /// `[".ONNX"]` and `["onnx"]` behave the same.
+    pub fn scan_extensions(&self) -> Vec<String> {
+        if self.scan.extensions.is_empty() {
+            return crate::scanner::MODEL_EXTENSIONS.iter().map(|e| e.to_string()).collect();
+        }
+        self.scan
+            .extensions
+            .iter()
+            .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +226,37 @@ mod tests {
 
         let loaded = load_config(tmp.path()).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_scan_extensions_default_to_the_builtin_list() {
+        let config = ModeldConfig::default();
+        let extensions = config.scan_extensions();
+        // Weights and exported graph formats are both covered by default.
+        for expected in
+            ["safetensors", "gguf", "ckpt", "onnx", "tflite", "h5", "pb", "engine", "npz"]
+        {
+            assert!(extensions.contains(&expected.to_string()), "missing default {expected}");
+        }
+    }
+
+    #[test]
+    fn test_scan_extensions_from_config_are_normalised() {
+        let mut config = ModeldConfig::default();
+        config.scan.extensions = vec![".ONNX".to_string(), " TFLite ".to_string(), "".to_string()];
+        assert_eq!(config.scan_extensions(), vec!["onnx".to_string(), "tflite".to_string()]);
+    }
+
+    #[test]
+    fn test_scan_section_parses_from_toml() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("modeld.toml"),
+            "[scan]\nextensions = [\".safetensors\", \"onnx\"]\n",
+        )
+        .unwrap();
+        let config = load_config(tmp.path()).unwrap();
+        assert_eq!(config.scan_extensions(), vec!["safetensors".to_string(), "onnx".to_string()]);
     }
 
     #[test]

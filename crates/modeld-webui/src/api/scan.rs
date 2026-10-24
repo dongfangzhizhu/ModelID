@@ -23,6 +23,8 @@ pub struct ScanRequest {
     pub follow_symlinks: Option<bool>,
     /// Glob patterns to exclude
     pub exclude_globs: Option<Vec<String>>,
+    /// What to do with each file's bytes: `index` (default), `adopt` or `copy`.
+    pub mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -62,6 +64,17 @@ pub async fn trigger_scan(
     let follow_symlinks = req.follow_symlinks.unwrap_or(false);
     let exclude_globs = req.exclude_globs.unwrap_or_default();
 
+    // Default to index-only: clicking "Scan" must not duplicate the library.
+    let ingest_mode = match req.mode.as_deref() {
+        None | Some("") => modeld_core::IngestMode::Index,
+        Some(raw) => match raw.parse::<modeld_core::IngestMode>() {
+            Ok(mode) => mode,
+            Err(e) => {
+                return Err(crate::error::ApiError::bad_request(format!("invalid scan mode: {e}")))
+            }
+        },
+    };
+
     tokio::spawn(async move {
         let mut any_error = false;
 
@@ -85,6 +98,7 @@ pub async fn trigger_scan(
             let scan_root2 = scan_root.clone();
             let excl2 = exclude_globs.clone();
             let sid2 = sid.clone(); // moved into spawn_blocking; `sid` itself is reused across loop iterations
+            let ingest_mode = ingest_mode;
 
             let result = tokio::task::spawn_blocking(
                 move || -> anyhow::Result<(modeld_core::IngestResult, WsEvent)> {
@@ -104,7 +118,18 @@ pub async fn trigger_scan(
                         exclude_globs: excl2,
                     };
 
+                    // Extensions come from `modeld.toml [scan] extensions` when set.
+                    let extensions = modeld_core::load_config(&store_path2)
+                        .map(|cfg| cfg.scan_extensions())
+                        .unwrap_or_else(|_| {
+                            modeld_core::scanner::MODEL_EXTENSIONS
+                                .iter()
+                                .map(|e| e.to_string())
+                                .collect()
+                        });
+
                     let scanner = modeld_core::Scanner::new()
+                        .with_extensions(extensions)
                         .with_excluded_dirs(vec![store_canonical])
                         .with_preindexed(preindexed)
                         .with_scan_options(scan_opts);
@@ -185,8 +210,13 @@ pub async fn trigger_scan(
                     // passed through to `CasStore::store_crash_safe` as the tx_id
                     // (audit Wave 5.5).
                     let mut db = db_arc2.lock().map_err(|_| anyhow::anyhow!("lock poisoned"))?;
-                    let ingest_result =
-                        modeld_core::ingest_scan_results(&store_path2, &mut db, &scanned, &sid2)?;
+                    let ingest_result = modeld_core::ingest_scan_results(
+                        &store_path2,
+                        &mut db,
+                        &scanned,
+                        &sid2,
+                        ingest_mode,
+                    )?;
                     Ok((ingest_result, indexing_event))
                 },
             )
@@ -341,6 +371,7 @@ mod property_tests {
                 force_rehash: Some(true),
                 follow_symlinks: None,
                 exclude_globs: None,
+                mode: None,
             };
 
             let Json(resp) = trigger_scan(State(state.clone()), Some(Json(req)))

@@ -282,13 +282,39 @@ Refs: docs/ROADMAP.md#A1
   - 扫描扩展名可通过 `modeld.toml [scan].extensions` 配置，默认补充 `onnx/tflite/h5/pb/engine/npz`。
 - **产物**：三种模式 + 配置化扩展名 + 文档
 - **验收标准**：
-  - [ ] `scan --index-only` 前后 `du -sh <models>` 与 store 增量均 < 1%
-  - [ ] `scan --adopt` 后原文件 inode 与 CAS 对象 inode 相同（同卷）
-  - [ ] 默认（无参数）不产生额外数据副本
-  - [ ] 跨卷时 `--adopt` 明确报错并提示改用 `--copy`，不静默降级
-  - [ ] 配置的扩展名生效（新增 `.onnx` 文件可被索引）
+  - [x] `scan --index-only` 前后 `du -sh <models>` 与 store 增量均 < 1%
+  - [x] `scan --adopt` 后原文件 inode 与 CAS 对象 inode 相同（同卷）
+  - [x] 默认（无参数）不产生额外数据副本
+  - [x] 跨卷时 `--adopt` 明确报错并提示改用 `--copy`，不静默降级
+  - [x] 配置的扩展名生效（新增 `.onnx` 文件可被索引）
 - **测试**：`ingest::index_mode_writes_no_blob`、`ingest::adopt_shares_inode`、`scanner::custom_extensions_from_config`
 - **估算**：3 人日 ｜ **依赖**：A1（复用原子替换）
+- **状态**：✅ 已完成（`a5` 提交）
+- **实现说明**：
+  - `IngestMode { Index, Adopt, Copy }`（`Default = Index`），`ingest_scan_results` 增加第 5 个参数 `mode`；
+    `FromStr` 接受 `index`/`index-only`/`adopt`/`link`/`copy`，WebUI `ScanRequest.mode` 走同一解析。
+  - `CasStore::adopt_object`：目标对象不存在时在 CAS 分片目录内 `hard_link` 到 `.modeld_tmp_<uuid>.tmp` 再 `rename`（与 A1 同一协议），
+    随后置只读；对象已存在时返回既有路径，由调用方 `replace_with_link` 原子替换（避免对同一 inode 自我 rename）。
+  - 跨卷判定复用 `links::is_same_volume`，在创建任何文件之前返回带 `--copy` 提示的错误。
+  - `adopt` 前校验 `size` 与扫描时一致：`from_cache` 命中时扫描器不重算哈希，只靠这一步拦住「扫描后被改动的文件」。
+  - `Adopt` 成功时 `alias_type` 记为 `Hardlink`（`Index`/`Copy` 仍为 `Original`），使 `dupes`/`stats` 的浪费统计正确。
+  - `ModeldConfig::scan_extensions()` 统一扩展名来源：`[scan] extensions` 非空时以其为准（去点、转小写），否则用 `scanner::MODEL_EXTENSIONS`；
+    CLI `scan` 与 WebUI `/api/v1/scan` 都走这条路径。
+  - 默认扩展名补充 `onnx/tflite/h5/pb/engine/npz`。
+- **验收证据**（2026-10-24，Windows 11，128 MiB 单文件，三种模式各用独立 store）：
+
+  | 模式 | 卷剩余空间变化 | CAS 对象数 | 原文件与 CAS 的 fileid | 结果 |
+  | --- | --- | --- | --- | --- |
+  | `--index-only`（默认） | 0.20 MB（噪声） | 0 | — | 无副本 |
+  | `--adopt` | 0.30 MB（噪声） | 1 | **相同**（`fsutil file queryfileid`） | 硬链接生效 |
+  | `--copy` | 128.20 MB | 1 | 不同 | 显式复制 |
+
+  - 跨卷（`C:\Users\Public` → `D:` 上的 store）：`adopt failed: cross-volume: … so it cannot be hard-linked; use --copy instead`，CAS 对象数为 0，无静默降级。
+  - 扩展名：默认配置下 `graph.onnx` + `weights.safetensors` → 2 个模型；写 `[scan] extensions = ["onnx"]` 后 → 1 个模型（仅 `.onnx`）。
+  - 单测：`index_mode_writes_no_blob`、`copy_mode_writes_an_independent_blob`、`adopt_mode_shares_the_inode_with_the_cas_object`、
+    `adopt_mode_rejects_a_file_that_changed_after_the_scan`、`adopt_mode_is_rejected_across_volumes`、`ingest_mode_parses_from_strings`、
+    `config::test_scan_extensions_from_config_are_normalised`、`scanner::test_default_extensions_cover_exported_formats`。
+  - **破坏性变更**：`modeld scan` 不再默认复制进 CAS。仅索引的模型没有 CAS 对象，因此 `proxy`/`hf-cache` 在 `--adopt`/`--copy` 之前无法对外提供该 blob。
 
 ### A6 · 配置系统统一
 
@@ -573,7 +599,7 @@ Refs: docs/ROADMAP.md#A1
 | A2 | 代理流式 + 线程池 + panic 隔离 | done | AI agent | 2026-10-24 | 2026-10-24 | `c60d5dd` |
 | A3 | 服务端鉴权基线 | done | AI agent | 2026-10-24 | 2026-10-24 | `050770e` |
 | A4 | WebUI 与 CLI 打通 | done | AI agent | 2026-10-24 | 2026-10-24 | `c87922b` |
-| A5 | 扫描摄取模式 | todo | — | — | — | — |
+| A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `a5adopt` |
 | A6 | 配置系统统一 | todo | — | — | — | — |
 | A7 | 清除假实现 | todo | — | — | — | — |
 | A8 | 构建与发布链路修复 | todo | — | — | — | — |
@@ -612,6 +638,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `a5adopt` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
 | 2026-10-24 | A4 | WebUI 与 CLI 打通：DB 统一为 `modeld.db`、WS 支持 `?token=`、前端 401 弹窗 + WS 指数退避、`serve --allow-lan` | `c87922b` | `webui/main.rs`、`webui/auth.rs`、`webui/server.rs`、`webui/ui/{main,api,ws,i18n}.js`、`webui/ui/tests/ws.test.js`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A3 | 鉴权安全默认：require_token 默认开启、token 自动生成并持久化、`--allow-lan` 门控、常量时间比较、CORS 同源白名单 + CSRF 头、WebUI `--token` 与非回环拒启 | `050770e` | `proxy/auth.rs`、`proxy/config.rs`、`proxy/server.rs`、`cli/main.rs`、`webui/main.rs`、`webui/server.rs`、`webui/ui/api.js`、`Cargo.toml`、`CHANGELOG.md` |
 | 2026-10-24 | A2 | 代理流式响应 + 线程池 + panic 隔离 + Range 分片 + 压力脚本 | `c60d5dd` | `proxy/server.rs`、`proxy/config.rs`、`tests/proxy_integration.rs`、`scripts/bench-proxy-streaming.ps1`、`docs/proxy-api.md`、`CHANGELOG.md` |
@@ -624,10 +651,10 @@ Refs: docs/ROADMAP.md#A1
 
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
-| A 止血 | 8 | 4 | 50% |
+| A 止血 | 8 | 5 | 63% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **4** | **17%** |
+| **合计** | **24** | **5** | **21%** |
 
 ---
 
@@ -665,6 +692,8 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 审核 | `.gitignore` 双重编码乱码 + `node_modules` 反忽略 | A8 | open |
 | 2026-10-24 | 审核 | mDNS 仅发现无广播 | C7 | open |
 | 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | open |
+| 2026-10-24 | A5 | `scan` 的退出码不反映 per-file 错误（跨卷 `--adopt` 会打印错误但仍 exit 0），脚本无法据此判断 | B2 | open |
+| 2026-10-24 | A5 | 仅索引（Index）的模型没有 CAS 对象，`proxy` 对外提供该 blob 时会 404；`status` 也未标注「仅索引」 | A6 | open |
 | 2026-10-24 | 审核 | Python hook token 走命令行参数 | B5 | open |
 | 2026-10-24 | 开发 A1 | `dedup.rs` 中 `cas_path.parent().unwrap()` 属库层 panic | B1 | open |
 | 2026-10-24 | 开发 A1 | `links.rs` 与 `platform.rs` 各有一份 `is_same_volume`，且盘符比较不可靠 | B1 | open |
