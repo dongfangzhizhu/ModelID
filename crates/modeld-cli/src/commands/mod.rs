@@ -5,5 +5,6 @@
 
 pub mod config;
 pub mod db;
+pub mod hf;
 pub mod store;
 pub mod tx;

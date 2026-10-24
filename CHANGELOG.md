@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld hf` moved to its own module** — `commands/hf.rs` holds the three
+  HF action enums, `hf_command`, `hf_subcommand_*`, `hf_cache_command`,
+  `hf_token_command` and `read_secret_from_stdin`. (ROADMAP B2)
 - **`modeld config` moved to its own module** — `commands/config.rs` holds
   `ConfigAction`, `config_command`, `CONFIG_KEYS` and the get/set/validation helpers.
   (ROADMAP B2)
