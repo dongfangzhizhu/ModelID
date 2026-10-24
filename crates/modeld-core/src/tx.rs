@@ -153,22 +153,6 @@ pub struct TxFilter {
     pub op_type: Option<OpType>,
 }
 
-/// Result of recovering a single crashed transaction.
-#[derive(Debug)]
-pub struct TxRecoveryResult {
-    pub tx_id: String,
-    pub action: RecoveryAction,
-}
-
-/// What was done during recovery.
-#[derive(Debug)]
-pub enum RecoveryAction {
-    /// Transaction was in PENDING state and has been marked FAILED.
-    MarkedFailed,
-    /// Staging directory for this transaction was cleaned up.
-    StagingCleaned,
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // TransactionManager
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,58 +266,15 @@ impl<'a> TransactionManager<'a> {
 
     // ── Recovery ─────────────────────────────────────────────────────────────
 
-    /// Recover from a crash: scan for PENDING transactions, mark them FAILED,
-    /// and clean up staging files left behind in `tmp/cas_staging/`.
-    pub fn recover(&mut self) -> Result<Vec<TxRecoveryResult>> {
-        let incomplete = self.db.get_incomplete_wal_transactions()?;
-        let mut results = Vec::new();
-
-        for tx in incomplete {
-            // Clean up per-transaction staging directory
-            let staging_dir = self.store_path.join("tmp").join("cas_staging").join(&tx.tx_id);
-            if staging_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&staging_dir) {
-                    eprintln!(
-                        "tx: recover — failed to remove staging dir {}: {}",
-                        staging_dir.display(),
-                        e
-                    );
-                } else {
-                    results.push(TxRecoveryResult {
-                        tx_id: tx.tx_id.clone(),
-                        action: RecoveryAction::StagingCleaned,
-                    });
-                }
-            }
-
-            // Also clean up legacy flat staging files (dedup engine format)
-            if let Some(ref hash_str) = tx.target_hash {
-                let legacy_path = self
-                    .store_path
-                    .join("tmp")
-                    .join("cas_staging")
-                    .join(format!("{}.tmp", hash_str));
-                if legacy_path.exists() {
-                    let _ = std::fs::remove_file(&legacy_path);
-                }
-            }
-
-            let end_time = Utc::now().to_rfc3339();
-            self.db.update_wal_status(&tx.tx_id, TransactionStatus::Failed)?;
-            self.db.update_wal_extended(
-                &tx.tx_id,
-                None,
-                None,
-                None,
-                Some(&end_time),
-                Some("Recovered from crash: process was interrupted"),
-            )?;
-
-            results
-                .push(TxRecoveryResult { tx_id: tx.tx_id, action: RecoveryAction::MarkedFailed });
-        }
-
-        Ok(results)
+    /// Recover from a crash.
+    ///
+    /// Delegates to [`crate::recover::recover_store`]: `pending` transactions are
+    /// rolled back, `copied` ones are rolled forward (the CAS object is already
+    /// there; the missing alias links are replayed), and stale rows are dropped.
+    /// Each report carries the disposition of every path it touched.
+    pub fn recover(&mut self) -> Result<Vec<crate::recover::RecoveryReport>> {
+        let caps = crate::links::LinkCapability::detect();
+        crate::recover::recover_store(self.db, &self.store_path, &caps)
     }
 
     // ── Query ────────────────────────────────────────────────────────────────

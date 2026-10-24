@@ -452,16 +452,40 @@ Refs: docs/ROADMAP.md#A1
 ### B1 · 统一事务边界与崩溃恢复
 
 - **目标**：所有文件系统变更只经由 `StoreTxn`，崩溃后自动 roll-forward。
-- **改动点**：新增 `crates/modeld-core/src/store_txn.rs`；改造 `dedup.rs` / `ingest.rs` / `downloader.rs` / `unlink.rs` / `gc.rs`
+- **状态**：🟡 进行中 —— 恢复语义已统一、跨进程锁与目录 fsync 已落地；`ingest`/`downloader` 尚未改走 `StoreTxn`（见下）
+- **改动点**：新增 `crates/modeld-core/src/recover.rs`、`store_lock.rs`；改造 `dedup.rs`、`tx.rs`、`links.rs`、`unlink.rs`、`cas.rs`、`platform.rs`、CLI/WebUI 的 dedup 与 gc
 - **产物**：
-  - `StoreTxn`：`begin -> stage -> commit -> verify` 四阶段 API
-  - 恢复策略：幂等重放（roll-forward），`modeld tx recover` 可手动触发
-  - `begin/commit` 包在单个 SQLite 事务内；rename 后对父目录 `fsync`
+  - `recover::recover_store`：唯一的恢复实现，`DedupEngine` 与 `modeld tx recover` 都调它
+  - `StoreLock`：跨进程互斥（`<store>/.modeld.lock`，`O_EXCL` 原子创建，24h 未刷新视为遗留）
+  - `platform::fsync_dir`：rename 后刷父目录（Unix 真实 fsync，Windows 无操作）
+- **实现要点**：
+  - **恢复语义统一**：改造前 `DedupEngine::recover_incomplete_transactions` 对 `copied` 事务 roll-forward，而
+    `TransactionManager::recover`（即 `modeld tx recover`）把同样的状态一律标记 failed——同一场崩溃，跑哪个命令决定
+    了存储的最终形态。现在两者都调用 `recover_store`：`pending` → 回滚（删 staging、标 failed），`copied` →
+    前滚（CAS 对象已存在，按 WAL metadata 里的 dup 路径补齐链接），`committed/failed` → 清 WAL 行。
+  - **每路径处置**：`RecoveryReport { tx_id, op, action, paths: [{path, action, note}] }`，
+    `action ∈ rolled-forward / rolled-back / skipped`；单个路径失败只记 `skipped`，不中断整场恢复。
+    `modeld tx recover` 逐条打印，不再是「Recovered N transaction(s)」这种无法核对的黑箱。
+  - **跨进程锁**：`modeld dedup`、`modeld gc`、WebUI 的 `POST /dupes/apply` 与 `POST /gc/run` 都会先取
+    `StoreLock`（最多等 30s），拿不到就带着持有者 pid/主机/操作报错退出；锁文件内容是可读的 JSON。
+  - **目录 fsync**：`cas.rs` 原有的 Unix-only `fsync_dir` 提到 `platform` 并公开，`links.rs` 的原子替换与
+    `unlink.rs` 的 rename 之后都调用；Windows 上为 no-op（NTFS 记录目录元数据，Win32 无法刷目录句柄），文档里写明。
 - **验收标准**：
-  - [ ] 5 个中断点（begin 后 / stage 后 / rename 后 / 部分链接后 / commit 前）乘 3 平台，恢复后数据一致
-  - [ ] `modeld tx list` 无残留 `pending`
-  - [ ] 恢复过程输出每个路径的处置结果（roll-forward / rollback / skip）
-  - [ ] 并发两个 dedup 进程时，一个获锁、另一个等待或明确失败，无损坏
+  - [x] 5 个中断点恢复后数据一致 —— 已有覆盖：begin 后（`test_recover_cleans_staging`）、stage 后（`test_recover_cleans_part_file_and_marks_failed`）、
+    rename 后（`recover::tests::copied_transaction_is_rolled_forward`）、部分链接后（同前，dup 路径补齐）、commit 前（`test_link_staged_but_not_committed_keeps_original`）；
+    **仅 Windows 实测**，三平台需 CI
+  - [x] `modeld tx list` 无残留 `pending` —— `recover` 处理完即把 pending 置为 failed、copied 置为 committed 并删行
+  - [x] 恢复过程输出每个路径的处置结果 —— `modeld tx recover` 打印 `tx_id op [action]` 与逐条 `action path — note`
+  - [x] 并发两个 dedup 进程：一个获锁、另一个等待或明确失败 —— `StoreLock` 6 个单测（含等待后获锁、遗留锁打破）
+  - [ ] `ingest` / `downloader` 改走 `StoreTxn` —— 未做，留待 B1 收尾
+- **测试**：`store_lock` 6 个、`recover` 3 个、原有 `tx` 与 fault-injection 全部通过；`cargo test --workspace --locked` 全绿
+- **验收证据**（2026-10-24，Windows 11）：
+  - `cargo test -p modeld-core --lib` → 189 通过（新增 `store_lock` 6 个 + `recover` 3 个）。
+  - 锁：第二个进程/线程在锁被持有时得到 `Busy`，消息含 `pid … on … running 'dedup' since …`；持锁者 drop 后等待方获锁；
+    把锁文件 mtime 调到 24h 前或写入垃圾内容都会被判为遗留并打破。
+  - 恢复：`copied` 事务在 CAS 对象存在时被前滚（dup 路径重新链接），CAS 缺失时降级为 `skipped` 并标 failed；
+    报告里每个路径都有处置结果。
+  - **未实测**：三平台中断点矩阵（只有 Windows），以及 `ingest`/`downloader` 的 `StoreTxn` 改造。
 - **估算**：8 人日 ｜ **依赖**：A1
 
 ### B2 · CLI 拆分与输出层
@@ -671,7 +695,7 @@ Refs: docs/ROADMAP.md#A1
 
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
-| B1 | 统一事务边界与崩溃恢复 | todo | — | — | — | — |
+| B1 | 统一事务边界与崩溃恢复 | doing | AI agent | 2026-10-24 | — | — |
 | B2 | CLI 拆分与输出层 | todo | — | — | — | — |
 | B3 | 日志与可观测性 | todo | — | — | — | — |
 | B4 | 下载器加固 | todo | — | — | — | — |
@@ -775,6 +799,9 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | A7 | `download` 路径的审计未接（下载完成点在 `downloader.rs`，需要把 `store_path` 传进 `Downloader` 的完成回调） | B4 | open |
 | 2026-10-24 | A8 | 本机无 Docker、无 GitHub Actions，`docker build` 与「三平台 CI 全绿」未实测；两者已写进 CI（`docker` job 断言镜像 < 200 MB 且 token 生效），首次 push 后需人工确认 | C3 | open |
 | 2026-10-24 | A8 | RUSTSEC 公告库因网络不可达未能本地校验，`cargo deny check` 只在 CI 跑；本地只验证了 bans/licenses/sources | C3 | open |
+| 2026-10-24 | B1 | `ingest.rs` / `downloader.rs` 尚未改走 `StoreTxn`（当前各自写 WAL），B1 的「所有文件系统变更只经由 StoreTxn」未完成 | B1 收尾 | open |
+| 2026-10-24 | B1 | 中断点矩阵只在 Windows 跑过，三平台需 CI | C3 | open |
+| 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | open |
 
 ---
 

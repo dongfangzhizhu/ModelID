@@ -830,143 +830,35 @@ impl DedupEngine {
 
     /// Recover incomplete WAL transactions after a crash.
     ///
-    /// - `pending`   → staging may exist; clean up and mark failed
-    /// - `copied`    → Phase A done; continue Phase B using stored dup paths
-    /// - `committed` → already done; clean WAL
+    /// Delegates to [`crate::recover::recover_store`], which is also what
+    /// `modeld tx recover` runs — one implementation, one behaviour.
+    ///
+    /// Returns the number of transactions processed.
     pub fn recover_incomplete_transactions(&mut self) -> Result<usize> {
-        let incomplete = self.db.get_incomplete_wal_transactions()?;
-        let count = incomplete.len();
-
-        for tx in incomplete {
-            let staging_dir = self.store_path.join("tmp").join("cas_staging");
-
-            match tx.status {
-                TransactionStatus::Pending => {
-                    if let Some(ref hash) = tx.target_hash {
-                        let sp = staging_dir.join(format!("{}.tmp", hash));
-                        if sp.exists() {
-                            let _ = std::fs::remove_file(&sp);
-                        }
-                    }
-                    self.db.update_wal_status(&tx.tx_id, TransactionStatus::Failed)?;
+        let reports =
+            crate::recover::recover_store(&mut self.db, &self.store_path, &self.link_capability)?;
+        for report in &reports {
+            let short = &report.tx_id[..8.min(report.tx_id.len())];
+            match report.action {
+                crate::recover::TxAction::RolledForward => {
                     eprintln!(
                         "{}",
-                        crate::i18n::tf("warn.recover_rolled_back", &[("tx", &&tx.tx_id[..8])])
+                        crate::i18n::tf("warn.recover_phase_b_done", &[("tx", &short)])
                     );
                 }
-
-                TransactionStatus::Copied => {
-                    if let (Some(ref hash_str), Some(ref source_path)) =
-                        (&tx.target_hash, &tx.source_path)
-                    {
-                        let staging_path = staging_dir.join(format!("{}.tmp", hash_str));
-
-                        if let Ok(hash) = Blake3Hash::from_hex(hash_str) {
-                            let cas_path = self.cas_path_for_hash(&hash);
-
-                            // Move staging → CAS if needed
-                            if staging_path.exists() && !cas_path.exists() {
-                                if let Some(d) = cas_path.parent() {
-                                    let _ = std::fs::create_dir_all(d);
-                                }
-                                if std::fs::rename(&staging_path, &cas_path).is_err()
-                                    && std::fs::copy(&staging_path, &cas_path).is_ok()
-                                {
-                                    let _ = std::fs::remove_file(&staging_path);
-                                }
-                                if cas_path.exists() {
-                                    if let Ok(mut perms) =
-                                        std::fs::metadata(&cas_path).map(|m| m.permissions())
-                                    {
-                                        perms.set_readonly(true);
-                                        let _ = std::fs::set_permissions(&cas_path, perms);
-                                    }
-                                }
-                            } else if staging_path.exists() {
-                                let _ = std::fs::remove_file(&staging_path);
-                            }
-
-                            if cas_path.exists() {
-                                // Re-create canonical link
-                                let src = PathBuf::from(source_path);
-                                if src.exists() && src != cas_path {
-                                    let link_res =
-                                        create_link(&src, &cas_path, &self.link_capability);
-                                    let atype = match link_res {
-                                        LinkResult::Success(t) => t,
-                                        LinkResult::Failed(_) => AliasType::Original,
-                                    };
-                                    let _ = self.db.delete_alias(source_path);
-                                    let _ = self.db.insert_alias(
-                                        &hash,
-                                        source_path,
-                                        Frontend::User,
-                                        atype,
-                                    );
-                                } else if src.exists() {
-                                    let _ = self.db.insert_alias(
-                                        &hash,
-                                        source_path,
-                                        Frontend::User,
-                                        AliasType::Original,
-                                    );
-                                }
-
-                                // Re-create links for all duplicate paths (from WAL metadata)
-                                let dup_paths: Vec<PathBuf> = tx
-                                    .metadata
-                                    .as_deref()
-                                    .and_then(|m| serde_json::from_str::<Vec<String>>(m).ok())
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(PathBuf::from)
-                                    .collect();
-
-                                for dup_path in &dup_paths {
-                                    if dup_path.exists() {
-                                        let link_res =
-                                            create_link(dup_path, &cas_path, &self.link_capability);
-                                        let atype = match link_res {
-                                            LinkResult::Success(t) => t,
-                                            LinkResult::Failed(_) => AliasType::ReferenceOnly,
-                                        };
-                                        let dup_str = dup_path.to_string_lossy().to_string();
-                                        let _ = self.db.delete_alias(&dup_str);
-                                        let _ = self.db.insert_alias(
-                                            &hash,
-                                            &dup_str,
-                                            Frontend::User,
-                                            atype,
-                                        );
-                                    }
-                                }
-
-                                eprintln!(
-                                    "{}",
-                                    crate::i18n::tf(
-                                        "warn.recover_phase_b_done",
-                                        &[("tx", &&tx.tx_id[..8])],
-                                    )
-                                );
-                            }
-                        }
-                    }
-                    self.db.update_wal_status(&tx.tx_id, TransactionStatus::Committed)?;
-                    self.db.delete_wal_transaction(&tx.tx_id)?;
+                crate::recover::TxAction::RolledBack => {
+                    eprintln!("{}", crate::i18n::tf("warn.recover_rolled_back", &[("tx", &short)]));
                 }
-
-                TransactionStatus::Committed
-                | TransactionStatus::Failed
-                | TransactionStatus::RolledBack => {
-                    self.db.delete_wal_transaction(&tx.tx_id)?;
-                }
+                crate::recover::TxAction::Skipped => {}
             }
         }
-
-        if count > 0 {
-            eprintln!("{}", crate::i18n::tf("warn.recover_processed", &[("count", &count)]));
+        if !reports.is_empty() {
+            eprintln!(
+                "{}",
+                crate::i18n::tf("warn.recover_processed", &[("count", &reports.len().to_string())])
+            );
         }
-        Ok(count)
+        Ok(reports.len())
     }
 
     /// CAS path for a given hash.

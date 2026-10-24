@@ -160,6 +160,9 @@ fn en(key: &str) -> Option<&'static str> {
         // ── common / errors ──
         "store.not_initialized" => "Store not initialized. Run 'modeld init' first.",
         "store.not_initialized_exit" => "Store not initialized. Run `modeld init` first.",
+        "tx.recover.none" => "✓ No incomplete transactions; nothing to recover.",
+        "tx.recover.header" => "✓ Recovered {count} transaction(s):",
+        "lock.busy" => "Another modeld process is already modifying the store at {path}. Wait for it to finish, or delete {path}/.modeld.lock if it crashed.",
         "error.prefix" => "Error:",
         "error.file_not_found" => "File not found: {path}",
         "error.workflow_dir_missing" => "Workflow directory does not exist: {path}",
@@ -435,6 +438,9 @@ fn zh(key: &str) -> Option<&'static str> {
         // ── common / errors ──
         "store.not_initialized" => "存储未初始化。请先运行 'modeld init'。",
         "store.not_initialized_exit" => "存储未初始化。请先运行 `modeld init`。",
+        "tx.recover.none" => "✓ 没有未完成的事务，无需恢复。",
+        "tx.recover.header" => "✓ 已恢复 {count} 个事务：",
+        "lock.busy" => "另一个 modeld 进程正在修改存储 {path}。请等它结束；若它已崩溃，可删除 {path}/.modeld.lock。",
         "error.prefix" => "错误：",
         "error.file_not_found" => "找不到文件：{path}",
         "error.workflow_dir_missing" => "工作流目录不存在：{path}",

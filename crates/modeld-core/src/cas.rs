@@ -235,10 +235,9 @@ impl CasStore {
             let _ = fs::remove_file(&staging_path);
         }
 
-        // ── 7. fsync parent directory (Unix only) ─────────────────────────
-        #[cfg(unix)]
+        // ── 7. fsync parent directory (no-op on Windows) ──────────────────
         if let Some(parent) = dest.parent() {
-            fsync_dir(parent)?;
+            crate::platform::fsync_dir(parent)?;
         }
 
         // ── 8. Set read-only permissions ──────────────────────────────────
@@ -296,9 +295,8 @@ impl CasStore {
             return Err(anyhow!("Failed to publish CAS object {}: {}", dest.display(), e));
         }
 
-        #[cfg(unix)]
         if let Some(parent) = dest.parent() {
-            fsync_dir(parent)?;
+            crate::platform::fsync_dir(parent)?;
         }
 
         Self::make_readonly(&dest)?;
@@ -309,36 +307,6 @@ impl CasStore {
 // ─────────────────────────────────────────────────────────────────────────────
 // Platform helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// fsync a directory file descriptor (Unix only).
-///
-/// This ensures the directory entry for the newly renamed CAS object is
-/// durably persisted to disk before we return to the caller.
-#[cfg(unix)]
-fn fsync_dir(dir: &Path) -> Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let dir_file =
-        fs::File::open(dir).with_context(|| format!("Open dir for fsync: {}", dir.display()))?;
-    let ret = unsafe { libc_fsync(dir_file.as_raw_fd()) };
-    if ret != 0 {
-        return Err(anyhow!(
-            "fsync dir {} failed with errno {}",
-            dir.display(),
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-extern "C" {
-    fn fsync(fd: i32) -> i32;
-}
-
-#[cfg(unix)]
-unsafe fn libc_fsync(fd: i32) -> i32 {
-    fsync(fd)
-}
 
 #[cfg(test)]
 mod tests {

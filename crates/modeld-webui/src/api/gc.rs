@@ -95,6 +95,15 @@ pub async fn gc_run(
 ) -> ApiResult<Json<GcRunResponse>> {
     let _req = body.map(|b| b.0).unwrap_or_default();
 
+    // GC moves objects to quarantine; a concurrent dedup would be operating on
+    // a layout that is changing underneath it.
+    let _lock = modeld_core::StoreLock::acquire(
+        &state.store_path,
+        "gc (webui)",
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(|e| ApiError::conflict(e.to_string()))?;
+
     let mut db = state.db.lock().map_err(|_| ApiError::internal("DB lock poisoned"))?;
 
     let mut gc = modeld_core::GcEngine::new(&mut db, &state.store_path);

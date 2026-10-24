@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Directory fsync after every rename** — `platform::fsync_dir` (a real `fsync(2)` on
+  Unix, a documented no-op on Windows) is called after the atomic replace in
+  `links.rs`, the rename in `unlink.rs` and both CAS publish paths, so a crash right
+  after the rename cannot lose the directory entry. (ROADMAP B1)
+
 - **One config schema** — `[proxy]` is now part of `ModeldConfig`
   (`modeld-core::config::ProxyConfig`), so `modeld.toml` is described by a single
   struct instead of two competing ones. `modeld-proxy::config` re-exports the
@@ -73,6 +78,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One crash-recovery implementation** — `recover::recover_store` is now the only
+  place that replays the write-ahead log; `DedupEngine` and `modeld tx recover` both
+  call it, and it reports what happened to *every* path it touched
+  (`rolled-forward` / `rolled-back` / `skipped`) instead of a bare count.
+  (ROADMAP B1)
+- **A cross-process store lock** — `dedup` and `gc` (CLI and WebUI) take
+  `<store>/.modeld.lock` before touching the layout, wait up to 30 s for a running
+  process, and otherwise fail with the holder's pid, host and operation. The lock
+  file is created with `O_EXCL` and a lock untouched for 24 h is treated as abandoned.
+  (ROADMAP B1)
+
 - **`MODELD_AUTH_TOKEN` is honoured by `modeld serve`** — the token is resolved as
   `[auth] token` → `MODELD_AUTH_TOKEN` → generated, and the environment variable is
   never written to `modeld.toml`, so a container can inject the secret without it
@@ -114,6 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modes are selectable from the CLI and from `POST /api/v1/scan`. (ROADMAP A5)
 
 ### Fixed
+
+- **`modeld tx recover` disagreed with the dedup engine about the same crash** —
+  a `copied` transaction (CAS object written, alias links partially re-pointed)
+  was rolled *forward* by `DedupEngine` but marked *failed* by
+  `TransactionManager::recover`. Recovery is now shared, so the outcome no longer
+  depends on which command runs first. (ROADMAP B1)
 
 - **`.gitignore` was double-encoded and re-included `node_modules`** — the file contained
   mojibake instead of em dashes, and two `!/crates/modeld-webui/ui/node_modules/`

@@ -28,8 +28,10 @@ pub mod ingest;
 pub mod links;
 pub mod platform;
 pub mod quarantine;
+pub mod recover;
 pub mod refs;
 pub mod scanner;
+pub mod store_lock;
 pub mod store_path;
 pub mod tx;
 pub mod unlink;
@@ -70,12 +72,14 @@ pub use i18n::{detect, t, tf, Lang};
 pub use ingest::{ingest_scan_results, IngestError, IngestMode, IngestResult};
 pub use platform::{check_file_locked, detect_capabilities, is_same_volume, PlatformCapabilities};
 pub use quarantine::QuarantineManager;
+pub use recover::{recover_store, PathAction, PathOutcome, RecoveryReport, TxAction};
 pub use refs::{explain_refs, list_orphans, scan_workflow_refs};
 pub use scanner::{ScanOptions, ScannedFile, Scanner};
+pub use store_lock::{LockError, LockHolder, StoreLock};
 pub use store_path::{default_store_path, resolve_store_path};
 pub use tx::{
-    OpType, PathEntry, RecoveryAction, RollbackPlan, TransactionManager, TxFilter, TxHandle,
-    TxPlan, TxRecord, TxRecoveryResult, TxStatus,
+    OpType, PathEntry, RollbackPlan, TransactionManager, TxFilter, TxHandle, TxPlan, TxRecord,
+    TxStatus,
 };
 pub use unlink::{unlink_path, UnlinkResult};
 pub use workflow::{

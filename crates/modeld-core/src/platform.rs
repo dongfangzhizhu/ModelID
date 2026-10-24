@@ -9,6 +9,7 @@
 //! - Same-volume detection (required for hardlinks)
 //! - File lock detection (Windows: `ERROR_SHARING_VIOLATION`)
 
+use anyhow::Result;
 use std::path::Path;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,6 +81,52 @@ pub fn is_same_volume(p1: &Path, p2: &Path) -> bool {
 ///   if needed.)
 pub fn check_file_locked(path: &Path) -> bool {
     check_file_locked_impl(path)
+}
+
+/// Flush a directory's entries to disk.
+///
+/// After an atomic rename the new name is durable only once the *directory*
+/// holding it is flushed; `fsync` on the file does not cover its name.
+///
+/// - **Unix**: opens the directory and calls `fsync(2)`.
+/// - **Windows**: a no-op that returns `Ok(())`. NTFS journals directory metadata and
+///   the Win32 API has no way to flush a directory handle, so there is nothing
+///   to do; callers can invoke this unconditionally.
+pub fn fsync_dir(dir: &Path) -> Result<()> {
+    fsync_dir_impl(dir)
+}
+
+#[cfg(unix)]
+fn fsync_dir_impl(dir: &Path) -> Result<()> {
+    use anyhow::{anyhow, Context};
+    use std::fs;
+    use std::os::unix::io::AsRawFd;
+    let dir_file =
+        fs::File::open(dir).with_context(|| format!("Open dir for fsync: {}", dir.display()))?;
+    let ret = unsafe { libc_fsync(dir_file.as_raw_fd()) };
+    if ret != 0 {
+        return Err(anyhow!(
+            "fsync dir {} failed with errno {}",
+            dir.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn fsync(fd: i32) -> i32;
+}
+
+#[cfg(unix)]
+unsafe fn libc_fsync(fd: i32) -> i32 {
+    fsync(fd)
+}
+
+#[cfg(not(unix))]
+fn fsync_dir_impl(_dir: &Path) -> Result<()> {
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

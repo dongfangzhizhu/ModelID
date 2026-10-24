@@ -9,9 +9,10 @@ use modeld_core::{
     save_config, scan_workflow_refs, set_note, t, tf, token_remove, token_set, token_status,
     unfavorite_model, unlink_path, unpin_model, Blake3Hash, CasStore, CheckStatus, Database,
     DedupEngine, DedupMode, DedupStrategy, Downloader, GcEngine, HfCache, IngestMode,
-    QuarantineManager, RefStatus, ScanOptions, Scanner, TransactionManager, TxFilter,
+    QuarantineManager, RefStatus, ScanOptions, Scanner, StoreLock, TransactionManager, TxFilter,
 };
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -1621,6 +1622,12 @@ fn dedup_command(
         println!("{}", "─".repeat(40).cyan());
     }
 
+    // Two processes deduping the same store would interleave renames and the
+    // WAL would describe a store that no longer exists.  Wait briefly, then
+    // fail with the holder's identity instead of corrupting anything.
+    let _lock = StoreLock::acquire(&store_path, "dedup", Duration::from_secs(30))
+        .with_context(|| tf("lock.busy", &[("path", &store_path.display().to_string())]))?;
+
     let db = Database::open(&db_path)?;
     let mut engine = DedupEngine::new(db, store_path.clone());
 
@@ -2406,6 +2413,11 @@ fn gc_command(
     if !db_path.exists() {
         anyhow::bail!("{}", t("store.not_initialized_exit"));
     }
+
+    // GC deletes objects; it must not run concurrently with another layout
+    // mutation (dedup, another gc) in the same store.
+    let _lock = StoreLock::acquire(&store, "gc", Duration::from_secs(30))
+        .with_context(|| tf("lock.busy", &[("path", &store.display().to_string())]))?;
 
     let mut db = Database::open(&db_path)?;
     let mut gc = GcEngine::new(&mut db, &store);
@@ -3998,8 +4010,28 @@ fn tx_command(action: TxAction) -> Result<()> {
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let mut tm = TransactionManager::new(&mut db, &store_path);
-            let results = tm.recover()?;
-            println!("✓ Recovered {} transaction(s)", results.len());
+            let reports = tm.recover()?;
+            if reports.is_empty() {
+                println!("{}", t("tx.recover.none"));
+            } else {
+                println!("{}", tf("tx.recover.header", &[("count", &reports.len().to_string())]));
+                for report in &reports {
+                    println!(
+                        "  {} {} [{}]",
+                        &report.tx_id[..8.min(report.tx_id.len())],
+                        report.op,
+                        report.action.as_str()
+                    );
+                    for path in &report.paths {
+                        println!(
+                            "    {} {} — {}",
+                            path.action.as_str(),
+                            path.path.display(),
+                            path.note
+                        );
+                    }
+                }
+            }
         }
         TxAction::Cleanup { older_than, store } => {
             let store_path = resolve_store(store);

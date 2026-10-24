@@ -158,6 +158,15 @@ pub async fn dedup_apply(
             let filter_hashes: Option<std::collections::HashSet<String>> =
                 req.as_ref().and_then(|r| r.hashes.as_ref()).map(|hs| hs.iter().cloned().collect());
 
+            // Hold the store lock so a CLI `modeld dedup` running at the same
+            // time cannot interleave renames with this one.
+            let _lock = modeld_core::StoreLock::acquire(
+                &store_path,
+                "dedup (webui)",
+                std::time::Duration::from_secs(30),
+            )
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
             // Open a dedicated DB connection for the DedupEngine (it needs ownership).
             let db_path = store_path.join("modeld.db");
             let db = modeld_core::Database::open(&db_path)?;

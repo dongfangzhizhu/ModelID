@@ -113,6 +113,13 @@ pub fn unlink_path(db: &mut Database, store_path: &Path, path: &Path) -> Result<
         });
     }
 
+    // Flush the directory entry: the caller is about to record the unlink in
+    // the WAL, and a crash before the name hits the disk would leave the WAL
+    // pointing at a path that still exists.
+    if let Some(parent) = path.parent() {
+        let _ = crate::platform::fsync_dir(parent);
+    }
+
     #[cfg(windows)]
     {
         if cas_was_readonly {

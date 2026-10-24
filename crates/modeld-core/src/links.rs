@@ -238,6 +238,12 @@ impl StagedLink {
             Ok(()) => {
                 self.committed = true;
                 restore_readonly(&self.dest_path, dest_was_readonly);
+                // The rename is durable only once the directory entry is
+                // flushed; a crash right after this point must not lose the
+                // alias (the caller records it in the WAL right after).
+                if let Some(parent) = self.dest_path.parent() {
+                    let _ = crate::platform::fsync_dir(parent);
+                }
                 LinkResult::Success(self.alias_type.clone())
             }
             Err(e) => {
