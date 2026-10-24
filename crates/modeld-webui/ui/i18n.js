@@ -19,6 +19,7 @@ const translations = {
     'ws.connected':   'Connected',
     'ws.disconnected':'Disconnected',
     'ws.error':       'Connection failed',
+    'ws.unauthorized':'Not authorised — check the access token',
 
     // Common
     'common.loading':     'Loading…',
@@ -240,6 +241,7 @@ const translations = {
     'ws.connected':   '已连接',
     'ws.disconnected':'已断开',
     'ws.error':       '连接失败',
+    'ws.unauthorized':'未授权 —— 请检查访问令牌',
 
     // Common
     'common.loading':     '加载中…',

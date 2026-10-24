@@ -302,6 +302,9 @@ enum Commands {
         /// Reject all write operations (read-only mode)
         #[arg(long)]
         read_only: bool,
+        /// Allow binding to a non-loopback address (a token is always enforced)
+        #[arg(long, default_value = "false")]
+        allow_lan: bool,
     },
     /// Manage the modeld store
     Store {
@@ -871,8 +874,8 @@ fn main() -> Result<()> {
         Commands::Store { action } => store_command(action)?,
         Commands::Config { action } => config_command(action)?,
         Commands::Hf { action } => hf_command(action)?,
-        Commands::Serve { host, port, open, store, read_only } => {
-            serve_command(host, port, open, resolve_store(store), read_only)?
+        Commands::Serve { host, port, open, store, read_only, allow_lan } => {
+            serve_command(host, port, open, resolve_store(store), read_only, allow_lan)?
         }
         Commands::Tag { action } => tag_command(action)?,
         Commands::Note { action } => note_command(action)?,
@@ -2607,16 +2610,28 @@ fn serve_command(
     open_browser: bool,
     store_path: PathBuf,
     _read_only: bool,
+    allow_lan: bool,
 ) -> Result<()> {
     use colored::Colorize;
 
     let port = port.unwrap_or(8234);
 
+    // Exposing the UI on the network must be an explicit decision, matching
+    // `modeld-webui` and `modeld proxy start`.
+    let loopback = modeld_proxy::config::is_loopback_addr(&host);
+    if !loopback && !allow_lan {
+        anyhow::bail!(
+            "refusing to bind the Web UI to '{}': pass --allow-lan to expose it on the network \
+             (a bearer token is always enforced)",
+            host
+        );
+    }
+
     // Warn loudly when binding to all interfaces.
-    if host == "0.0.0.0" {
+    if !loopback {
         println!(
             "{}",
-            "⚠  Warning: binding to 0.0.0.0 exposes the Web UI to all network interfaces."
+            "⚠  Warning: the Web UI is reachable from the network; a bearer token is required."
                 .yellow()
                 .bold()
         );

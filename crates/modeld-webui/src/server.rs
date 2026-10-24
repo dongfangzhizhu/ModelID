@@ -263,6 +263,50 @@ mod tests {
         assert_eq!(status_of(app, request).await, StatusCode::FORBIDDEN);
     }
 
+    fn authed_state(token: &str) -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = modeld_core::Database::open(&dir.path().join("modeld.db")).unwrap();
+        let (state, _rx) =
+            AppState::new(db, dir.path().to_path_buf(), Some(token.to_string()), None);
+        (state, dir)
+    }
+
+    fn get(uri: &str) -> Request<Body> {
+        Request::builder().method(Method::GET).uri(uri).body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_api_requires_the_bearer_token_when_configured() {
+        let (state, _dir) = authed_state("tok");
+        let app = build_router(state, "127.0.0.1", 8234);
+
+        assert_eq!(status_of(app.clone(), get("/api/v1/stats")).await, StatusCode::UNAUTHORIZED);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/stats")
+            .header(header::AUTHORIZATION, "Bearer wrong")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(app.clone(), request).await, StatusCode::UNAUTHORIZED);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/stats")
+            .header(header::AUTHORIZATION, "Bearer tok")
+            .body(Body::empty())
+            .unwrap();
+        assert_ne!(status_of(app, request).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_api_rejects_a_token_in_the_query_string() {
+        // `?token=` is a WebSocket-only affordance; it must not work for API calls.
+        let (state, _dir) = authed_state("tok");
+        let app = build_router(state, "127.0.0.1", 8234);
+        assert_eq!(status_of(app, get("/api/v1/stats?token=tok")).await, StatusCode::UNAUTHORIZED);
+    }
+
     #[tokio::test]
     async fn test_reads_are_not_csrf_gated() {
         let (state, _dir) = test_state();

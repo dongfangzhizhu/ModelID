@@ -12,6 +12,10 @@ use rust_embed::RustEmbed;
 #[include = "*.ico"]
 #[include = "*.svg"]
 #[include = "*.png"]
+// `ui/` also holds the JS test suite and `node_modules`; neither belongs in
+// the shipped binary (the tests were being served at `/tests/*.js`).
+#[exclude = "tests/*"]
+#[exclude = "node_modules/*"]
 struct Assets;
 
 /// Static file handler — serves embedded UI files, falls back to index.html for SPA routing.

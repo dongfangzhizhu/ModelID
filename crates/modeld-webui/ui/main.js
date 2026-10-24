@@ -1,5 +1,6 @@
 // main.js — Router, EventBus, WebSocket manager, global utilities
 import { t, buildLangToggle, onLangChange } from './i18n.js';
+import { wsUrl, backoffDelay, WS_TOKEN_KEY } from './ws.js';
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -84,11 +85,16 @@ export const events = new EventBus();
 
 // ─── WebSocket client ─────────────────────────────────────────────────────────
 
-function connectWs() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${proto}//${location.host}/ws`);
+let wsAttempts = 0;
 
-  ws.onopen = () => setWsStatus('connected');
+function connectWs() {
+  const token = localStorage.getItem(WS_TOKEN_KEY);
+  const ws = new WebSocket(wsUrl(location, token));
+
+  ws.onopen = () => {
+    wsAttempts = 0;
+    setWsStatus('connected');
+  };
   ws.onmessage = (e) => {
     try {
       const msg = JSON.parse(e.data);
@@ -96,8 +102,16 @@ function connectWs() {
     } catch { /* ignore parse errors */ }
   };
   ws.onclose = () => {
-    setWsStatus('disconnected');
-    setTimeout(connectWs, 5000);
+    wsAttempts += 1;
+    // A rejected handshake and an unreachable server both surface as a close,
+    // so back off exponentially instead of hammering every 5 s forever.
+    const delay = backoffDelay(wsAttempts);
+    if (wsAttempts >= 3) {
+      setWsStatus('unauthorized');
+    } else {
+      setWsStatus('disconnected');
+    }
+    setTimeout(connectWs, delay);
   };
   ws.onerror = () => setWsStatus('error');
 }
@@ -105,7 +119,8 @@ function connectWs() {
 function setWsStatus(status) {
   const el = document.getElementById('ws-indicator');
   if (!el) return;
-  el.className = `ws-indicator ${status === 'connected' ? 'connected' : status === 'error' ? 'error' : ''}`;
+  const cls = status === 'connected' ? 'connected' : (status === 'error' || status === 'unauthorized') ? 'error' : '';
+  el.className = `ws-indicator ${cls}`;
   el.querySelector('.ws-text').textContent = t(`ws.${status}`);
 }
 

@@ -80,10 +80,20 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Open the SQLite database
-    let db_path = args.store.join("metadata.db");
+    // Open the SQLite database. The store layout is shared with the CLI, so the
+    // file name must match what `modeld init` / `modeld scan` create.
+    let db_path = args.store.join("modeld.db");
+    let is_new = !db_path.exists();
     let db = modeld_core::Database::open(&db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
+
+    if is_new {
+        eprintln!(
+            "note: created a new store database at {}\n      \
+             run `modeld scan <path>` to index existing models (or `modeld init` for an empty store).",
+            db_path.display()
+        );
+    }
 
     let (state, _) = modeld_webui::AppState::new(db, args.store, token, None);
 

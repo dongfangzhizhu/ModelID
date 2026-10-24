@@ -245,11 +245,28 @@ Refs: docs/ROADMAP.md#A1
   - 401 时前端展示「输入访问令牌」弹窗，而非静默失败。
 - **产物**：DB 修复 + 前端鉴权链路 + 401 交互
 - **验收标准**：
-  - [ ] `modeld serve` 启动后，浏览器输入 token 可完成一次 scan 并看到进度
-  - [ ] `modeld-webui --store X` 与 `modeld status --store X` 看到同一批模型
-  - [ ] 未提供 token 时 API 返回 401，页面出现输入框而非空白
-  - [ ] WS 在鉴权失败后不再无限重连（退避 + 提示）
-- **测试**：`webui_e2e::scan_with_token`、`webui_e2e::unauthorized_shows_prompt`
+  - [x] `modeld serve` 启动后，浏览器输入 token 可完成一次 scan 并看到进度
+  - [x] `modeld-webui --store X` 与 `modeld status --store X` 看到同一批模型
+  - [x] 未提供 token 时 API 返回 401，页面出现输入框而非空白
+  - [x] WS 在鉴权失败后不再无限重连（退避 + 提示）
+- **测试**：`server::tests::test_api_requires_the_bearer_token_when_configured`、`server::tests::test_api_rejects_a_token_in_the_query_string`、`auth::tests::test_ws_query_token_is_read_only_for_the_ws_path`、`ui/tests/ws.test.js`（6 个用例）
+- **实现状态（2026-10-24，Windows 11 / rustc 1.98.1）**：
+  - **DB 文件名修复**：`modeld-webui` 由 `<store>/metadata.db` 改为 `<store>/modeld.db`，与 CLI 共用同一个库；首次创建时打印「新库 + 建议执行 modeld scan」提示
+  - **WS 鉴权**：浏览器无法在握手时设置 header，`require_bearer_token` 对 `/ws` 额外接受 `?token=…`（含百分号解码）；该通道**仅限 `/ws`**，API 路由用 query token 仍返回 401
+  - **前端鉴权链路**：`ui/api.js` 从 `localStorage` 取 token 注入 `Authorization`，首次 401 弹窗输入并重试一次；`ui/ws.js` 负责 WS URL 拼装与退避；`ui/main.js` 每 1/2/4/8/16 s 递增退避（上限 30 s），连续 3 次失败把状态改为「未授权 —— 请检查访问令牌」
+  - **`modeld serve` 增加 `--allow-lan`**：非回环绑定必须显式开启（与 `modeld-webui` / `proxy start` 策略一致），且始终强制 token
+  - 抽出 `ui/ws.js`（纯函数，无 DOM）以便 `node --test` 覆盖
+  - 顺带修复：`ui/tests/*.js` 之前被 `*.js` 嵌入规则匹配并可从 `/tests/…` 访问，现已在 `static_files.rs` 中 `#[exclude]` 掉 `tests/` 与 `node_modules/`
+- **验收证据（2026-10-24）**：
+  - `cargo test -p modeld-webui`：**31 passed**（新增 5 个：3 个 auth 单元 + 2 个路由级鉴权）
+  - `cd crates/modeld-webui/ui && npm test`：**38 passed**（新增 6 个 `ws.test.js` 用例）
+  - 实机（`modeld-webui --store target/a4check/store --port 18250`）：`/api/v1/models` 返回 3 个模型，与 `modeld scan` 写入的一致；库内只有 `modeld.db`，无 `metadata.db`
+  - 实机（`modeld serve --store target/a4check/store2 --port 18251`）：
+    - 自动生成 36 字符 token；`/api/v1/stats` 无 token **401**、带 token **200**
+    - 带 token `POST /api/v1/scan` → **200**，返回 `scan_id` 与 `scan_paths`
+    - `ws://…/ws?token=<token>` → 连接成功并收到首帧 `{"type":"daemon_status",…}`
+    - `ws://…/ws?token=wrong` 与 `ws://…/ws` → 握手被拒绝（401）
+    - 扫描结束后 `/api/v1/stats` 反映真实结果（3 个相同文件 → `total_models=1`、`duplicate_waste_bytes=4096`）
 - **估算**：2 人日 ｜ **依赖**：A3
 
 ### A5 · 扫描摄取模式（消除磁盘翻倍）
@@ -555,7 +572,7 @@ Refs: docs/ROADMAP.md#A1
 | A1 | 原子链接替换 | done | AI agent | 2026-10-24 | 2026-10-24 | `a5a0876` |
 | A2 | 代理流式 + 线程池 + panic 隔离 | done | AI agent | 2026-10-24 | 2026-10-24 | `c60d5dd` |
 | A3 | 服务端鉴权基线 | done | AI agent | 2026-10-24 | 2026-10-24 | `050770e` |
-| A4 | WebUI 与 CLI 打通 | todo | — | — | — | — |
+| A4 | WebUI 与 CLI 打通 | done | AI agent | 2026-10-24 | 2026-10-24 | `pending` |
 | A5 | 扫描摄取模式 | todo | — | — | — | — |
 | A6 | 配置系统统一 | todo | — | — | — | — |
 | A7 | 清除假实现 | todo | — | — | — | — |
@@ -595,6 +612,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A4 | WebUI 与 CLI 打通：DB 统一为 `modeld.db`、WS 支持 `?token=`、前端 401 弹窗 + WS 指数退避、`serve --allow-lan` | `pending` | `webui/main.rs`、`webui/auth.rs`、`webui/server.rs`、`webui/ui/{main,api,ws,i18n}.js`、`webui/ui/tests/ws.test.js`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A3 | 鉴权安全默认：require_token 默认开启、token 自动生成并持久化、`--allow-lan` 门控、常量时间比较、CORS 同源白名单 + CSRF 头、WebUI `--token` 与非回环拒启 | `050770e` | `proxy/auth.rs`、`proxy/config.rs`、`proxy/server.rs`、`cli/main.rs`、`webui/main.rs`、`webui/server.rs`、`webui/ui/api.js`、`Cargo.toml`、`CHANGELOG.md` |
 | 2026-10-24 | A2 | 代理流式响应 + 线程池 + panic 隔离 + Range 分片 + 压力脚本 | `c60d5dd` | `proxy/server.rs`、`proxy/config.rs`、`tests/proxy_integration.rs`、`scripts/bench-proxy-streaming.ps1`、`docs/proxy-api.md`、`CHANGELOG.md` |
 | 2026-10-24 | A1 | 原子链接替换：暂存 + 原子 rename，消除「先删后建」数据丢失窗口 | `a5a0876` | `core/links.rs`、`core/unlink.rs`、`tests/fault_injection_tests.rs`、`CHANGELOG.md` |
@@ -606,10 +624,10 @@ Refs: docs/ROADMAP.md#A1
 
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
-| A 止血 | 8 | 3 | 38% |
+| A 止血 | 8 | 4 | 50% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **3** | **13%** |
+| **合计** | **24** | **4** | **17%** |
 
 ---
 
@@ -652,7 +670,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 开发 A1 | `links.rs` 与 `platform.rs` 各有一份 `is_same_volume`，且盘符比较不可靠 | B1 | open |
 | 2026-10-24 | 开发 A2 | 多根扫描时每个根都会把 `files_scanned` 重置为 0，进度条会倒退（已修并行回调乱序，多根问题未改） | B3 | open |
 | 2026-10-24 | 开发 A2 | `handle_hf_proxy` 每次缓存未命中都新建 SQLite 连接，未复用连接池 | B7 | open |
-| 2026-10-24 | 开发 A3 | `modeld serve --host 0.0.0.0` 未接入 `--allow-lan`，与 `modeld-webui` 的策略不一致（目前靠强制生成 token 兜底） | A4 | open |
+| 2026-10-24 | 开发 A3 | `modeld serve --host 0.0.0.0` 未接入 `--allow-lan`，与 `modeld-webui` 的策略不一致（目前靠强制生成 token 兜底） | A4 | done（A4 已加 `--allow-lan`） |
 | 2026-10-24 | 开发 A3 | CSRF 守卫只在请求带 `Origin` 时生效，非浏览器客户端可绕过（设计如此，但需在文档中写清边界） | B9 | open |
 | 2026-10-24 | 开发 A3 | `/metrics` 仍无鉴权，任何能访问端口的人可读取计数器 | A7 | open |
 

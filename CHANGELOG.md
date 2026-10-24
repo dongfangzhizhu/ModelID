@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld serve` requires `--allow-lan` for non-loopback hosts** — matching
+  `modeld-webui` and `modeld proxy start`. A bearer token is always enforced.
+  (ROADMAP A4)
 - **Proxy streams instead of buffering** — `/v1/blobs/{hash}` and the HF-proxy
   routes hand a `File` handle to tiny_http instead of reading the whole object
   into a `Vec`, so memory stays flat regardless of model size (measured: 0 MB
@@ -48,6 +51,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Web UI opened the wrong database** — `modeld-webui` used
+  `<store>/metadata.db`, so it showed an empty library next to a store that
+  `modeld scan` had filled. It now uses `<store>/modeld.db` like every other
+  command, and prints a hint when it creates a fresh one. (ROADMAP A4)
+- **The WebSocket could not authenticate** — browsers cannot set headers on a
+  handshake, so `/ws` was unreachable whenever a token was configured. It now
+  accepts `?token=…` (that path only; API routes still reject query tokens).
+  (ROADMAP A4)
+- **The UI silently failed when a token was required** — `api.js` never sent
+  `Authorization`. It now reads the token from `localStorage` and asks for it
+  on the first `401` instead of rendering empty pages. (ROADMAP A4)
+- **The WebSocket reconnected forever** — a rejected handshake retried every 5 s
+  with no feedback. Reconnects now back off exponentially (1 s to 30 s) and the
+  indicator reports "not authorised" after three failures. (ROADMAP A4)
+- **Frontend tests no longer ship in the binary** — `ui/tests/*.js` matched the
+  `*.js` embed glob and was served at `/tests/…`; `tests/` and `node_modules/` are now
+  excluded from the embedded assets. (ROADMAP A4)
 - **A panicking request handler no longer kills the proxy** — every job runs under
   `catch_unwind` and a poisoned DB mutex is recovered instead of aborting the
   request; the old `.expect("db lock poisoned")` paths are gone. (ROADMAP A2)

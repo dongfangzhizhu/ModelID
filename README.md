@@ -186,7 +186,10 @@ modeld-webui --store .modeld --host 0.0.0.0 --port 9000 --allow-lan \
 The UI prompts for the token on the first `401` and stores it in
 `localStorage`; set `MODELD_AUTH_TOKEN` instead of `--token` if you prefer the
 environment. State-changing requests send `X-Modeld-CSRF: 1` and are rejected
-unless they come from an allowed origin.
+unless they come from an allowed origin. The WebSocket passes the same token as
+`/ws?token=…` (browsers cannot set handshake headers) and reconnects with
+exponential backoff. The Web UI reads `<store>/modeld.db` — the same database
+`modeld scan` writes.
 
 ### Pages
 
