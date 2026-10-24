@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld proxy` moved to its own module** — `commands/proxy.rs` holds
+  `ProxyAction`, `ProxyStartOptions` and the start/discover/status/token-rotate
+  handlers. (ROADMAP B2)
 - **`modeld tag|note|pin|favorite|refs` moved to `commands/meta.rs`** — the five
   families share one shape (hash, optional store, optional `--json`), so they live
   in one module rather than five files of boilerplate. (ROADMAP B2)

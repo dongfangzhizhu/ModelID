@@ -503,11 +503,11 @@ Refs: docs/ROADMAP.md#A1
 ### B2 · CLI 拆分与输出层
 
 - **目标**：`main.rs` < 300 行；命令模块化；统一 `--store`、输出、退出码。
-- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx`、`config`、`hf`、`meta`(tag/note/pin/favorite/refs) 六个模块已迁出（`main.rs` 4153 → 2781 行）
+- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx`、`config`、`hf`、`meta`(tag/note/pin/favorite/refs) 七个模块已迁出（`main.rs` 4153 → 2454 行）
 - **改动点**：`crates/modeld-cli/src/main.rs` 拆为 `commands/*.rs`、`output.rs`、`error.rs`
 - **产物**：命令注册表 + `OutputFormat { Table, Json, Csv }` + `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`
 - **验收标准**：
-  - [ ] `main.rs` < 300 行，每命令一个文件 —— 已迁出 `commands/{store,db,tx,config,hf,meta}.rs`，其余待迁（scan/dedup/gc/serve 等高频命令）
+  - [ ] `main.rs` < 300 行，每命令一个文件 —— 已迁出 `commands/{store,db,tx,config,hf,meta,proxy}.rs`，其余待迁（scan/dedup/gc/serve 等高频命令）
   - [ ] `--store` 为全局参数，子命令无需重复声明
   - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
   - [x] 退出码语义写入 `--help` 与文档 —— `modeld --help` 末尾打印 0/1/2/3 对照表（`EXIT_CODE_HELP`）
@@ -522,6 +522,7 @@ Refs: docs/ROADMAP.md#A1
   - `commands/config.rs`：`ConfigAction` + `config_command` + `CONFIG_KEYS` + get/set/校验辅助函数迁出，`modeld config get serve.port --store <p>` 实测仍返回 8234。
   - `commands/hf.rs`：`HfAction`/`HfCacheAction`/`HfTokenAction` + 全部 `hf_*` 处理函数 + `read_secret_from_stdin` 迁出，`modeld hf token status --store <p>` 实测仍输出「HF token: not set」。
   - `commands/meta.rs`：`tag`/`note`/`pin`/`favorite`/`refs` 五个动作枚举与处理函数迁出（它们同形：hash + 可选 store + 可选 json），`pin list` 与 `refs orphans` 实测仍正常返回。
+  - `commands/proxy.rs`：`ProxyAction` + `proxy_command`/`start`/`discover`/`status`/`token_rotate` + `ProxyStartOptions` 迁出，`modeld doctor --store <p>` 实测仍正常输出报告。
 - **估算**：5 人日 ｜ **依赖**：无（可与 A 并行）
 
 ### B3 · 日志与可观测性
