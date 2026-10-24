@@ -184,23 +184,26 @@ impl<'a> TransactionManager<'a> {
         let rollback_json = serde_json::to_string(&plan.rollback_plan)
             .context("Failed to serialize rollback_plan")?;
 
-        self.db.insert_wal_transaction(
-            &tx_id,
-            op_str,
-            TransactionStatus::Pending,
-            None,
-            None,
-            None,
-        )?;
-
-        self.db.update_wal_extended(
-            &tx_id,
-            Some(op_str),
-            Some(&affected_json),
-            Some(&rollback_json),
-            None,
-            None,
-        )?;
+        // One SQLite transaction: a crash must not leave a WAL row without its
+        // plan, which recovery would then be unable to interpret.
+        self.db.in_transaction(|db| {
+            db.insert_wal_transaction(
+                &tx_id,
+                op_str,
+                TransactionStatus::Pending,
+                None,
+                None,
+                None,
+            )?;
+            db.update_wal_extended(
+                &tx_id,
+                Some(op_str),
+                Some(&affected_json),
+                Some(&rollback_json),
+                None,
+                None,
+            )
+        })?;
 
         Ok(TxHandle { tx_id })
     }
@@ -208,17 +211,19 @@ impl<'a> TransactionManager<'a> {
     /// Commit a transaction.  Sets status to COMMITTED and records end time.
     pub fn commit(&mut self, handle: TxHandle) -> Result<()> {
         let end_time = Utc::now().to_rfc3339();
-        self.db.update_wal_status(&handle.tx_id, TransactionStatus::Committed)?;
-        self.db.update_wal_extended(&handle.tx_id, None, None, None, Some(&end_time), None)?;
-        Ok(())
+        self.db.in_transaction(|db| {
+            db.update_wal_status(&handle.tx_id, TransactionStatus::Committed)?;
+            db.update_wal_extended(&handle.tx_id, None, None, None, Some(&end_time), None)
+        })
     }
 
     /// Mark a transaction as failed.  Records the error message and end time.
     pub fn fail(&mut self, handle: TxHandle, err: &str) -> Result<()> {
         let end_time = Utc::now().to_rfc3339();
-        self.db.update_wal_status(&handle.tx_id, TransactionStatus::Failed)?;
-        self.db.update_wal_extended(&handle.tx_id, None, None, None, Some(&end_time), Some(err))?;
-        Ok(())
+        self.db.in_transaction(|db| {
+            db.update_wal_status(&handle.tx_id, TransactionStatus::Failed)?;
+            db.update_wal_extended(&handle.tx_id, None, None, None, Some(&end_time), Some(err))
+        })
     }
 
     /// Roll back a transaction.

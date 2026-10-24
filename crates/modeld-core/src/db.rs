@@ -1148,6 +1148,28 @@ impl Database {
         Ok(count)
     }
 
+    /// Run `f` inside a single SQLite transaction.
+    ///
+    /// Commits when `f` returns `Ok`, rolls back when it returns `Err`.  `BEGIN IMMEDIATE`
+    /// takes the write lock up front, so a second process cannot slip a write
+    /// in between two statements of the same logical operation.
+    pub fn in_transaction<T>(&mut self, f: impl FnOnce(&mut Database) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(self) {
+            Ok(value) => {
+                if let Err(e) = self.conn.execute_batch("COMMIT") {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(e.into());
+                }
+                Ok(value)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Insert a new WAL transaction
     pub fn insert_wal_transaction(
         &mut self,
@@ -2517,6 +2539,57 @@ mod tests {
         let statuses: Vec<_> = incomplete.iter().map(|tx| &tx.status).collect();
         assert!(statuses.contains(&&TransactionStatus::Pending));
         assert!(statuses.contains(&&TransactionStatus::Copied));
+    }
+
+    #[test]
+    fn in_transaction_commits_on_success() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+
+        db.in_transaction(|db| {
+            db.insert_wal_transaction(
+                "tx-ok",
+                "dedup",
+                TransactionStatus::Pending,
+                None,
+                None,
+                None,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let rows = db.list_wal_transactions().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tx_id, "tx-ok");
+    }
+
+    #[test]
+    fn in_transaction_rolls_back_on_error() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+
+        let result: Result<()> = db.in_transaction(|db| {
+            db.insert_wal_transaction(
+                "tx-gone",
+                "dedup",
+                TransactionStatus::Pending,
+                None,
+                None,
+                None,
+            )?;
+            anyhow::bail!("boom after the insert");
+        });
+
+        assert!(result.is_err(), "the closure failed, so the transaction must fail");
+        assert!(
+            db.list_wal_transactions().unwrap().is_empty(),
+            "the insert must have been rolled back"
+        );
+        // The connection must still be usable afterwards.
+        db.insert_wal_transaction("tx-after", "gc", TransactionStatus::Pending, None, None, None)
+            .unwrap();
+        assert_eq!(db.list_wal_transactions().unwrap().len(), 1);
     }
 
     #[test]

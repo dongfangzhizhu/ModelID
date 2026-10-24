@@ -83,6 +83,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call it, and it reports what happened to *every* path it touched
   (`rolled-forward` / `rolled-back` / `skipped`) instead of a bare count.
   (ROADMAP B1)
+- **`Database::in_transaction`** — `TransactionManager::begin`, `commit` and `fail` each write two
+  rows (status + plan / end time); they now share one SQLite transaction
+  (`BEGIN IMMEDIATE`), so a crash cannot leave a WAL row whose
+  `affected_paths`/`rollback_plan` never landed — recovery reads exactly those
+  fields to decide what to do. (ROADMAP B1)
 - **A cross-process store lock** — `dedup` and `gc` (CLI and WebUI) take
   `<store>/.modeld.lock` before touching the layout, wait up to 30 s for a running
   process, and otherwise fail with the holder's pid, host and operation. The lock

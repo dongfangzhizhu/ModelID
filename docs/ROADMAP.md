@@ -470,6 +470,9 @@ Refs: docs/ROADMAP.md#A1
     `StoreLock`（最多等 30s），拿不到就带着持有者 pid/主机/操作报错退出；锁文件内容是可读的 JSON。
   - **目录 fsync**：`cas.rs` 原有的 Unix-only `fsync_dir` 提到 `platform` 并公开，`links.rs` 的原子替换与
     `unlink.rs` 的 rename 之后都调用；Windows 上为 no-op（NTFS 记录目录元数据，Win32 无法刷目录句柄），文档里写明。
+  - **WAL 写入原子化**：新增 `Database::in_transaction`（`BEGIN IMMEDIATE` + 成功 COMMIT / 失败 ROLLBACK），
+    `TransactionManager::begin/commit/fail` 的两条语句各自包进一个 SQLite 事务——崩溃不会留下「有 WAL 行、没有
+    affected_paths/rollback_plan」的半条记录，而恢复逻辑正是靠这两个字段决定怎么处置。
 - **验收标准**：
   - [x] 5 个中断点恢复后数据一致 —— 已有覆盖：begin 后（`test_recover_cleans_staging`）、stage 后（`test_recover_cleans_part_file_and_marks_failed`）、
     rename 后（`recover::tests::copied_transaction_is_rolled_forward`）、部分链接后（同前，dup 路径补齐）、commit 前（`test_link_staged_but_not_committed_keeps_original`）；
@@ -477,10 +480,12 @@ Refs: docs/ROADMAP.md#A1
   - [x] `modeld tx list` 无残留 `pending` —— `recover` 处理完即把 pending 置为 failed、copied 置为 committed 并删行
   - [x] 恢复过程输出每个路径的处置结果 —— `modeld tx recover` 打印 `tx_id op [action]` 与逐条 `action path — note`
   - [x] 并发两个 dedup 进程：一个获锁、另一个等待或明确失败 —— `StoreLock` 6 个单测（含等待后获锁、遗留锁打破）
+  - [x] `begin/commit` 包在单个 SQLite 事务内 —— `Database::in_transaction` 2 个单测（成功提交 / 失败回滚且连接仍可用）
   - [ ] `ingest` / `downloader` 改走 `StoreTxn` —— 未做，留待 B1 收尾
 - **测试**：`store_lock` 6 个、`recover` 3 个、原有 `tx` 与 fault-injection 全部通过；`cargo test --workspace --locked` 全绿
 - **验收证据**（2026-10-24，Windows 11）：
-  - `cargo test -p modeld-core --lib` → 189 通过（新增 `store_lock` 6 个 + `recover` 3 个）。
+  - `cargo test -p modeld-core --lib` → 191 通过（新增 `store_lock` 6 个 + `recover` 3 个 + `in_transaction` 2 个）；
+    `integration_test` 9 个、`fault_injection_tests` 10 个仍全绿。
   - 锁：第二个进程/线程在锁被持有时得到 `Busy`，消息含 `pid … on … running 'dedup' since …`；持锁者 drop 后等待方获锁；
     把锁文件 mtime 调到 24h 前或写入垃圾内容都会被判为遗留并打破。
   - 恢复：`copied` 事务在 CAS 对象存在时被前滚（dup 路径重新链接），CAS 缺失时降级为 `skipped` 并标 failed；
