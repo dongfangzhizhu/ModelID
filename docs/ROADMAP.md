@@ -289,7 +289,7 @@ Refs: docs/ROADMAP.md#A1
   - [x] 配置的扩展名生效（新增 `.onnx` 文件可被索引）
 - **测试**：`ingest::index_mode_writes_no_blob`、`ingest::adopt_shares_inode`、`scanner::custom_extensions_from_config`
 - **估算**：3 人日 ｜ **依赖**：A1（复用原子替换）
-- **状态**：✅ 已完成（`a5` 提交）
+- **状态**：✅ 已完成（`c1949b5`）
 - **实现说明**：
   - `IngestMode { Index, Adopt, Copy }`（`Default = Index`），`ingest_scan_results` 增加第 5 个参数 `mode`；
     `FromStr` 接受 `index`/`index-only`/`adopt`/`link`/`copy`，WebUI `ScanRequest.mode` 走同一解析。
@@ -599,7 +599,7 @@ Refs: docs/ROADMAP.md#A1
 | A2 | 代理流式 + 线程池 + panic 隔离 | done | AI agent | 2026-10-24 | 2026-10-24 | `c60d5dd` |
 | A3 | 服务端鉴权基线 | done | AI agent | 2026-10-24 | 2026-10-24 | `050770e` |
 | A4 | WebUI 与 CLI 打通 | done | AI agent | 2026-10-24 | 2026-10-24 | `c87922b` |
-| A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `a5adopt` |
+| A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `c1949b5` |
 | A6 | 配置系统统一 | todo | — | — | — | — |
 | A7 | 清除假实现 | todo | — | — | — | — |
 | A8 | 构建与发布链路修复 | todo | — | — | — | — |
@@ -638,7 +638,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
-| 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `a5adopt` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
+| 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `c1949b5` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
 | 2026-10-24 | A4 | WebUI 与 CLI 打通：DB 统一为 `modeld.db`、WS 支持 `?token=`、前端 401 弹窗 + WS 指数退避、`serve --allow-lan` | `c87922b` | `webui/main.rs`、`webui/auth.rs`、`webui/server.rs`、`webui/ui/{main,api,ws,i18n}.js`、`webui/ui/tests/ws.test.js`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A3 | 鉴权安全默认：require_token 默认开启、token 自动生成并持久化、`--allow-lan` 门控、常量时间比较、CORS 同源白名单 + CSRF 头、WebUI `--token` 与非回环拒启 | `050770e` | `proxy/auth.rs`、`proxy/config.rs`、`proxy/server.rs`、`cli/main.rs`、`webui/main.rs`、`webui/server.rs`、`webui/ui/api.js`、`Cargo.toml`、`CHANGELOG.md` |
 | 2026-10-24 | A2 | 代理流式响应 + 线程池 + panic 隔离 + Range 分片 + 压力脚本 | `c60d5dd` | `proxy/server.rs`、`proxy/config.rs`、`tests/proxy_integration.rs`、`scripts/bench-proxy-streaming.ps1`、`docs/proxy-api.md`、`CHANGELOG.md` |
