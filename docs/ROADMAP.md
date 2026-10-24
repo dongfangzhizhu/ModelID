@@ -503,14 +503,19 @@ Refs: docs/ROADMAP.md#A1
 ### B2 · CLI 拆分与输出层
 
 - **目标**：`main.rs` < 300 行；命令模块化；统一 `--store`、输出、退出码。
+- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），命令拆分未开始（`main.rs` 仍 4153 行）
 - **改动点**：`crates/modeld-cli/src/main.rs` 拆为 `commands/*.rs`、`output.rs`、`error.rs`
 - **产物**：命令注册表 + `OutputFormat { Table, Json, Csv }` + `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`
 - **验收标准**：
   - [ ] `main.rs` < 300 行，每命令一个文件
   - [ ] `--store` 为全局参数，子命令无需重复声明
   - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
-  - [ ] 退出码语义写入 `--help` 与文档
+  - [x] 退出码语义写入 `--help` 与文档 —— `modeld --help` 末尾打印 0/1/2/3 对照表（`EXIT_CODE_HELP`）
   - [ ] 所有既有命令行为不变（快照测试）
+- **验收证据**（2026-10-24）：
+  - `output.rs`：`OutputFormat { Table, Json, Csv }`（`from_flags`、`is_machine`、`as_str`）与
+    `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`，3 个单测覆盖标志优先级与数字映射。
+  - `modeld --help` 末段输出退出码对照表；未知子命令仍由 clap 以 2 退出。
 - **估算**：5 人日 ｜ **依赖**：无（可与 A 并行）
 
 ### B3 · 日志与可观测性

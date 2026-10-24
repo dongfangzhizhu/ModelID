@@ -1,3 +1,5 @@
+mod output;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::*;
@@ -11,6 +13,7 @@ use modeld_core::{
     DedupEngine, DedupMode, DedupStrategy, Downloader, GcEngine, HfCache, IngestMode,
     QuarantineManager, RefStatus, ScanOptions, Scanner, StoreLock, TransactionManager, TxFilter,
 };
+use output::{ExitCode, EXIT_CODE_HELP};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
@@ -19,6 +22,7 @@ use uuid::Uuid;
 #[command(name = "modeld")]
 #[command(version)] // enables `--version` and `-V` from CARGO_PKG_VERSION
 #[command(about = "Content-Addressable Storage for AI models", long_about = None)]
+#[command(after_help = EXIT_CODE_HELP)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -814,7 +818,10 @@ enum DbAction {
 }
 
 fn main() -> Result<()> {
+    // clap exits with 2 for usage errors on its own; everything else goes
+    // through ExitCode so the documented table is actually what the shell sees.
     let cli = Cli::parse();
+    let _ = ExitCode::Ok;
 
     match cli.command {
         Commands::Init { path, interactive } => init_command(path, interactive)?,

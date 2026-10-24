@@ -78,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Documented exit codes and an output-format type** — `output::ExitCode` (0 ok,
+  1 failure, 2 usage, 3 partial) is printed by `modeld --help`, and
+  `OutputFormat { Table, Json, Csv }` gives the upcoming command modules one place
+  to decide what stdout looks like. (ROADMAP B2)
 - **One crash-recovery implementation** — `recover::recover_store` is now the only
   place that replays the write-ahead log; `DedupEngine` and `modeld tx recover` both
   call it, and it reports what happened to *every* path it touched
