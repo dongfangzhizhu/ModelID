@@ -10,5 +10,6 @@ pub mod hfstore;
 pub mod meta;
 pub mod proxy;
 pub mod query;
+pub mod repair;
 pub mod store;
 pub mod tx;

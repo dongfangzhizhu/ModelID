@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`quarantine`/`verify`/`unlink` moved to `commands/repair.rs`** — the commands
+  that change or audit store state now live together. (ROADMAP B2)
 - **`status`/`stats`/`dupes`/`list`/`info` moved to `commands/query.rs`** — the
   read-only queries now live together. (ROADMAP B2)
 - **`hf-check`/`hf-setup`/`hf-status`/`workflow-*`/`refs-orphans` moved to
