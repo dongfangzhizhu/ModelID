@@ -40,7 +40,6 @@ pub struct UnlinkResult {
 /// This operation is safe even if it is interrupted mid-way: if the rename
 /// step fails, the original hardlink/symlink is left untouched and the
 /// temporary file is cleaned up.
-#[allow(clippy::permissions_set_readonly_false)]
 pub fn unlink_path(db: &mut Database, store_path: &Path, path: &Path) -> Result<UnlinkResult> {
     let path_str = path.to_string_lossy().to_string();
 
@@ -65,41 +64,62 @@ pub fn unlink_path(db: &mut Database, store_path: &Path, path: &Path) -> Result<
         .with_context(|| format!("Cannot stat CAS file {}", cas_path.display()))?
         .len();
 
-    // ── Copy CAS → temp file in same directory ────────────────────────────
+    // ── Copy CAS → temp file in the same directory ────────────────────────
     let parent =
         path.parent().ok_or_else(|| anyhow!("Path has no parent directory: {}", path.display()))?;
-    let tmp_path = parent.join(format!(".modeld_unlink_{}.tmp", &alias.model_hash.as_hex()[..16]));
+    // Unique name: a leftover from a crashed run must never be reused, and two
+    // concurrent unlinks must not clobber each other's temporary copy.
+    let tmp_path = parent.join(format!(".modeld_unlink_{}.tmp", uuid::Uuid::new_v4().simple()));
 
-    // On Windows, CAS files are read-only; fs::copy does not propagate that
-    // attribute to the destination, so the copy is writable by default — good.
     std::fs::copy(&cas_path, &tmp_path).with_context(|| {
         format!("Failed to copy CAS {} to temp {}", cas_path.display(), tmp_path.display())
     })?;
 
-    // Ensure the destination is writable (CAS copy might have inherited attrs)
-    if let Ok(mut perms) = std::fs::metadata(&tmp_path).map(|m| m.permissions()) {
-        if perms.readonly() {
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(&tmp_path, perms);
-        }
+    // `fs::copy` propagates the source permission bits, so the copy inherits
+    // the read-only mode of the CAS object; an unlinked file must be writable.
+    if let Err(e) = make_writable(&tmp_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e).with_context(|| format!("Failed to make {} writable", tmp_path.display()));
     }
 
     // ── Atomic rename over the original path ──────────────────────────────
-    // On Windows we must remove the existing file first (hardlinks count as
-    // regular files; Windows rename does not atomically replace).
+    // `std::fs::rename` is `rename(2)` on Unix and
+    // `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` on Windows: both replace the
+    // directory entry atomically, so `path` is never missing — not even when
+    // the call fails. Windows refuses to replace a read-only destination and
+    // the alias is usually a read-only hardlink to CAS, so clear that flag
+    // first and restore it afterwards.
     #[cfg(windows)]
-    {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
+    let cas_was_readonly = {
+        let was_readonly =
+            std::fs::metadata(&cas_path).map(|m| m.permissions().readonly()).unwrap_or(false);
+        if was_readonly {
+            clear_readonly(path);
         }
-    }
+        was_readonly
+    };
 
     if let Err(rename_err) = std::fs::rename(&tmp_path, path) {
-        // Rename failed — clean up tmp and propagate
+        // Rename failed — clean up tmp and propagate; `path` is untouched.
         let _ = std::fs::remove_file(&tmp_path);
+        #[cfg(windows)]
+        {
+            if cas_was_readonly {
+                set_readonly(&cas_path);
+            }
+        }
         return Err(rename_err).with_context(|| {
             format!("Failed to rename {} → {}", tmp_path.display(), path.display())
         });
+    }
+
+    #[cfg(windows)]
+    {
+        if cas_was_readonly {
+            // Clearing the flag above touched the shared file record, so the
+            // CAS object is writable right now; restore its immutability.
+            set_readonly(&cas_path);
+        }
     }
 
     // ── Update DB ─────────────────────────────────────────────────────────
@@ -113,6 +133,62 @@ pub fn unlink_path(db: &mut Database, store_path: &Path, path: &Path) -> Result<
         previous_type: prev,
         size_bytes: cas_size,
     })
+}
+
+/// Restore ordinary writable-file permissions on a freshly copied file.
+///
+/// `fs::copy` propagates the source mode on Unix (CAS objects are `0o444`) and
+/// the read-only attribute on Windows, so the copy must be made writable before
+/// it becomes the user's own file again.
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_writable(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)?.permissions();
+        // 0o644, not `set_readonly(false)`, which would grant world-write (0o666).
+        perms.set_mode(0o644);
+        std::fs::set_permissions(path, perms)
+    }
+    #[cfg(windows)]
+    {
+        let mut perms = std::fs::metadata(path)?.permissions();
+        if perms.readonly() {
+            perms.set_readonly(false);
+            std::fs::set_permissions(path, perms)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(())
+    }
+}
+
+/// Clear the read-only attribute of a path that is about to be replaced.
+#[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
+fn clear_readonly(path: &Path) {
+    // `symlink_metadata`: the entry itself, not the CAS object behind a symlink.
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.permissions().readonly() {
+            let mut perms = meta.permissions();
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+}
+
+/// Set the read-only attribute (Windows only).
+#[cfg(windows)]
+fn set_readonly(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if !perms.readonly() {
+            perms.set_readonly(true);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

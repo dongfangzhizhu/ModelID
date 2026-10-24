@@ -7,9 +7,11 @@
 //! 3. Permission-denied test — source file read-only → transaction FAILED, original unchanged.
 
 use modeld_core::{
-    db::{Database, TransactionStatus},
-    hash_file, Blake3Hash, CasStore, OpType, PathEntry, RollbackPlan, TransactionManager, TxFilter,
-    TxPlan, TxStatus,
+    db::{AliasType, Database, TransactionStatus},
+    hash_file,
+    links::{replace_with_link, stage_link, LinkResult},
+    Blake3Hash, CasStore, OpType, PathEntry, RollbackPlan, TransactionManager, TxFilter, TxPlan,
+    TxStatus,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -342,4 +344,97 @@ fn test_recover_cleans_legacy_tmp_staging_file() {
     assert_eq!(rec.status, TxStatus::Failed);
 
     assert!(!results.is_empty(), "should have at least one recovery result");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 8 — atomic link replacement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// No staging entry may survive any code path, success or failure.
+fn assert_no_staging_entries(dir: &std::path::Path) {
+    let leftovers: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".modeld_tmp_") || n.starts_with(".modeld_unlink_"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging entries left behind: {leftovers:?}");
+}
+
+/// The old protocol deleted the duplicate *before* creating the link, so any
+/// failure between the two steps left the user's path missing.  This pins the
+/// replacement contract: the destination is never absent, and every failure
+/// path leaves both the destination and the CAS object intact.
+#[test]
+fn test_link_failure_keeps_original() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let source = dir.join("duplicate.safetensors");
+    fs::write(&source, b"user data").unwrap();
+
+    // A link to a missing target cannot be staged.
+    let missing = dir.join("does_not_exist.safetensors");
+    let result = replace_with_link(&source, &missing, AliasType::Hardlink);
+
+    assert!(matches!(result, LinkResult::Failed(_)), "expected failure, got {result:?}");
+    assert_eq!(fs::read(&source).unwrap(), b"user data", "source must survive a failed link");
+    assert_no_staging_entries(dir);
+}
+
+/// Simulates a crash between "link created" and "rename": the staged link is
+/// dropped instead of committed, which must leave the destination untouched.
+#[test]
+fn test_link_staged_but_not_committed_keeps_original() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let cas = dir.join("cas_object.safetensors");
+    let source = dir.join("duplicate.safetensors");
+    fs::write(&cas, b"canonical").unwrap();
+    fs::write(&source, b"user data").unwrap();
+
+    let staged = stage_link(&source, &cas, AliasType::Hardlink).unwrap();
+    drop(staged);
+
+    assert_eq!(fs::read(&source).unwrap(), b"user data");
+    assert_eq!(fs::read(&cas).unwrap(), b"canonical");
+    assert_no_staging_entries(dir);
+}
+
+/// Staging succeeds but the rename fails (a directory cannot be replaced by a
+/// file link): the destination and the CAS object must both be untouched.
+#[test]
+fn test_link_commit_failure_keeps_original_and_cas() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let cas = dir.join("cas_object.safetensors");
+    fs::write(&cas, b"canonical").unwrap();
+    let occupied = dir.join("occupied");
+    fs::create_dir(&occupied).unwrap();
+
+    let result = replace_with_link(&occupied, &cas, AliasType::Hardlink);
+    assert!(matches!(result, LinkResult::Failed(_)), "expected failure, got {result:?}");
+    assert!(occupied.is_dir(), "destination must be untouched");
+    assert_eq!(fs::read(&cas).unwrap(), b"canonical");
+    assert_no_staging_entries(dir);
+}
+
+/// Happy path: the destination becomes a link to the CAS object, content intact.
+#[test]
+fn test_replace_is_atomic_and_links_cas() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let cas = dir.join("cas_object.safetensors");
+    let source = dir.join("duplicate.safetensors");
+    fs::write(&cas, b"canonical").unwrap();
+    fs::write(&source, b"duplicate").unwrap();
+
+    let result = replace_with_link(&source, &cas, AliasType::Hardlink);
+    assert!(matches!(result, LinkResult::Success(AliasType::Hardlink)), "got {result:?}");
+    assert_eq!(fs::read(&source).unwrap(), b"canonical");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&source).unwrap().ino(), fs::metadata(&cas).unwrap().ino());
+    }
+    assert_no_staging_entries(dir);
 }

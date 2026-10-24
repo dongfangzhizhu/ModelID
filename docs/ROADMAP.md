@@ -147,19 +147,24 @@ Refs: docs/ROADMAP.md#A1
 ### A1 · 原子链接替换（数据安全，最高优先级）
 
 - **背景**：`crates/modeld-core/src/links.rs` 在 `create_hardlink` / `create_symlink` 中先 `remove_file` 再建链；`unlink.rs` 在 Windows 上先删后 rename。任一步失败，用户路径上的文件消失（内容虽在 CAS，但路径与 DB 状态不一致）。
-- **改动点**：`crates/modeld-core/src/links.rs`、`crates/modeld-core/src/unlink.rs`、`crates/modeld-core/src/dedup.rs`
+- **改动点**：`crates/modeld-core/src/links.rs`、`crates/modeld-core/src/unlink.rs`、`crates/modeld-core/tests/fault_injection_tests.rs`（`dedup.rs` 调用点签名不变，无需改动）
 - **实现要点**：
-  - 新增 `replace_with_link(source, target) -> Result<AliasType>`：在 `source` 同目录创建 `.modeld_tmp_<uuid>` 链接，再 `rename(tmp, source)`；Windows 用 `ReplaceFileW` 或 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`。
+  - 新增 `stage_link` / `StagedLink::commit` / `replace_with_link`：在 `source` 同目录创建 `.modeld_tmp_<uuid>.tmp` 链接，再 `rename(tmp, source)`；`std::fs::rename` 在 Windows 上即 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`，替换目录项是原子的。
   - `unlink` 同理：先在同目录写完副本并 `fsync`，再原子替换。
   - 临时名清理放在 `Drop` guard 中，异常路径不留垃圾。
-- **产物**：`replace_with_link` 公共函数 + 3 个调用点改造 + 故障注入测试
+- **产物**：`stage_link` / `StagedLink` / `replace_with_link` 公共 API + `unlink` 原子化 + 12 个测试（8 单元 + 4 故障注入）
 - **验收标准**：
-  - [ ] 注入「建链成功、rename 前失败」后，`source` 仍存在且内容哈希不变
-  - [ ] 注入「建链失败」后，`source` 仍存在且内容哈希不变
-  - [ ] 成功后 `source` 的 inode/file-id 与 CAS 对象一致（同卷）
-  - [ ] 临时文件在成功/失败路径上均被清理（测试断言目录内无 `.modeld_tmp_*`）
-  - [ ] Windows 上对只读 CAS 对象操作不报 `PermissionDenied`
-- **测试**：`fault_injection_tests::link_failure_keeps_original`、`link_success_is_atomic`、`unlink_failure_keeps_original`
+  - [x] 注入「建链成功、rename 前失败」后，`source` 仍存在且内容哈希不变
+  - [x] 注入「建链失败」后，`source` 仍存在且内容哈希不变
+  - [x] 成功后 `source` 的 inode/file-id 与 CAS 对象一致（同卷）
+  - [x] 临时文件在成功/失败路径上均被清理（测试断言目录内无 `.modeld_tmp_*`）
+  - [x] Windows 上对只读 CAS 对象操作不报 `PermissionDenied`
+- **测试**：`fault_injection_tests::test_link_failure_keeps_original`、`test_link_staged_but_not_committed_keeps_original`、`test_link_commit_failure_keeps_original_and_cas`、`test_replace_is_atomic_and_links_cas`；`links::tests::test_replace_with_link_is_atomic`、`test_staged_link_dropped_leaves_source_untouched`、`test_stage_link_fails_when_target_missing`、`test_commit_failure_keeps_destination_and_cleans_temp`、`test_replace_over_readonly_destination`
+- **验收证据（2026-10-24，Windows 11 / rustc 1.98.1）**：
+  - `cargo test --workspace`：**262 passed, 0 failed**（core 164 + 故障注入 10 + 集成 9 + proxy 40+1+11 + webui 20 + client 7）
+  - `cargo clippy --workspace --all-targets -- -D warnings`：通过
+  - `cargo fmt --all -- --check`：通过
+  - 实现：`links.rs` 新增 `stage_link` / `StagedLink::commit` / `replace_with_link`；`unlink.rs` 去掉 Windows「先删后 rename」；8 个单元测试 + 4 个故障注入测试
 - **估算**：2 人日 ｜ **依赖**：无
 
 ### A2 · 代理流式响应 + 线程池 + panic 隔离
@@ -518,7 +523,7 @@ Refs: docs/ROADMAP.md#A1
 
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
-| A1 | 原子链接替换 | todo | — | — | — | — |
+| A1 | 原子链接替换 | done | AI agent | 2026-10-24 | 2026-10-24 | 见下 |
 | A2 | 代理流式 + 线程池 + panic 隔离 | todo | — | — | — | — |
 | A3 | 服务端鉴权基线 | todo | — | — | — | — |
 | A4 | WebUI 与 CLI 打通 | todo | — | — | — | — |
@@ -561,6 +566,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A1 | 原子链接替换：暂存 + 原子 rename，消除「先删后建」数据丢失窗口 | 见 §4-A1 | `core/links.rs`、`core/unlink.rs`、`tests/fault_injection_tests.rs`、`CHANGELOG.md` |
 | 2026-10-24 | — | 创建本文档（基线：全量审核报告） | — | 文档 |
 
 ---
@@ -611,6 +617,8 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 审核 | mDNS 仅发现无广播 | C7 | open |
 | 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | open |
 | 2026-10-24 | 审核 | Python hook token 走命令行参数 | B5 | open |
+| 2026-10-24 | 开发 A1 | `dedup.rs` 中 `cas_path.parent().unwrap()` 属库层 panic | B1 | open |
+| 2026-10-24 | 开发 A1 | `links.rs` 与 `platform.rs` 各有一份 `is_same_volume`，且盘符比较不可靠 | B1 | open |
 
 ---
 

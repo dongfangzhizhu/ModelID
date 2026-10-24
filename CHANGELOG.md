@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Atomic link replacement** — dedup no longer deletes a duplicate before
+  linking it. The link is staged under a temporary name in the same directory
+  and renamed over the destination, so a failure can never leave the user's
+  path missing. `unlink` uses the same protocol and restores ordinary file
+  permissions on the copy it writes back. (ROADMAP A1)
+
 ## [0.1.0] — 2026-07-14
 
 ### First Public Release
