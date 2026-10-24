@@ -20,6 +20,14 @@ struct Args {
     /// Open browser after starting
     #[arg(long)]
     open: bool,
+
+    /// Bearer token required by the API (or set MODELD_AUTH_TOKEN)
+    #[arg(long)]
+    token: Option<String>,
+
+    /// Allow binding to a non-loopback address (requires a token)
+    #[arg(long, default_value = "false")]
+    allow_lan: bool,
 }
 
 #[tokio::main]
@@ -33,6 +41,34 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    // Resolve the token: --token wins over the environment.
+    let token = args
+        .token
+        .clone()
+        .or_else(|| std::env::var("MODELD_AUTH_TOKEN").ok())
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+
+    // Refuse to expose the UI on the network without authentication.
+    if !is_loopback(&args.host) {
+        if !args.allow_lan {
+            eprintln!(
+                "error: refusing to bind the Web UI to '{}' without --allow-lan.\n\
+                 hint: keep the default 127.0.0.1, or pass --allow-lan together with --token.",
+                args.host
+            );
+            std::process::exit(1);
+        }
+        if token.is_none() {
+            eprintln!(
+                "error: refusing to bind the Web UI to '{}' without a token.\n\
+                 hint: pass --token <token> or set MODELD_AUTH_TOKEN.",
+                args.host
+            );
+            std::process::exit(1);
+        }
+    }
 
     // Validate store path
     if !args.store.exists() {
@@ -49,10 +85,20 @@ async fn main() -> Result<()> {
     let db = modeld_core::Database::open(&db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
 
-    let (state, _) = modeld_webui::AppState::new(db, args.store, None, None);
+    let (state, _) = modeld_webui::AppState::new(db, args.store, token, None);
 
     let config =
         modeld_webui::WebUiConfig { host: args.host, port: args.port, open_browser: args.open };
 
     modeld_webui::run(state, config).await
+}
+
+/// True for `127.0.0.0/8`, `::1` and `localhost`.
+fn is_loopback(host: &str) -> bool {
+    let host = host.trim();
+    host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host == "[::1]"
+        || host == "127.0.0.1"
+        || host.starts_with("127.")
 }

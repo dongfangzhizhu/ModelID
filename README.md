@@ -134,10 +134,14 @@ LAN bandwidth, with transparent HuggingFace deduplication.
 
 ```bash
 # Start the proxy (on the machine holding the store)
+# Default: 127.0.0.1:8234, bearer token auto-generated and printed once
 modeld proxy start --port 8234 --store .modeld
 
-# With authentication
-modeld proxy start --port 8234 --token <secret> --no-allow-anonymous
+# Share on the LAN — requires --allow-lan, and a token is mandatory
+modeld proxy start --port 8234 --bind 0.0.0.0 --allow-lan --store .modeld
+
+# Use a token you choose
+modeld proxy start --port 8234 --bind 0.0.0.0 --allow-lan --token <secret>
 
 # From a config file
 modeld proxy start --config modeld.toml
@@ -170,12 +174,19 @@ A standalone browser-based dashboard for managing your modeld store visually,
 built with an embedded Axum HTTP server + vanilla JS frontend (no Node.js required).
 
 ```bash
-# Start the Web UI (default: http://127.0.0.1:8234)
+# Start the Web UI (default: http://127.0.0.1:8234, no token needed on loopback)
 modeld-webui --store .modeld
 
-# Bind to all interfaces for LAN access, auto-open browser
-modeld-webui --store .modeld --host 0.0.0.0 --port 9000 --open
+# Bind to all interfaces for LAN access — a token is required, otherwise the
+# server refuses to start (exit code 1)
+modeld-webui --store .modeld --host 0.0.0.0 --port 9000 --allow-lan \
+  --token <secret> --open
 ```
+
+The UI prompts for the token on the first `401` and stores it in
+`localStorage`; set `MODELD_AUTH_TOKEN` instead of `--token` if you prefer the
+environment. State-changing requests send `X-Modeld-CSRF: 1` and are rejected
+unless they come from an allowed origin.
 
 ### Pages
 

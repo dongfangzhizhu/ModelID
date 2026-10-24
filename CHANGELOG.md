@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The proxy is secure by default** — it now binds `127.0.0.1` and requires a
+  bearer token; `require_token` defaults to `true` and `modeld proxy start`
+  generates, persists and prints a token on first run. Requests without a valid
+  token get `401` instead of being served. Binding to a non-loopback address
+  now requires `--allow-lan` and is refused otherwise; `--allow-anonymous` is
+  rejected unless the bind is loopback. (ROADMAP A3)
+- **Token comparison is constant-time** — the previous `iter().any(|t| t == given)`
+  leaked the position of the first differing byte and stopped early.
+  (ROADMAP A3)
+- **WebUI CORS is an origin allowlist** — `CorsLayer::very_permissive()` allowed
+  every website to read API responses from a local server. Only the loopback
+  aliases and the configured host are allowed now. (ROADMAP A3)
+- **CSRF guard for state-changing requests** — a browser-originated
+  `POST/PUT/PATCH/DELETE` must come from an allowed `Origin` *and* carry
+  `X-Modeld-CSRF: 1`; otherwise `403`. Non-browser clients (no `Origin`) are
+  unaffected. (ROADMAP A3)
+- **The standalone WebUI can be protected** — `--token` / `MODELD_AUTH_TOKEN`
+  are wired through, and a non-loopback bind without a token exits with code 1
+  instead of starting an open server. (ROADMAP A3)
+
 ### Changed
 
 - **Proxy streams instead of buffering** — `/v1/blobs/{hash}` and the HF-proxy

@@ -9,14 +9,46 @@ transparently through modeld.
 
 ## Authentication
 
+**Secure by default.** The proxy binds `127.0.0.1` and requires a bearer token;
+an unauthenticated request gets `401` out of the box.
+
 - `/health` is always public.
 - All other routes pass through auth + IP middleware:
-  - **Bearer token**: send `Authorization: Bearer <token>`. Required only when
-    the server was started with `require_token = true`.
+  - **Bearer token**: send `Authorization: Bearer <token>`.
   - **IP allow/deny lists**: configured in `modeld.toml [proxy.network]`.
 
 When a token is required and absent/invalid, routes return `401`.
 When an IP is denied, routes return `403`.
+
+### Where the token comes from
+
+`modeld proxy start` resolves the token in this order:
+
+1. `--token <token>` on the command line
+2. `[proxy.auth] tokens` in the file passed with `--config`
+3. `[auth] token` in `<store>/modeld.toml` (written by `modeld proxy token-rotate`)
+4. the `MODELD_AUTH_TOKEN` environment variable
+5. otherwise a random UUIDv4 token is generated, saved to
+   `<store>/modeld.toml [auth] token`, and printed once at startup
+
+Use `--print-token` to print the token even when it was already configured.
+Token comparison is constant-time.
+
+### Exposing the proxy on the network
+
+| Flags | Bind | Auth |
+|---|---|---|
+| *(none)* | `127.0.0.1` | bearer token (auto-generated) |
+| `--allow-anonymous` | `127.0.0.1` only | none — loopback only |
+| `--bind <lan-ip> --allow-lan` | any interface | bearer token (mandatory) |
+
+Binding to a non-loopback address without `--allow-lan` is refused with exit
+code 1, as is `--allow-anonymous` on a non-loopback bind. The server validates
+these invariants *before* binding the port, so a misconfiguration can never
+expose the store even briefly.
+
+> Anonymous access on a loopback bind is a deliberate local-trust mode; it is
+> not a substitute for a token on a shared machine.
 
 ## Endpoints
 
@@ -116,21 +148,23 @@ for the `HF_ENDPOINT` configuration that maps HF requests onto it.
 ```toml
 [proxy]
 port = 8234
-bind_address = "0.0.0.0"
+bind_address = "127.0.0.1"
 store_path = ".modeld"
 
 [proxy.auth]
-require_token = false
+require_token = true
 tokens = ["your-secret-token"]
 
 [proxy.network]
-allow_anonymous = true
+allow_anonymous = false
 allowed_ips = ["192.168.1.0/24"]
 denied_ips = []
 ```
 
-All fields have safe defaults; a missing file or `[proxy]` table starts an
-open-by-default server on port 8234.
+All fields have safe defaults: a missing file or `[proxy]` table starts a
+loopback-only server that requires a token. `require_token = true` with an
+empty `tokens` list is a configuration error — the server refuses to start
+rather than accepting every request.
 
 ## Not supported (documented limits)
 

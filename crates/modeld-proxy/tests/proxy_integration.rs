@@ -200,6 +200,25 @@ fn test_health_is_public_without_token() {
 }
 
 #[test]
+fn test_secure_default_rejects_anonymous_requests() {
+    // `ProxyConfig::default()` must not serve data to an unauthenticated
+    // client: `require_token` is on and `allow_anonymous` is off.
+    let mut config = ProxyConfig::default();
+    config.auth.tokens = vec!["secret".to_string()];
+    let proxy = TestProxy::start(config);
+    let url = format!("{}/v1/models", proxy.url);
+
+    let err = ureq::get(&url).call().unwrap_err();
+    assert_eq!(status_of_err(err), 401, "anonymous request must be rejected");
+
+    let err = ureq::get(&url).set("Authorization", "Bearer wrong").call().unwrap_err();
+    assert_eq!(status_of_err(err), 401, "a wrong token must be rejected");
+
+    let ok = ureq::get(&url).set("Authorization", "Bearer secret").call().unwrap();
+    assert_eq!(ok.status(), 200, "the configured token must be accepted");
+}
+
+#[test]
 fn test_unknown_route_returns_404() {
     let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
     let url = format!("{}/v1/nonexistent", proxy.url);

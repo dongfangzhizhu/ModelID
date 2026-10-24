@@ -27,9 +27,31 @@ pub fn check_auth(provided_token: Option<&str>, cfg: &AuthConfig) -> bool {
         return true;
     }
     match provided_token {
-        Some(t) => cfg.tokens.iter().any(|valid| valid == t),
+        Some(t) => {
+            // No short-circuit: every configured token is compared so the time
+            // taken does not reveal which one (or which byte) matched.
+            let mut matched = false;
+            for valid in &cfg.tokens {
+                matched |= tokens_equal(valid, t);
+            }
+            matched
+        }
         None => false,
     }
+}
+
+/// Constant-time string equality for secrets.
+///
+/// Byte-by-byte with no early exit, so the comparison time does not depend on
+/// where the first difference is. Lengths are compared directly — the length of
+/// a generated token is public information anyway.
+fn tokens_equal(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let diff = a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    diff == 0
 }
 
 /// Decide whether a peer IP is permitted by the network rules.
@@ -139,6 +161,24 @@ mod tests {
     fn test_auth_required_invalid_token() {
         let cfg = auth(true, &["secret"]);
         assert!(!check_auth(Some("wrong"), &cfg));
+    }
+
+    #[test]
+    fn test_tokens_equal_matches_only_identical_values() {
+        assert!(tokens_equal("secret", "secret"));
+        assert!(!tokens_equal("secret", "secreT"));
+        assert!(!tokens_equal("secret", "secret2"));
+        assert!(!tokens_equal("secret2", "secret"));
+        assert!(!tokens_equal("", "secret"));
+        assert!(tokens_equal("", ""));
+    }
+
+    #[test]
+    fn test_auth_checks_every_configured_token() {
+        // A match in the middle of the list still succeeds.
+        let cfg = auth(true, &["aaa", "bbb", "ccc"]);
+        assert!(check_auth(Some("bbb"), &cfg));
+        assert!(!check_auth(Some("bb"), &cfg));
     }
 
     #[test]

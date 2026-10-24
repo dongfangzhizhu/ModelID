@@ -7,20 +7,25 @@ deduplication.
 ## 1. Start the proxy (on the machine holding the CAS store)
 
 ```bash
-# Default: port 8234, open access on the LAN
+# Default: port 8234, loopback only, bearer token auto-generated and printed
 modeld proxy start
 
-# Bind a specific port / store
-modeld proxy start --port 8234 --bind 0.0.0.0 --store /data/modeld
+# Share on the LAN (token auth is enforced; the token is printed at startup)
+modeld proxy start --bind 0.0.0.0 --allow-lan --store /data/modeld
 
-# Require a bearer token
-modeld proxy start --token your-secret-token
+# Use a token you choose
+modeld proxy start --bind 0.0.0.0 --allow-lan --token your-secret-token
 
 # From a config file
 modeld proxy start --config modeld.toml
 ```
 
 The server runs in the foreground; press `Ctrl+C` to stop.
+
+> **Secure by default.** The proxy listens on `127.0.0.1` and requires a bearer
+> token. Binding to any other interface needs an explicit `--allow-lan`, and
+> `--allow-anonymous` is only accepted on a loopback bind. See
+> [proxy-api.md](./proxy-api.md#authentication) for the token resolution order.
 
 ### Configuration file
 
@@ -33,14 +38,17 @@ bind_address = "0.0.0.0"
 store_path = ".modeld"
 
 [proxy.auth]
-require_token = false
-tokens = []
+require_token = true
+tokens = ["your-secret-token"]
 
 [proxy.network]
-allow_anonymous = true
+allow_anonymous = false
 allowed_ips = ["192.168.1.0/24"]
 denied_ips = []
 ```
+
+> `bind_address = "0.0.0.0"` in a config file is subject to the same rule as the
+> CLI flag: start with `--allow-lan`, otherwise the server refuses to start.
 
 See [proxy-api.md](./proxy-api.md) for the full HTTP API.
 
@@ -114,5 +122,8 @@ modeld proxy status --url http://localhost:8234
 - The proxy is **plain HTTP** — intended for trusted LANs, not the public
   internet. Do not expose port 8234 to untrusted networks without a reverse
   proxy providing TLS.
-- For sensitive environments, enable `require_token` and restrict
-  `allowed_ips` to your subnet.
+- `require_token` is on by default; the token is generated on first start and
+  saved to `<store>/modeld.toml [auth] token`. Rotate it with
+  `modeld proxy token-rotate`.
+- Restrict `allowed_ips` to your subnet as a second layer.
+- Anonymous mode (`--allow-anonymous`) is loopback-only by design.

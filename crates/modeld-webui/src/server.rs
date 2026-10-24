@@ -1,13 +1,15 @@
 use anyhow::Result;
 use axum::{
-    extract::State,
-    middleware,
+    extract::{Request, State},
+    http::{header, HeaderName, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Router,
 };
+use std::sync::Arc;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::api;
 use crate::auth::require_bearer_token;
@@ -38,8 +40,87 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-/// Build and run the axum HTTP server.
-pub async fn run(state: AppState, config: WebUiConfig) -> Result<()> {
+/// Custom header that browser clients must send on state-changing requests.
+///
+/// A cross-origin page cannot set it without a successful CORS preflight, so
+/// requiring it (together with the origin check) blocks CSRF.
+pub const CSRF_HEADER: &str = "x-modeld-csrf";
+
+/// Origins the UI may legitimately be served from.
+///
+/// The embedded UI is same-origin, so this list only matters for CORS and for
+/// rejecting cross-site writes; loopback aliases are always included.
+pub fn allowed_origins(host: &str, port: u16) -> Vec<String> {
+    let mut origins = vec![
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+        format!("http://[::1]:{port}"),
+    ];
+    if !host.is_empty() && host != "0.0.0.0" && host != "::" && host != "[::]" {
+        origins.push(format!("http://{host}:{port}"));
+    }
+    origins.sort();
+    origins.dedup();
+    origins
+}
+
+fn origin_allowed(allowed: &[String], origin: &HeaderValue) -> bool {
+    let value = origin.as_bytes();
+    allowed.iter().any(|o| o.as_bytes() == value)
+}
+
+/// Reject cross-site state changes.
+///
+/// Same-origin browser requests carry an `Origin` header; those must come
+/// from an allowed origin *and* carry the `X-Modeld-CSRF` header. Non-browser
+/// clients (curl, scripts, the CLI) send no `Origin` and are unaffected —
+/// they are not reachable by a malicious web page.
+async fn require_csrf_guard(allowed: Arc<Vec<String>>, request: Request, next: Next) -> Response {
+    let mutating =
+        matches!(*request.method(), Method::POST | Method::PUT | Method::PATCH | Method::DELETE);
+    if !mutating {
+        return next.run(request).await;
+    }
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        if !origin_allowed(&allowed, origin) {
+            return (StatusCode::FORBIDDEN, "cross-origin write rejected").into_response();
+        }
+        if request.headers().get(CSRF_HEADER).is_none() {
+            return (StatusCode::FORBIDDEN, "missing X-Modeld-CSRF header").into_response();
+        }
+    }
+    next.run(request).await
+}
+
+/// Build the router with CORS, CSRF and auth middleware applied.
+///
+/// Split out from `run` so tests can drive it through `tower::ServiceExt::oneshot`
+/// without binding a port.
+pub fn build_router(state: AppState, host: &str, port: u16) -> Router {
+    let origins = Arc::new(allowed_origins(host, port));
+
+    let csrf = {
+        let origins = Arc::clone(&origins);
+        move |request: Request, next: Next| {
+            let origins = Arc::clone(&origins);
+            async move { require_csrf_guard(origins, request, next).await }
+        }
+    };
+
+    let cors = {
+        let origins = Arc::clone(&origins);
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(move |origin, _parts| {
+                origin_allowed(&origins, origin)
+            }))
+            .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                HeaderName::from_static(CSRF_HEADER),
+            ])
+    };
+
     // Protected API routes — require bearer token when configured.
     let protected_api = api::routes()
         .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer_token));
@@ -49,7 +130,7 @@ pub async fn run(state: AppState, config: WebUiConfig) -> Result<()> {
         .route("/ws", get(ws_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_bearer_token));
 
-    let app = Router::new()
+    Router::new()
         // Prometheus metrics (not behind auth — restrict at network level)
         .route("/metrics", get(metrics_handler))
         // Protected REST API routes (bearer token when auth_token is set)
@@ -60,21 +141,17 @@ pub async fn run(state: AppState, config: WebUiConfig) -> Result<()> {
         .fallback(static_handler)
         // Provide shared state to ALL routes
         .with_state(state)
-        .layer(
-            CorsLayer::very_permissive()
-                .allow_methods(vec![
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::PUT,
-                    axum::http::Method::DELETE,
-                    axum::http::Method::OPTIONS,
-                ])
-                .allow_headers([
-                    axum::http::header::AUTHORIZATION,
-                    axum::http::header::CONTENT_TYPE,
-                ]),
-        )
-        .layer(CompressionLayer::new());
+        // Innermost of the two: reject cross-site writes before they reach a handler.
+        .layer(middleware::from_fn(csrf))
+        // Outermost: answers preflight requests and sets Access-Control-* only
+        // for our own origins (previously: every origin).
+        .layer(cors)
+        .layer(CompressionLayer::new())
+}
+
+/// Build and run the axum HTTP server.
+pub async fn run(state: AppState, config: WebUiConfig) -> Result<()> {
+    let app = build_router(state, &config.host, config.port);
 
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -99,4 +176,104 @@ fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     std::process::Command::new("xdg-open").arg(url).spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    fn test_state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = modeld_core::Database::open(&dir.path().join("modeld.db")).unwrap();
+        let (state, _rx) = AppState::new(db, dir.path().to_path_buf(), None, None);
+        (state, dir)
+    }
+
+    fn post(path: &str) -> axum::http::request::Builder {
+        Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+    }
+
+    async fn status_of(app: Router, request: Request<Body>) -> StatusCode {
+        app.oneshot(request).await.unwrap().status()
+    }
+
+    #[test]
+    fn test_allowed_origins_include_loopback_aliases() {
+        let origins = allowed_origins("127.0.0.1", 8234);
+        assert!(origins.contains(&"http://127.0.0.1:8234".to_string()));
+        assert!(origins.contains(&"http://localhost:8234".to_string()));
+
+        // A wildcard bind is not a browsable origin and must not be listed.
+        let origins = allowed_origins("0.0.0.0", 8234);
+        assert!(!origins.iter().any(|o| o.contains("0.0.0.0")));
+
+        // A concrete LAN host is its own origin.
+        let origins = allowed_origins("192.168.1.5", 8234);
+        assert!(origins.contains(&"http://192.168.1.5:8234".to_string()));
+    }
+
+    #[test]
+    fn test_origin_allowed_rejects_cross_site() {
+        let origins = allowed_origins("127.0.0.1", 8234);
+        assert!(origin_allowed(&origins, &HeaderValue::from_static("http://127.0.0.1:8234")));
+        assert!(!origin_allowed(&origins, &HeaderValue::from_static("http://evil.example")));
+        assert!(!origin_allowed(&origins, &HeaderValue::from_static("http://127.0.0.1:9999")));
+    }
+
+    #[tokio::test]
+    async fn test_cross_origin_write_without_csrf_header_is_rejected() {
+        let (state, _dir) = test_state();
+        let app = build_router(state, "127.0.0.1", 8234);
+
+        let request = post("/api/v1/dedup/apply")
+            .header(header::ORIGIN, "http://evil.example")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(status_of(app, request).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_allowed_origin_with_csrf_header_passes_the_guard() {
+        let (state, _dir) = test_state();
+        let app = build_router(state, "127.0.0.1", 8234);
+
+        let request = post("/api/v1/dedup/apply")
+            .header(header::ORIGIN, "http://127.0.0.1:8234")
+            .header(CSRF_HEADER, "1")
+            .body(Body::from("{}"))
+            .unwrap();
+        // Whatever the handler decides, the CSRF guard must not answer 403.
+        assert_ne!(status_of(app, request).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_allowed_origin_without_csrf_header_is_rejected() {
+        let (state, _dir) = test_state();
+        let app = build_router(state, "127.0.0.1", 8234);
+
+        let request = post("/api/v1/dedup/apply")
+            .header(header::ORIGIN, "http://127.0.0.1:8234")
+            .body(Body::from("{}"))
+            .unwrap();
+        assert_eq!(status_of(app, request).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_reads_are_not_csrf_gated() {
+        let (state, _dir) = test_state();
+        let app = build_router(state, "127.0.0.1", 8234);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/stats")
+            .header(header::ORIGIN, "http://evil.example")
+            .body(Body::empty())
+            .unwrap();
+        assert_ne!(status_of(app, request).await, StatusCode::FORBIDDEN);
+    }
 }

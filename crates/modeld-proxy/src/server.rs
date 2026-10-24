@@ -60,6 +60,9 @@ impl ProxyServer {
 
     /// Bind and serve HTTP until interrupted (Ctrl+C) or an unrecoverable error.
     pub fn start(&self) -> Result<()> {
+        // Fail before binding the port: an open proxy on a public interface is
+        // worse than a proxy that refuses to start.
+        self.config.check_startup_invariants()?;
         let bind = self.config.bind_addr();
         let server = Server::http(bind.as_str())
             .map_err(|e| anyhow!("Failed to bind proxy server to {}: {}", bind, e))?;

@@ -211,12 +211,28 @@ Refs: docs/ROADMAP.md#A1
   - WebUI 增加 `--token` / `MODELD_AUTH_TOKEN`，非回环绑定未提供 token 时拒绝启动。
 - **产物**：鉴权策略 + 启动期不变量校验 + 文档更新（`docs/proxy-api.md`、`README.md`）
 - **验收标准**：
-  - [ ] 默认配置下 `curl /v1/models` 返回 401
-  - [ ] `--token X` 后错误 token 返回 401，正确 token 返回 200
-  - [ ] `--allow-anonymous` 仅在与 `127.0.0.1` 同时使用时生效
-  - [ ] 跨源 `fetch`（无 CSRF 头）对 `POST /api/v1/dedup/apply` 被拒绝
-  - [ ] 非回环 + 无 token 启动 WebUI 时退出码非 0 并给出明确提示
-- **测试**：`auth::constant_time_compare`、`server::cors_rejects_cross_origin_write`、CLI 冒烟脚本
+  - [x] 默认配置下 `curl /v1/models` 返回 401
+  - [x] `--token X` 后错误 token 返回 401，正确 token 返回 200
+  - [x] `--allow-anonymous` 仅在与 `127.0.0.1` 同时使用时生效
+  - [x] 跨源 `fetch`（无 CSRF 头）对 `POST /api/v1/dedup/apply` 被拒绝
+  - [x] 非回环 + 无 token 启动 WebUI 时退出码非 0 并给出明确提示
+- **测试**：`auth::test_tokens_equal_matches_only_identical_values`、`config::test_default_config_requires_a_token`、`server::test_cross_origin_write_without_csrf_header_is_rejected`、`proxy_integration::test_secure_default_rejects_anonymous_requests`
+- **实现状态（2026-10-24，Windows 11 / rustc 1.98.1）**：
+  - 代理：`AuthConfig::default()` 改为 `require_token = true`；`bind` 默认 `127.0.0.1`；新增 `ProxyConfig::is_loopback_bind` / `check_startup_invariants` / `is_loopback_addr`，在 `ProxyServer::start` 绑端口**之前**校验
+  - `modeld proxy start`：新增 `--allow-lan`（非回环绑定的显式开关，且此时强制 token）与 `--print-token`；token 解析顺序 `--token` → `--config` 的 `[proxy.auth].tokens` → `<store>/modeld.toml [auth].token` → `MODELD_AUTH_TOKEN` → 随机生成（UUIDv4，36 字符）并持久化
+  - 常量时间比较：**未引入 `subtle` 依赖**，改为本地 `tokens_equal`（等长逐字节 fold，无提前返回，对每个已配置 token 都执行比较）。效果等价，且不新增第三方依赖
+  - WebUI：新增 `--token` / «MODELD_AUTH_TOKEN` / `--allow-lan`；非回环且未给 token 时打印两行提示并以退出码 1 退出
+  - CORS：`CorsLayer::very_permissive()` → 同源白名单（`127.0.0.1` / `localhost` / `[::1]` / 配置的 host，均带端口）；通配绑定 `0.0.0.0` 不作为可浏览 origin 列入
+  - CSRF：新增 `require_csrf_guard` 中间件 —— 对 `POST/PUT/PATCH/DELETE`，若请求带 `Origin` 则必须命中白名单**且**带 `X-Modeld-CSRF` 头，否则 403。不带 `Origin` 的非浏览器客户端（curl/CLI/脚本）不受影响
+  - 前端 `ui/api.js`：所有请求带 `X-Modeld-CSRF: 1`；token 存 `localStorage`，首次 401 时弹窗输入并重试一次
+  - 顺带修好：`proxy token-rotate` 写入的 `<store>/modeld.toml [auth].token` 现在真的会被 `proxy start` 读取（此前代理完全不读该字段）；彻底统一仍归 A6
+- **验收证据（2026-10-24）**：
+  - `cargo test --workspace`：**279 passed, 0 failed**（core 164 + 故障注入 10 + 集成 9 + proxy 48+1+14 + webui 26 + client 7）
+  - `cargo clippy --workspace --all-targets -- -D warnings`：通过；`cargo fmt --all -- --check`：通过
+  - 黑盒（`modeld proxy start --port 18234`，默认参数）：
+    - `/v1/models` 无 token → **401**；`Bearer nope` → **401**；`Bearer <持久化 token>` → **200**；`/health` → **200**
+    - `modeld.toml` 中自动写入 `[auth] token`（36 字符），启动日志打印一次
+  - 黑盒（拒绝启动）：`--bind 0.0.0.0` 无 `--allow-lan` → 退出码 **1**；`--bind 0.0.0.0 --allow-lan --allow-anonymous` → 退出码 **1**；`modeld-webui --host 0.0.0.0` 无 token → 退出码 **1** 且输出两行明确提示；`--host 0.0.0.0 --allow-lan --token abc` → 正常启动
 - **估算**：3 人日 ｜ **依赖**：A2（同文件改动，建议顺序执行）
 
 ### A4 · WebUI 与 CLI 打通
@@ -538,7 +554,7 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|---|---|---|
 | A1 | 原子链接替换 | done | AI agent | 2026-10-24 | 2026-10-24 | `a5a0876` |
 | A2 | 代理流式 + 线程池 + panic 隔离 | done | AI agent | 2026-10-24 | 2026-10-24 | `c60d5dd` |
-| A3 | 服务端鉴权基线 | todo | — | — | — | — |
+| A3 | 服务端鉴权基线 | done | AI agent | 2026-10-24 | 2026-10-24 | `pending` |
 | A4 | WebUI 与 CLI 打通 | todo | — | — | — | — |
 | A5 | 扫描摄取模式 | todo | — | — | — | — |
 | A6 | 配置系统统一 | todo | — | — | — | — |
@@ -579,6 +595,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A3 | 鉴权安全默认：require_token 默认开启、token 自动生成并持久化、`--allow-lan` 门控、常量时间比较、CORS 同源白名单 + CSRF 头、WebUI `--token` 与非回环拒启 | `pending` | `proxy/auth.rs`、`proxy/config.rs`、`proxy/server.rs`、`cli/main.rs`、`webui/main.rs`、`webui/server.rs`、`webui/ui/api.js`、`Cargo.toml`、`CHANGELOG.md` |
 | 2026-10-24 | A2 | 代理流式响应 + 线程池 + panic 隔离 + Range 分片 + 压力脚本 | `c60d5dd` | `proxy/server.rs`、`proxy/config.rs`、`tests/proxy_integration.rs`、`scripts/bench-proxy-streaming.ps1`、`docs/proxy-api.md`、`CHANGELOG.md` |
 | 2026-10-24 | A1 | 原子链接替换：暂存 + 原子 rename，消除「先删后建」数据丢失窗口 | `a5a0876` | `core/links.rs`、`core/unlink.rs`、`tests/fault_injection_tests.rs`、`CHANGELOG.md` |
 | 2026-10-24 | — | 创建本文档（基线：全量审核报告） | — | 文档 |
@@ -589,10 +606,10 @@ Refs: docs/ROADMAP.md#A1
 
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
-| A 止血 | 8 | 2 | 25% |
+| A 止血 | 8 | 3 | 38% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **2** | **8%** |
+| **合计** | **24** | **3** | **13%** |
 
 ---
 
@@ -635,6 +652,9 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 开发 A1 | `links.rs` 与 `platform.rs` 各有一份 `is_same_volume`，且盘符比较不可靠 | B1 | open |
 | 2026-10-24 | 开发 A2 | 多根扫描时每个根都会把 `files_scanned` 重置为 0，进度条会倒退（已修并行回调乱序，多根问题未改） | B3 | open |
 | 2026-10-24 | 开发 A2 | `handle_hf_proxy` 每次缓存未命中都新建 SQLite 连接，未复用连接池 | B7 | open |
+| 2026-10-24 | 开发 A3 | `modeld serve --host 0.0.0.0` 未接入 `--allow-lan`，与 `modeld-webui` 的策略不一致（目前靠强制生成 token 兜底） | A4 | open |
+| 2026-10-24 | 开发 A3 | CSRF 守卫只在请求带 `Origin` 时生效，非浏览器客户端可绕过（设计如此，但需在文档中写清边界） | B9 | open |
+| 2026-10-24 | 开发 A3 | `/metrics` 仍无鉴权，任何能访问端口的人可读取计数器 | A7 | open |
 
 ---
 

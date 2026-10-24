@@ -359,8 +359,8 @@ enum Commands {
 enum ProxyAction {
     /// Start the proxy server (foreground; Ctrl+C to stop)
     Start {
-        /// Bind address (default: 0.0.0.0)
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Bind address (default: 127.0.0.1, loopback only)
+        #[arg(long, default_value = "127.0.0.1")]
         bind: String,
         /// Port (default: 8234)
         #[arg(long)]
@@ -368,15 +368,21 @@ enum ProxyAction {
         /// Store directory
         #[arg(short = 's', long, default_value = ".modeld")]
         store: PathBuf,
-        /// Require a bearer token (set this to enable auth)
+        /// Bearer token (a random one is generated and saved when omitted)
         #[arg(long)]
         token: Option<String>,
-        /// Allow anonymous (unauthenticated) access (default: false for security)
+        /// Allow anonymous (unauthenticated) access — loopback binds only
         #[arg(long, default_value = "false")]
         allow_anonymous: bool,
         /// Path to a modeld.toml config file
         #[arg(long)]
         config: Option<PathBuf>,
+        /// Allow binding to a non-loopback address (bearer token is enforced)
+        #[arg(long, default_value = "false")]
+        allow_lan: bool,
+        /// Print the bearer token at startup
+        #[arg(long, default_value = "false")]
+        print_token: bool,
     },
     /// Discover modeld proxy servers on the local network (mDNS)
     Discover {
@@ -2662,9 +2668,27 @@ fn serve_command(
 
 fn proxy_command(action: ProxyAction) -> Result<()> {
     match action {
-        ProxyAction::Start { bind, port, store, token, allow_anonymous, config } => {
+        ProxyAction::Start {
+            bind,
+            port,
+            store,
+            token,
+            allow_anonymous,
+            config,
+            allow_lan,
+            print_token,
+        } => {
             // `modeld proxy start` is a compatibility alias for the legacy proxy server.
-            proxy_start_command(bind, port, store, token, allow_anonymous, config)
+            proxy_start_command(ProxyStartOptions {
+                bind,
+                port,
+                store,
+                token,
+                allow_anonymous,
+                config,
+                allow_lan,
+                print_token,
+            })
         }
         ProxyAction::Discover { timeout } => proxy_discover_command(timeout),
         ProxyAction::Status { url, token } => proxy_status_command(&url, token),
@@ -2672,14 +2696,31 @@ fn proxy_command(action: ProxyAction) -> Result<()> {
     }
 }
 
-fn proxy_start_command(
+/// Options for `modeld proxy start`, grouped to keep the signature readable.
+struct ProxyStartOptions {
     bind: String,
     port: Option<u16>,
     store: PathBuf,
     token: Option<String>,
     allow_anonymous: bool,
     config: Option<PathBuf>,
-) -> Result<()> {
+    allow_lan: bool,
+    print_token: bool,
+}
+
+fn proxy_start_command(opts: ProxyStartOptions) -> Result<()> {
+    use colored::Colorize;
+    let ProxyStartOptions {
+        bind,
+        port,
+        store,
+        token,
+        allow_anonymous,
+        config,
+        allow_lan,
+        print_token,
+    } = opts;
+
     // Load config from file if provided; otherwise build from CLI flags.
     let mut cfg = if let Some(ref cfg_path) = config {
         modeld_proxy::ProxyConfig::load(cfg_path)?
@@ -2688,7 +2729,7 @@ fn proxy_start_command(
             port,
             Some(bind.clone()),
             store.clone(),
-            token,
+            token.clone(),
             allow_anonymous,
         )
     };
@@ -2697,6 +2738,78 @@ fn proxy_start_command(
     if let Some(p) = port {
         cfg.port = p;
     }
+
+    let loopback = cfg.is_loopback_bind();
+
+    // Exposing the proxy on the network must be an explicit decision.
+    if !loopback && !allow_lan {
+        anyhow::bail!(
+            "refusing to bind the proxy to '{}': pass --allow-lan to expose it on the \
+             network (bearer-token authentication will be enforced)",
+            cfg.bind_address
+        );
+    }
+    let wants_anonymous = allow_anonymous || cfg.network.allow_anonymous;
+    if !loopback && wants_anonymous {
+        anyhow::bail!(
+            "anonymous access is only allowed on a loopback bind; '{}' requires a bearer token",
+            cfg.bind_address
+        );
+    }
+
+    if loopback && wants_anonymous {
+        cfg.network.allow_anonymous = true;
+        cfg.auth.require_token = false;
+        cfg.auth.tokens.clear();
+        println!(
+            "{}",
+            "⚠  anonymous access enabled — reachable from this machine only".yellow().bold()
+        );
+    } else {
+        // Resolution order: --token, config file, store config, env, generated.
+        let mut store_config = load_config(&store).unwrap_or_default();
+        let configured = token
+            .or_else(|| cfg.auth.tokens.first().cloned())
+            .or_else(|| {
+                let saved = store_config.auth.token.clone();
+                if saved.is_empty() {
+                    None
+                } else {
+                    Some(saved)
+                }
+            })
+            .or_else(|| std::env::var("MODELD_AUTH_TOKEN").ok().filter(|t| !t.is_empty()));
+
+        let (token_value, generated) = match configured {
+            Some(t) => (t, false),
+            None => {
+                let t = Uuid::new_v4().to_string();
+                store_config.auth.token = t.clone();
+                save_config(&store, &store_config)?;
+                (t, true)
+            }
+        };
+
+        cfg.auth.require_token = true;
+        cfg.auth.tokens = vec![token_value.clone()];
+        cfg.network.allow_anonymous = false;
+
+        if generated || print_token {
+            println!("{}", "🔑  Bearer token for this proxy:".cyan().bold());
+            println!("    {}", token_value.yellow().bold());
+            println!("    {}", format!("Authorization: Bearer {}", token_value).dimmed());
+            if generated {
+                println!(
+                    "{}",
+                    "   Generated once and saved to <store>/modeld.toml [auth] token.".dimmed()
+                );
+            }
+            println!();
+        }
+    }
+
+    // Refuse to start on an unsafe combination rather than leaking the store.
+    cfg.check_startup_invariants()?;
 
     // Initialize the store components if missing so a fresh store works.
     let cas = modeld_core::CasStore::new(&store);

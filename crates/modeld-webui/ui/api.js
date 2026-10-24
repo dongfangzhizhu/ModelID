@@ -9,18 +9,43 @@ class ApiError extends Error {
   }
 }
 
-async function request(method, path, body) {
-  const opts = {
+const TOKEN_KEY = 'modeld_token';
+
+// Every request carries the CSRF header; the server rejects browser-originated
+// writes that lack it. The bearer token (when the server needs one) lives in
+// localStorage and is filled in by the prompt below on the first 401.
+function buildHeaders(hasBody) {
+  const headers = { 'X-Modeld-CSRF': '1' };
+  if (hasBody) headers['Content-Type'] = 'application/json';
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  return headers;
+}
+
+async function send(method, path, body, retried) {
+  const res = await fetch(BASE + path, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
+    headers: buildHeaders(Boolean(body)),
     body: body ? JSON.stringify(body) : undefined,
-  };
-  const res = await fetch(BASE + path, opts);
+  });
+
+  if (res.status === 401 && !retried) {
+    const entered = window.prompt('This modeld server requires an access token:');
+    if (entered && entered.trim()) {
+      localStorage.setItem(TOKEN_KEY, entered.trim());
+      return send(method, path, body, true);
+    }
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText, code: 'HTTP_ERROR' }));
     throw new ApiError(err.error || res.statusText, err.code, res.status);
   }
   return res.status === 204 ? null : res.json();
+}
+
+function request(method, path, body) {
+  return send(method, path, body, false);
 }
 
 export const api = {

@@ -47,13 +47,23 @@ pub struct ProxyConfig {
 pub const DEFAULT_RANGE_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `[proxy.auth]` — Bearer-token access control.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Secure by default: a proxy started without any token configuration refuses
+/// every authenticated route until a token exists. The CLI generates and
+/// persists one on first start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     /// When true, requests must carry a valid `Authorization: Bearer <token>`.
     pub require_token: bool,
     /// Accepted bearer tokens.
     pub tokens: Vec<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self { require_token: true, tokens: Vec::new() }
+    }
 }
 
 /// `[proxy.network]` — IP allow/deny lists.
@@ -131,6 +141,11 @@ impl ProxyConfig {
             cfg.auth.tokens.push(t);
         }
         cfg.network.allow_anonymous = allow_anonymous;
+        // Anonymous access and token auth are mutually exclusive; only the
+        // loopback bind may run without a token (enforced by the invariants).
+        if allow_anonymous && cfg.auth.tokens.is_empty() {
+            cfg.auth.require_token = false;
+        }
         cfg
     }
 
@@ -142,11 +157,49 @@ impl ProxyConfig {
     /// Return a copy of this config with anonymous access enabled.
     ///
     /// Convenience for integration tests and trusted-LAN setups:
-    /// `ProxyConfig::default().with_open_access()`.
+    /// `ProxyConfig::default().with_open_access()`. Anonymous access only
+    /// passes `check_startup_invariants` for a loopback bind.
     pub fn with_open_access(mut self) -> Self {
         self.network.allow_anonymous = true;
+        self.auth.require_token = false;
         self
     }
+
+    /// True when the configured bind address is a loopback address.
+    pub fn is_loopback_bind(&self) -> bool {
+        is_loopback_addr(&self.bind_address)
+    }
+
+    /// Reject configurations that would expose the store without authentication.
+    ///
+    /// Called from `ProxyServer::start` and from the CLI so a misconfigured
+    /// server fails before it binds the port, not after it starts leaking data.
+    pub fn check_startup_invariants(&self) -> Result<()> {
+        if !self.is_loopback_bind() && self.network.allow_anonymous {
+            anyhow::bail!(
+                "refusing to allow anonymous access on non-loopback bind '{}': \
+                 anonymous access is only permitted on 127.0.0.1/::1",
+                self.bind_address
+            );
+        }
+        if self.auth.require_token && self.auth.tokens.is_empty() {
+            anyhow::bail!(
+                "token authentication is required but no token is configured \
+                 (pass --token or run 'modeld proxy token-rotate')"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// True for `127.0.0.0/8`, `::1` and `localhost`.
+pub fn is_loopback_addr(addr: &str) -> bool {
+    let addr = addr.trim();
+    addr.eq_ignore_ascii_case("localhost")
+        || addr == "::1"
+        || addr == "[::1]"
+        || addr == "127.0.0.1"
+        || addr.starts_with("127.")
 }
 
 /// Intermediate deserialization type so a missing `[proxy]` table yields full
@@ -192,8 +245,9 @@ mod tests {
         let cfg = ProxyConfig::default();
         assert_eq!(cfg.port, 8234);
         assert_eq!(cfg.bind_address, "127.0.0.1");
-        assert!(!cfg.auth.require_token);
-        // Secure default: anonymous access is off
+        // Secure default: a token is required and anonymous access is off.
+        assert!(cfg.auth.require_token);
+        assert!(cfg.auth.tokens.is_empty());
         assert!(!cfg.network.allow_anonymous);
     }
 
@@ -248,7 +302,7 @@ denied_ips = ["10.0.0.5"]
         let cfg = ProxyConfig::load(f.path()).unwrap();
         assert_eq!(cfg.port, 7777);
         assert_eq!(cfg.bind_address, "127.0.0.1"); // default
-        assert!(!cfg.auth.require_token); // default
+        assert!(cfg.auth.require_token); // default: auth is on
     }
 
     #[test]
@@ -277,6 +331,65 @@ denied_ips = ["10.0.0.5"]
         assert!(cfg.auth.require_token);
         assert_eq!(cfg.auth.tokens, vec!["tok"]);
         assert!(!cfg.network.allow_anonymous);
+    }
+
+    #[test]
+    fn test_default_config_requires_a_token() {
+        let cfg = ProxyConfig::default();
+        assert!(cfg.auth.require_token, "token auth must be on by default");
+        assert!(!cfg.network.allow_anonymous, "anonymous access must be off by default");
+        assert_eq!(cfg.bind_address, "127.0.0.1");
+        // No token configured yet → the invariant refuses to start.
+        assert!(cfg.check_startup_invariants().is_err());
+    }
+
+    #[test]
+    fn test_open_access_disables_token_and_is_loopback_only() {
+        let cfg = ProxyConfig::default().with_open_access();
+        assert!(!cfg.auth.require_token);
+        assert!(cfg.check_startup_invariants().is_ok());
+
+        // The same flags on a public bind are rejected.
+        let mut public = cfg.clone();
+        public.bind_address = "0.0.0.0".to_string();
+        assert!(public.check_startup_invariants().is_err());
+    }
+
+    #[test]
+    fn test_loopback_detection() {
+        for addr in ["127.0.0.1", "127.0.0.5", "::1", "[::1]", "localhost", "LOCALHOST"] {
+            assert!(is_loopback_addr(addr), "{addr} should be loopback");
+        }
+        for addr in ["0.0.0.0", "192.168.1.5", "10.0.0.1", "::", "example.com"] {
+            assert!(!is_loopback_addr(addr), "{addr} should not be loopback");
+        }
+    }
+
+    #[test]
+    fn test_from_cli_anonymous_needs_no_token() {
+        let cfg = ProxyConfig::from_cli(
+            Some(9000),
+            Some("127.0.0.1".to_string()),
+            PathBuf::from("/store"),
+            None,
+            true,
+        );
+        assert!(!cfg.auth.require_token);
+        assert!(cfg.check_startup_invariants().is_ok());
+    }
+
+    #[test]
+    fn test_from_cli_token_enables_auth() {
+        let cfg = ProxyConfig::from_cli(
+            Some(9000),
+            Some("0.0.0.0".to_string()),
+            PathBuf::from("/store"),
+            Some("tok".to_string()),
+            false,
+        );
+        assert!(cfg.auth.require_token);
+        assert_eq!(cfg.auth.tokens, vec!["tok".to_string()]);
+        assert!(cfg.check_startup_invariants().is_ok());
     }
 
     #[test]
