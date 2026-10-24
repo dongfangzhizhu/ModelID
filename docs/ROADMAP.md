@@ -399,7 +399,7 @@ Refs: docs/ROADMAP.md#A1
 ### A8 · 构建与发布链路修复
 
 - **背景**：Dockerfile 用 `rust:1.80` 而代码需 1.82（`Option::is_none_or`）；无 `.dockerignore`；`MODELD_AUTH_TOKEN` 无人读取；CI 未跑前端测试、无依赖审计。
-- **状态**：✅ 已完成（`a8impl`）
+- **状态**：✅ 已完成（`0eea2c3`）
 - **改动点**：`docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`（新增）、`.github/workflows/ci.yml`、`deny.toml`（新增）、`Cargo.toml`、`crates/*/Cargo.toml`、`crates/modeld-cli/src/main.rs`、`.gitignore`
 - **实现要点**：
   - **Dockerfile 重写**：多阶段构建，builder 用 `rust:1.88-slim`（与 `rust-version` 一致），运行时只用 `debian:bookworm-slim` + 二进制 + ca-certificates；
@@ -665,7 +665,7 @@ Refs: docs/ROADMAP.md#A1
 | A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `c1949b5` |
 | A6 | 配置系统统一 | done | AI agent | 2026-10-24 | 2026-10-24 | `b21c673` |
 | A7 | 清除假实现 | done | AI agent | 2026-10-24 | 2026-10-24 | `234201f` |
-| A8 | 构建与发布链路修复 | done | AI agent | 2026-10-24 | 2026-10-24 | `a8impl` |
+| A8 | 构建与发布链路修复 | done | AI agent | 2026-10-24 | 2026-10-24 | `0eea2c3` |
 
 ### 阶段 B
 
@@ -701,7 +701,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
-| 2026-10-24 | A8 | 构建与发布链路：Dockerfile 多阶段（rust:1.88-slim → debian-slim，非 root，~90 MB）、新增 `.dockerignore`、`MODELD_AUTH_TOKEN` 接通 `serve`（不落盘）、`rust-version = "1.88"`（实测）、`publish = false`、`deny.toml`、CI 新增 MSRV/前端/`cargo deny`/Docker 四个 job、`.gitignore` 乱码与 `node_modules` 反忽略修复 | `a8impl` | `docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`deny.toml`、`Cargo.toml`、`crates/*/Cargo.toml`、`cli/main.rs`、`.gitignore`、`CHANGELOG.md` |
+| 2026-10-24 | A8 | 构建与发布链路：Dockerfile 多阶段（rust:1.88-slim → debian-slim，非 root，~90 MB）、新增 `.dockerignore`、`MODELD_AUTH_TOKEN` 接通 `serve`（不落盘）、`rust-version = "1.88"`（实测）、`publish = false`、`deny.toml`、CI 新增 MSRV/前端/`cargo deny`/Docker 四个 job、`.gitignore` 乱码与 `node_modules` 反忽略修复 | `0eea2c3` | `docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`deny.toml`、`Cargo.toml`、`crates/*/Cargo.toml`、`cli/main.rs`、`.gitignore`、`CHANGELOG.md` |
 | 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `234201f` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A6 | 配置系统统一：`[proxy]` 并入 `ModeldConfig`、`save_config` 改用 `toml_edit` 只重写自有段（保留注释/未知段）、token 双写 + 旧格式回退、`config get/set/list` 覆盖 20 键并给建议 | `b21c673` | `core/config.rs`、`proxy/config.rs`、`cli/main.rs`、`Cargo.toml`、`docs/proxy-setup.md`、`CHANGELOG.md` |
 | 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `c1949b5` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
