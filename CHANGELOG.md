@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld tx` moved to its own module** — `commands/tx.rs` holds `TxAction`,
+  `tx_command` and `parse_duration_str`. (ROADMAP B2)
 - **`modeld db` moved to its own module** — `commands/db.rs` holds `DbAction` and
   `db_command` (status, backup, restore, vacuum, migrate). (ROADMAP B2)
 - **`modeld store` moved to its own module** — `crates/modeld-cli/src/commands/store.rs`

@@ -503,11 +503,11 @@ Refs: docs/ROADMAP.md#A1
 ### B2 · CLI 拆分与输出层
 
 - **目标**：`main.rs` < 300 行；命令模块化；统一 `--store`、输出、退出码。
-- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store` 与 `db` 两个命令族已迁出（`main.rs` 4153 → 3931 行）
+- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx` 三个命令族已迁出（`main.rs` 4153 → 3747 行）
 - **改动点**：`crates/modeld-cli/src/main.rs` 拆为 `commands/*.rs`、`output.rs`、`error.rs`
 - **产物**：命令注册表 + `OutputFormat { Table, Json, Csv }` + `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`
 - **验收标准**：
-  - [ ] `main.rs` < 300 行，每命令一个文件 —— 已迁出 `commands/store.rs`、`commands/db.rs`，其余待迁
+  - [ ] `main.rs` < 300 行，每命令一个文件 —— 已迁出 `commands/store.rs`、`commands/db.rs`、`commands/tx.rs`，其余待迁
   - [ ] `--store` 为全局参数，子命令无需重复声明
   - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
   - [x] 退出码语义写入 `--help` 与文档 —— `modeld --help` 末尾打印 0/1/2/3 对照表（`EXIT_CODE_HELP`）
@@ -518,6 +518,7 @@ Refs: docs/ROADMAP.md#A1
   - `modeld --help` 末段输出退出码对照表；未知子命令仍由 clap 以 2 退出。
   - `commands/store.rs`：`StoreAction` + `store_command` + `store_migrate_command` 迁出，`modeld store locate --store <p>` 行为不变（实测打印解析后的路径）。
   - `commands/db.rs`：`DbAction` + `db_command` 迁出，`modeld db status --store <p>` 实测输出 schema v4 / 204 KB / WAL 状态不变。
+  - `commands/tx.rs`：`TxAction` + `tx_command` + `parse_duration_str` 迁出，`modeld tx recover --store <p>` 实测仍打印本地化的「没有未完成的事务」。
 - **估算**：5 人日 ｜ **依赖**：无（可与 A 并行）
 
 ### B3 · 日志与可观测性
