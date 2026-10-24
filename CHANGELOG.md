@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`modeld config` moved to its own module** — `commands/config.rs` holds
+  `ConfigAction`, `config_command`, `CONFIG_KEYS` and the get/set/validation helpers.
+  (ROADMAP B2)
 - **`modeld tx` moved to its own module** — `commands/tx.rs` holds `TxAction`,
   `tx_command` and `parse_duration_str`. (ROADMAP B2)
 - **`modeld db` moved to its own module** — `commands/db.rs` holds `DbAction` and
