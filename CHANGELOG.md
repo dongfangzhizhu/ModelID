@@ -7,7 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Proxy streams instead of buffering** — `/v1/blobs/{hash}` and the HF-proxy
+  routes hand a `File` handle to tiny_http instead of reading the whole object
+  into a `Vec`, so memory stays flat regardless of model size (measured: 0 MB
+  RSS growth for a 512 MiB download). (ROADMAP A2)
+- **Proxy serves requests concurrently** — the accept loop now feeds a fixed-size
+  worker pool (one thread per core, max 16) instead of handling one request at a
+  time; a stalled download no longer blocks `/health` or `/v1/models`.
+  (ROADMAP A2)
+- **Range responses are chunked** — a single `206` is capped at 64 MiB
+  (configurable via `[proxy] range_chunk_bytes`); clients that ask for
+  `bytes=0-` on a huge object get the first window and re-request the rest.
+  (ROADMAP A2)
+- **HF-proxy downloads use their own SQLite connection** — a cache miss no longer
+  holds the shared DB mutex for the whole upstream transfer. (ROADMAP A2)
+
 ### Fixed
+
+- **A panicking request handler no longer kills the proxy** — every job runs under
+  `catch_unwind` and a poisoned DB mutex is recovered instead of aborting the
+  request; the old `.expect("db lock poisoned")` paths are gone. (ROADMAP A2)
+- **Scan progress counters could go backwards** — hashing runs on rayon threads, so
+  two callbacks could deliver `files_scanned=2` before `files_scanned=1`. The
+  counter increment and the event send are now serialized. (found by the WebUI
+  property test `prop_scan_lifecycle_...`)
 
 - **Atomic link replacement** — dedup no longer deletes a duplicate before
   linking it. The link is staged under a temporary name in the same directory

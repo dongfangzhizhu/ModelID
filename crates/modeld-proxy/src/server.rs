@@ -22,11 +22,23 @@ use anyhow::{anyhow, Result};
 use modeld_core::{Blake3Hash, CasStore, Database, Downloader, HfCache};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use tiny_http::{Header, Method, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+/// Upper bound on worker threads serving requests.
+const MAX_WORKERS: usize = 16;
+
+/// A unit of work handed to a worker thread.
+///
+/// Boxed closures rather than raw `tiny_http::Request` values keep the pool
+/// testable: a test can push a panicking job and assert the pool survives.
+type Job = Box<dyn FnOnce() + Send + 'static>;
 
 /// Runtime statistics surfaced via `GET /health` and the CLI.
 #[derive(Debug, Clone)]
@@ -73,42 +85,125 @@ impl ProxyServer {
     }
 
     fn run_loop(&self, server: Server, shutdown: Arc<AtomicBool>) -> Result<()> {
-        let db = open_db(&self.store_path)?;
-        let db = Arc::new(Mutex::new(db));
-        let cas = Arc::new(CasStore::new(&self.store_path));
-        let hf_cache = Arc::new(HfCache::new(&self.store_path));
-        let store_for_dl = self.store_path.clone();
-        // Optional HF base URL override (mirror or test mock). Read once at
-        // startup; absent → Downloader defaults to https://huggingface.co.
-        let hf_base = std::env::var("MODELD_HF_BASE").ok();
-        let started_at = Instant::now();
+        let ctx = Arc::new(RequestContext {
+            config: self.config.clone(),
+            db: Arc::new(Mutex::new(open_db(&self.store_path)?)),
+            cas: Arc::new(CasStore::new(&self.store_path)),
+            hf_cache: Arc::new(HfCache::new(&self.store_path)),
+            store_path: self.store_path.clone(),
+            // Optional HF base URL override (mirror or test mock). Read once at
+            // startup; absent → Downloader defaults to https://huggingface.co.
+            hf_base: std::env::var("MODELD_HF_BASE").ok(),
+            started_at: Instant::now(),
+        });
 
+        let (tx, rx) = mpsc::channel::<Job>();
+        let workers = spawn_workers(worker_count(), Arc::new(Mutex::new(rx)))?;
+
+        let mut accept_error = None;
         while !shutdown.load(Ordering::SeqCst) {
-            let request = match server.recv_timeout(Duration::from_millis(200)) {
-                Ok(Some(request)) => request,
+            match server.recv_timeout(Duration::from_millis(200)) {
+                Ok(Some(request)) => {
+                    let ctx = Arc::clone(&ctx);
+                    let job: Job = Box::new(move || run_request(request, &ctx));
+                    if tx.send(job).is_err() {
+                        accept_error = Some(anyhow!("proxy worker pool stopped unexpectedly"));
+                        break;
+                    }
+                }
                 Ok(None) => continue,
-                Err(e) => return Err(anyhow!("proxy server receive error: {}", e)),
-            };
-            let mut downloader = Downloader::new(&store_for_dl);
-            if let Some(ref base) = hf_base {
-                downloader = downloader.with_hf_base_url(base);
-            }
-            let ctx = RequestContext {
-                config: self.config.clone(),
-                db: db.clone(),
-                cas: cas.clone(),
-                hf_cache: hf_cache.clone(),
-                downloader,
-                started_at,
-            };
-            if let Err(e) = handle_request(request, &ctx) {
-                eprintln!("request handler error: {:#}", e);
+                Err(e) => {
+                    accept_error = Some(anyhow!("proxy server receive error: {}", e));
+                    break;
+                }
             }
         }
 
+        // Closing the channel tells idle workers to exit; requests already being
+        // served are allowed to finish before `join` returns.
+        drop(tx);
+        for handle in workers {
+            let _ = handle.join();
+        }
+
+        if let Some(err) = accept_error {
+            return Err(err);
+        }
         eprintln!("{}", modeld_core::t("proxy.shutdown"));
         Ok(())
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker pool
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Number of request workers: one per core, clamped to a sane range.
+fn worker_count() -> usize {
+    thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, MAX_WORKERS)
+}
+
+/// Spawn `count` workers pulling jobs off `rx`.
+///
+/// The receiver is shared behind a mutex that is held only while *waiting* for
+/// the next job, never while a job runs, so requests are served in parallel.
+fn spawn_workers(count: usize, rx: Arc<Mutex<Receiver<Job>>>) -> Result<Vec<JoinHandle<()>>> {
+    let mut handles = Vec::with_capacity(count);
+    for i in 0..count {
+        let rx = Arc::clone(&rx);
+        let handle = thread::Builder::new()
+            .name(format!("modeld-proxy-{i}"))
+            .spawn(move || worker_loop(rx))
+            .map_err(|e| anyhow!("failed to spawn proxy worker {}: {}", i, e))?;
+        handles.push(handle);
+    }
+    Ok(handles)
+}
+
+fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>) {
+    loop {
+        let job = {
+            let guard = match rx.lock() {
+                Ok(guard) => guard,
+                // A panicking handler poisons this mutex; the pool is still
+                // usable, so recover the guard instead of dying with it.
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match guard.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            }
+        };
+        // One bad request must never take the whole server down.
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(job)) {
+            eprintln!("proxy: request handler panicked: {}", panic_message(payload.as_ref()));
+        }
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+fn run_request(request: Request, ctx: &RequestContext) {
+    if let Err(e) = handle_request(request, ctx) {
+        eprintln!("request handler error: {:#}", e);
+    }
+}
+
+/// Acquire the shared DB connection, recovering from a poisoned mutex.
+///
+/// A handler panic poisons the mutex, but the database itself stays consistent
+/// (rusqlite rolls back the failed statement); recovering is safer than turning
+/// every later request into a panic.
+fn lock_db(db: &Mutex<Database>) -> std::sync::MutexGuard<'_, Database> {
+    db.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Per-request shared context.
@@ -117,13 +212,14 @@ struct RequestContext {
     db: Arc<Mutex<Database>>,
     cas: Arc<CasStore>,
     hf_cache: Arc<HfCache>,
-    downloader: Downloader,
+    store_path: PathBuf,
+    hf_base: Option<String>,
     started_at: Instant,
 }
 
 /// Handle a single request. The request is consumed by exactly one
 /// `request.respond(...)` call along the taken branch.
-fn handle_request(request: tiny_http::Request, ctx: &RequestContext) -> Result<()> {
+fn handle_request(request: Request, ctx: &RequestContext) -> Result<()> {
     let url = request.url().to_string();
     let method = request.method().clone();
     let peer = peer_ip(&request);
@@ -184,10 +280,8 @@ fn handle_request(request: tiny_http::Request, ctx: &RequestContext) -> Result<(
 // Route handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn handle_list_models(request: tiny_http::Request, ctx: &RequestContext) -> Result<()> {
-    let db = ctx.db.lock().expect("db lock poisoned");
-    let models = db.list_models(None)?;
-    drop(db);
+fn handle_list_models(request: Request, ctx: &RequestContext) -> Result<()> {
+    let models = lock_db(&ctx.db).list_models(None)?;
 
     let total_count = models.len();
     let total_size: i64 = models.iter().map(|m| m.size_bytes).sum();
@@ -215,11 +309,7 @@ fn handle_list_models(request: tiny_http::Request, ctx: &RequestContext) -> Resu
     respond(request, StatusCode(200), json_content_type(), body.as_bytes())
 }
 
-fn handle_get_blob(
-    request: tiny_http::Request,
-    ctx: &RequestContext,
-    hash_hex: &str,
-) -> Result<()> {
+fn handle_get_blob(request: Request, ctx: &RequestContext, hash_hex: &str) -> Result<()> {
     let hash = match Blake3Hash::from_hex(hash_hex) {
         Ok(h) => h,
         Err(_) => {
@@ -249,17 +339,16 @@ fn handle_get_blob(
         request.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.as_str());
 
     if let Some((start, end)) = parse_range(range_header, total_len) {
-        stream_range(request, &path, start, end, total_len)
+        // Cap the size of a single 206: a client asking for `bytes=0-` on a
+        // 20 GB model gets the first window and re-requests the rest.
+        let max_end = start.saturating_add(ctx.config.range_chunk_bytes.max(1) - 1);
+        stream_range(request, &path, start, end.min(max_end), total_len)
     } else {
         stream_full(request, &path, total_len)
     }
 }
 
-fn handle_hf_proxy(
-    request: tiny_http::Request,
-    ctx: &RequestContext,
-    parts: &HfProxyParts,
-) -> Result<()> {
+fn handle_hf_proxy(request: Request, ctx: &RequestContext, parts: &HfProxyParts) -> Result<()> {
     let repo_id = format!("{}/{}", parts.org, parts.repo);
 
     // Fast path: the fake HF cache already has this revision/file.
@@ -272,21 +361,22 @@ fn handle_hf_proxy(
 
     // Cache miss → pull through modeld (real HuggingFace). The Downloader
     // stores into CAS + fake HF cache, so subsequent requests hit above.
-    let mut db = ctx.db.lock().expect("db lock poisoned");
-    match ctx.downloader.download_hf_file(
-        &mut db,
-        &repo_id,
-        &parts.file,
-        Some(&parts.revision),
-        None,
-    ) {
+    //
+    // A download can take minutes, so it gets its own SQLite connection:
+    // holding the shared one would stall /health and /v1/models for every
+    // other client for the whole transfer.
+    let mut db = open_db(&ctx.store_path)?;
+    let mut downloader = Downloader::new(&ctx.store_path);
+    if let Some(base) = ctx.hf_base.as_deref() {
+        downloader = downloader.with_hf_base_url(base);
+    }
+
+    match downloader.download_hf_file(&mut db, &repo_id, &parts.file, Some(&parts.revision), None) {
         Ok(result) => {
-            drop(db);
             let blake3 = result.blake3_hash.as_hex().to_string();
             stream_file_with_headers(request, &result.cas_path, "miss", Some(&blake3))
         }
         Err(e) => {
-            drop(db);
             let msg = format!("hf proxy download failed: {:#}", e);
             respond(request, StatusCode(502), text_content_type(), msg.as_bytes())
         }
@@ -297,75 +387,65 @@ fn handle_hf_proxy(
 // Response helpers (each consumes the request via respond())
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn respond(
-    request: tiny_http::Request,
-    status: StatusCode,
-    content_type: Header,
-    body: &[u8],
-) -> Result<()> {
+fn respond(request: Request, status: StatusCode, content_type: Header, body: &[u8]) -> Result<()> {
     let response = Response::empty(status)
         .with_header(content_type)
         .with_data(Cursor::new(Vec::from(body)), Some(body.len()));
     request.respond(response).map_err(|e| anyhow!("failed to write response: {}", e))
 }
 
-fn stream_full(request: tiny_http::Request, path: &std::path::Path, total_len: u64) -> Result<()> {
+/// Serve a whole object without buffering it.
+///
+/// tiny_http streams the reader straight to the socket (`io::copy`), so peak
+/// memory stays at one copy buffer no matter how large the model is.
+fn stream_full(request: Request, path: &Path, total_len: u64) -> Result<()> {
     let file = File::open(path)?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut all = Vec::with_capacity(total_len as usize);
-    reader.read_to_end(&mut all)?;
+    let length = to_usize(total_len)?;
     let response = Response::empty(StatusCode(200))
         .with_header(octet_content_type())
-        .with_header(header("Content-Length", &total_len.to_string()))
         .with_header(header("Accept-Ranges", "bytes"))
-        .with_data(Cursor::new(all), Some(total_len as usize));
+        .with_data(file.take(total_len), Some(length));
     request.respond(response).map_err(|e| anyhow!("stream full failed: {}", e))
 }
 
-fn stream_range(
-    request: tiny_http::Request,
-    path: &std::path::Path,
-    start: u64,
-    end: u64,
-    total_len: u64,
-) -> Result<()> {
+/// Serve `start..=end` as a 206, streaming from a seeked file handle.
+fn stream_range(request: Request, path: &Path, start: u64, end: u64, total_len: u64) -> Result<()> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
-    let length = end - start + 1;
-    let mut buf = vec![0u8; length as usize];
-    file.read_exact(&mut buf)?;
-
+    let length = end.saturating_sub(start) + 1;
     let content_range = format!("bytes {}-{}/{}", start, end, total_len);
     let response = Response::empty(StatusCode(206))
         .with_header(octet_content_type())
-        .with_header(header("Content-Length", &length.to_string()))
         .with_header(header("Content-Range", &content_range))
         .with_header(header("Accept-Ranges", "bytes"))
-        .with_data(Cursor::new(buf), Some(length as usize));
+        .with_data(file.take(length), Some(to_usize(length)?));
     request.respond(response).map_err(|e| anyhow!("stream range failed: {}", e))
 }
 
+/// Serve a whole file with the modeld cache headers, without buffering it.
 fn stream_file_with_headers(
-    request: tiny_http::Request,
-    path: &std::path::Path,
+    request: Request,
+    path: &Path,
     cache_status: &str,
     blake3: Option<&str>,
 ) -> Result<()> {
     let len = std::fs::metadata(path)?.len();
-    let mut file = File::open(path)?;
-    let mut data = Vec::with_capacity(len as usize);
-    file.read_to_end(&mut data)?;
-
+    let file = File::open(path)?;
     let mut response = Response::empty(StatusCode(200))
         .with_header(octet_content_type())
-        .with_header(header("Content-Length", &len.to_string()))
         .with_header(header("X-Modeld-Cache", cache_status))
         .with_header(header("Accept-Ranges", "bytes"));
     if let Some(h) = blake3 {
         response = response.with_header(header("X-Modeld-Blake3", h));
     }
-    let response = response.with_data(Cursor::new(data), Some(len as usize));
+    let response = response.with_data(file.take(len), Some(to_usize(len)?));
     request.respond(response).map_err(|e| anyhow!("stream hf failed: {}", e))
+}
+
+/// Narrow a content length to `usize`, which tiny_http needs for the header.
+fn to_usize(len: u64) -> Result<usize> {
+    usize::try_from(len)
+        .map_err(|_| anyhow!("object of {} bytes is too large for this platform", len))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -539,6 +619,31 @@ mod tests {
         assert!(match_hf_proxy_url("/v1/hf-proxy/org/repo/resolve/main/file\0.bin").is_none());
         // absolute path in file
         assert!(match_hf_proxy_url("/v1/hf-proxy/org/repo/resolve/main//etc").is_none());
+    }
+
+    #[test]
+    fn test_worker_pool_survives_panicking_job() {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let workers = spawn_workers(2, Arc::new(Mutex::new(rx))).unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel::<&'static str>();
+
+        // One panicking job must not take its worker (or the pool) down.
+        tx.send(Box::new(|| panic!("boom"))).unwrap();
+        tx.send(Box::new(move || {
+            done_tx.send("served").unwrap();
+        }))
+        .unwrap();
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(5)).expect("pool stopped after a panic"),
+            "served"
+        );
+
+        drop(tx);
+        for worker in workers {
+            worker.join().expect("worker thread should exit cleanly");
+        }
     }
 
     #[test]

@@ -253,3 +253,82 @@ fn test_hf_proxy_hit_from_fake_cache() {
     resp.into_reader().read_to_end(&mut body).unwrap();
     assert_eq!(body, content);
 }
+
+#[test]
+fn test_range_response_is_chunked_by_config() {
+    // A "bytes=0-" request for a large object must not become one huge
+    // response: the server caps each 206 and the client resumes from there.
+    let mut config = ProxyConfig::default().with_open_access();
+    config.range_chunk_bytes = 1024;
+    let proxy = TestProxy::start(config);
+
+    let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    let (hash, size) = seed_blob(&proxy.store_path, &payload);
+    assert_eq!(size, 4096);
+
+    let url = format!("{}/v1/blobs/{}", proxy.url, hash);
+    let resp = ureq::get(&url).set("Range", "bytes=0-").call().unwrap();
+    assert_eq!(resp.status(), 206);
+    assert_eq!(resp.header("Content-Range").unwrap(), "bytes 0-1023/4096");
+
+    let mut body = Vec::new();
+    resp.into_reader().read_to_end(&mut body).unwrap();
+    assert_eq!(body.len(), 1024);
+    assert_eq!(body, &payload[..1024]);
+
+    // The next window is addressable with a plain absolute range.
+    let resp = ureq::get(&url).set("Range", "bytes=1024-4095").call().unwrap();
+    assert_eq!(resp.header("Content-Range").unwrap(), "bytes 1024-2047/4096");
+    let mut body = Vec::new();
+    resp.into_reader().read_to_end(&mut body).unwrap();
+    assert_eq!(body, &payload[1024..2048]);
+
+    // Without a Range header the whole object is still served as a 200.
+    let resp = ureq::get(&url).call().unwrap();
+    assert_eq!(resp.status(), 200);
+    let mut body = Vec::new();
+    resp.into_reader().read_to_end(&mut body).unwrap();
+    assert_eq!(body, payload);
+}
+
+#[test]
+fn test_health_stays_responsive_during_stalled_download() {
+    use std::io::Write;
+
+    let proxy = TestProxy::start(ProxyConfig::default().with_open_access());
+    // Big enough that the socket buffers cannot swallow the whole body.
+    let payload = vec![7u8; 8 * 1024 * 1024];
+    let (hash, _size) = seed_blob(&proxy.store_path, &payload);
+
+    // Ask for the blob, read the status line, then stop reading: the worker
+    // serving this request blocks on write until we drain or close the socket.
+    let addr = proxy.url.trim_start_matches("http://").to_string();
+    let mut stalled = std::net::TcpStream::connect(&addr).unwrap();
+    write!(stalled, "GET /v1/blobs/{} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n", hash)
+        .unwrap();
+    stalled.flush().unwrap();
+    let mut head = [0u8; 64];
+    let _ = stalled.read(&mut head);
+
+    // While that download is stalled, /health must keep answering promptly.
+    // A single-threaded server would block here until the timeout below.
+    let health_url = format!("{}/health", proxy.url);
+    let mut worst = std::time::Duration::ZERO;
+    for _ in 0..20 {
+        let started = std::time::Instant::now();
+        let resp = ureq::get(&health_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .call()
+            .expect("/health must answer while another client's download is stalled");
+        assert_eq!(resp.status(), 200);
+        worst = worst.max(started.elapsed());
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    drop(stalled);
+    assert!(
+        worst < std::time::Duration::from_millis(500),
+        "/health took {:?} while a download was stalled; requests are not concurrent",
+        worst
+    );
+}

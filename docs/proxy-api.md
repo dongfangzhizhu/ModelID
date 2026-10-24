@@ -69,7 +69,27 @@ Download a CAS object by its 64-char BLAKE3 hash. Supports HTTP Range.
 **Response** (range): `206 Partial Content`,
 `Content-Range: bytes 0-1023/<size>`, `Content-Length: 1024`.
 
+A single range response is capped at **64 MiB** (`[proxy] range_chunk_bytes`).
+A client that asks for `bytes=0-` on a 20 GB object receives
+`Content-Range: bytes 0-67108863/21474836480` and must re-request the next
+window. This keeps memory flat and makes downloads resumable; it is the same
+contract any chunked range server offers.
+
 **Errors**: `400` (invalid hash), `404` (blob absent).
+
+## Concurrency and resource use
+
+- **Streaming**: responses are read straight from the CAS file into the socket.
+  Server memory does not depend on object size (a 512 MiB download grows RSS by
+  less than 1 MB). See `scripts/bench-proxy-streaming.ps1`.
+- **Worker pool**: requests are served by a fixed pool (one thread per core, at
+  most 16). A slow or stalled client occupies one worker, not the whole server.
+- **Panic isolation**: a handler panic is caught, logged, and the worker keeps
+  serving. A poisoned DB mutex is recovered rather than aborting every later
+  request.
+- **HF cache miss**: the upstream download runs on its own SQLite connection, so
+  `/health` and `/v1/models` stay responsive while a multi-GB model is
+  being fetched.
 
 ### `GET /v1/hf-proxy/{org}/{repo}/resolve/{revision}/{file}`
 

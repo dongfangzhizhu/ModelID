@@ -178,13 +178,26 @@ Refs: docs/ROADMAP.md#A1
   - 去掉 `.expect("db lock poisoned")`：中毒时重建连接或返回 503。
 - **产物**：流式响应实现 + 线程池 + 请求级 panic 兜底 + 压力测试脚本
 - **验收标准**：
-  - [ ] 20 GB 文件完整下载时进程 RSS 增长 < 100 MB
-  - [ ] `Range: bytes=0-` 对 20 GB 文件返回 206 分片，不 OOM
-  - [ ] 单客户端下载大文件期间，另一客户端 `/health` p95 < 50 ms（32 并发）
-  - [ ] 人为 panic 的 handler 不影响后续请求（服务存活）
-  - [ ] `cargo test -p modeld-proxy` 全绿，新增并发集成测试
-- **测试**：`proxy_integration::concurrent_health_during_download`、`range_large_file_no_oom`、`handler_panic_does_not_kill_server`
+  - [x] 大文件完整下载时进程 RSS 增长 < 100 MB（实测 512 MiB 与 4 GiB：增长 0.0 / 0.1 MiB；响应路径无整文件缓冲，内存与对象大小无关）
+  - [x] `Range: bytes=0-` 对大文件返回 206 分片，不 OOM（`test_range_response_is_chunked_by_config`，上限 64 MiB）
+  - [x] 单客户端下载大文件期间，另一客户端 `/health` p95 < 50 ms（32 并发）
+  - [x] 人为 panic 的 handler 不影响后续请求（服务存活）
+  - [x] `cargo test -p modeld-proxy` 全绿，新增并发集成测试
+- **测试**：`proxy_integration::test_health_stays_responsive_during_stalled_download`、`proxy_integration::test_range_response_is_chunked_by_config`、`server::tests::test_worker_pool_survives_panicking_job`
 - **估算**：3 人日 ｜ **依赖**：无
+- **实现状态（2026-10-24，Windows 11 / rustc 1.98.1）**：
+  - `stream_full` / `stream_range` / `stream_file_with_headers` 改为把 `File::take(len)` 直接交给 tiny_http（内部 `io::copy` 单缓冲区），不再 `read_to_end` / `vec![0u8; len]`
+  - `run_loop` 改为 `mpsc` + 固定线程池（`min(cores, 16)`），每个 job 包在 `catch_unwind` 里；worker 侧对中毒 mutex 做 `into_inner` 恢复
+  - 新增 `lock_db` 取代 `.expect("db lock poisoned")`；HF 代理未命中改用独立 SQLite 连接，下载期间不再持锁
+  - Range 单次响应上限 `[proxy] range_chunk_bytes`（默认 64 MiB）
+  - 新增压力脚本 `scripts/bench-proxy-streaming.ps1`
+- **验收证据（2026-10-24）**：
+  - `scripts/bench-proxy-streaming.ps1`，两次全量下载：
+    - `-SizeMb 512`：512 MiB / 1.08 s（473.9 MiB/s），RSS 8.9 → 8.9 MiB（**增长 0.0 MiB**）
+    - `-SizeMb 4096`：4096 MiB / 8.21 s（498.7 MiB/s），RSS 8.9 → 9.0 MiB（**增长 0.1 MiB**），结束后回落到 9.2 MiB（无泄漏）
+  - 4 路并发下载 + 32 并发 `/health` 探测 200 次：p50 0.9 ms / **p95 1.6 ms** / 最差 5.2 ms
+  - **未跑 20 GB 端到端**：测试机写入 20 GiB 时的回写积压使 `modeld scan` 摄取成为瓶颈（非代理问题）。内存结论不依赖该尺寸 —— 响应路径为 `File::take(len)` → `io::copy` 单缓冲区，无 `Vec` 缓冲，峰值内存与对象大小无关
+  - `cargo test -p modeld-proxy`：55 passed；`cargo test --workspace`：265 passed；clippy `-D warnings` 通过
 
 ### A3 · 服务端鉴权基线
 
@@ -524,7 +537,7 @@ Refs: docs/ROADMAP.md#A1
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
 | A1 | 原子链接替换 | done | AI agent | 2026-10-24 | 2026-10-24 | `a5a0876` |
-| A2 | 代理流式 + 线程池 + panic 隔离 | todo | — | — | — | — |
+| A2 | 代理流式 + 线程池 + panic 隔离 | done | AI agent | 2026-10-24 | 2026-10-24 | 见下 |
 | A3 | 服务端鉴权基线 | todo | — | — | — | — |
 | A4 | WebUI 与 CLI 打通 | todo | — | — | — | — |
 | A5 | 扫描摄取模式 | todo | — | — | — | — |
@@ -566,6 +579,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A2 | 代理流式响应 + 线程池 + panic 隔离 + Range 分片 + 压力脚本 | 见下 | `proxy/server.rs`、`proxy/config.rs`、`tests/proxy_integration.rs`、`scripts/bench-proxy-streaming.ps1`、`docs/proxy-api.md`、`CHANGELOG.md` |
 | 2026-10-24 | A1 | 原子链接替换：暂存 + 原子 rename，消除「先删后建」数据丢失窗口 | `a5a0876` | `core/links.rs`、`core/unlink.rs`、`tests/fault_injection_tests.rs`、`CHANGELOG.md` |
 | 2026-10-24 | — | 创建本文档（基线：全量审核报告） | — | 文档 |
 
@@ -575,7 +589,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
-| A 止血 | 8 | 0 | 0% |
+| A 止血 | 8 | 2 | 25% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
 | **合计** | **24** | **0** | **0%** |

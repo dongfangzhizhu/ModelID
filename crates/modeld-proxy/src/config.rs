@@ -36,7 +36,15 @@ pub struct ProxyConfig {
     pub store_path: PathBuf,
     pub auth: AuthConfig,
     pub network: NetworkConfig,
+    /// Largest byte range served in a single `206` response.
+    ///
+    /// A `Range: bytes=0-` request for a 20 GB model would otherwise be one
+    /// 20 GB response; chunking keeps memory flat and lets clients resume.
+    pub range_chunk_bytes: u64,
 }
+
+/// Default for [`ProxyConfig::range_chunk_bytes`]: 64 MiB.
+pub const DEFAULT_RANGE_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
 
 /// `[proxy.auth]` — Bearer-token access control.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -69,6 +77,7 @@ impl Default for ProxyConfig {
             store_path: PathBuf::from(".modeld"),
             auth: AuthConfig::default(),
             network: NetworkConfig::default(),
+            range_chunk_bytes: DEFAULT_RANGE_CHUNK_BYTES,
         }
     }
 }
@@ -154,6 +163,8 @@ struct ProxyConfigFile {
     auth: AuthConfig,
     #[serde(default)]
     network: NetworkConfig,
+    #[serde(default)]
+    range_chunk_bytes: Option<u64>,
 }
 
 impl ProxyConfigFile {
@@ -165,6 +176,7 @@ impl ProxyConfigFile {
             store_path: self.store_path.unwrap_or(default.store_path),
             auth: self.auth,
             network: self.network,
+            range_chunk_bytes: self.range_chunk_bytes.unwrap_or(default.range_chunk_bytes),
         }
     }
 }
