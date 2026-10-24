@@ -189,11 +189,14 @@ fn adopt_file(cas: &CasStore, file: &ScannedFile) -> Option<String> {
     // link would publish the wrong content under the right hash.
     match std::fs::metadata(&file.path) {
         Ok(meta) if meta.len() == file.size => {}
-        Ok(meta) => return Some(format!(
-            "file changed since it was scanned ({} bytes now, {} when scanned); re-run the scan",
-            meta.len(),
-            file.size
-        )),
+        Ok(meta) => {
+            return Some(format!(
+                "file changed since it was scanned ({} bytes now, {} when scanned); \
+                 re-run the scan",
+                meta.len(),
+                file.size
+            ))
+        }
         Err(e) => return Some(format!("stat failed before adopt: {e}")),
     }
 

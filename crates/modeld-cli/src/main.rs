@@ -473,6 +473,12 @@ enum ConfigAction {
         #[arg(short = 's', long)]
         store: Option<PathBuf>,
     },
+    /// List every configurable key and its current value
+    List {
+        /// Store directory
+        #[arg(short = 's', long)]
+        store: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2835,25 +2841,19 @@ fn proxy_start_command(opts: ProxyStartOptions) -> Result<()> {
             "⚠  anonymous access enabled — reachable from this machine only".yellow().bold()
         );
     } else {
-        // Resolution order: --token, config file, store config, env, generated.
+        // Resolution order: --token, --config file, <store>/modeld.toml (either
+        // schema), MODELD_AUTH_TOKEN, generated.
         let mut store_config = load_config(&store).unwrap_or_default();
         let configured = token
             .or_else(|| cfg.auth.tokens.first().cloned())
-            .or_else(|| {
-                let saved = store_config.auth.token.clone();
-                if saved.is_empty() {
-                    None
-                } else {
-                    Some(saved)
-                }
-            })
+            .or_else(|| store_config.proxy_tokens().into_iter().next())
             .or_else(|| std::env::var("MODELD_AUTH_TOKEN").ok().filter(|t| !t.is_empty()));
 
         let (token_value, generated) = match configured {
             Some(t) => (t, false),
             None => {
                 let t = Uuid::new_v4().to_string();
-                store_config.auth.token = t.clone();
+                store_config.set_proxy_token(&t);
                 save_config(&store, &store_config)?;
                 (t, true)
             }
@@ -2989,12 +2989,27 @@ fn proxy_token_rotate_command(store_path: PathBuf) -> Result<()> {
     let mut config = load_config(&store_path).unwrap_or_default();
 
     let new_token = Uuid::new_v4().to_string();
-    config.auth.token = new_token.clone();
+    // Write `[auth] token` *and* `[proxy.auth] tokens`: the proxy reads the
+    // latter, older versions read the former. Rotating only one left the server
+    // accepting the old token after a restart (A6).
+    config.set_proxy_token(&new_token);
     save_config(&store_path, &config)?;
 
     println!("{}", "✓ Bearer token rotated successfully.".green().bold());
     println!("  {}", format!("New token: {}", new_token).bold());
+    println!(
+        "  {}",
+        format!(
+            "Written to {}/modeld.toml as [auth] token and [proxy.auth] tokens.",
+            store_path.display()
+        )
+        .dimmed()
+    );
     println!("  {}", "Restart the proxy server for the change to take effect.".dimmed());
+    println!(
+        "  {}",
+        "(--reload / SIGHUP hot-reload is not implemented yet; see ROADMAP §12.3)".dimmed()
+    );
     Ok(())
 }
 
@@ -3164,26 +3179,146 @@ fn config_command(action: ConfigAction) -> Result<()> {
             let store_path = resolve_store(store);
             let mut config = load_config(&store_path)?;
             config_set_value(&mut config, &key, &value)?;
+            // `save_config` merges into the existing document, so unrelated
+            // sections (`[proxy]`, experiments, comments) survive (A6).
             save_config(&store_path, &config)?;
             println!("{} {} = {}", "✓".green().bold(), key.bold(), value);
+            Ok(())
+        }
+        ConfigAction::List { store } => {
+            let store_path = resolve_store(store);
+            let config = load_config(&store_path)?;
+            println!(
+                "{} {}",
+                "modeld config".cyan().bold(),
+                store_path.join("modeld.toml").display().to_string().dimmed()
+            );
+            println!("{}", "─".repeat(60).cyan());
+            for key in CONFIG_KEYS {
+                // Every key in CONFIG_KEYS is handled by config_get_value.
+                let value = config_get_value(&config, key).unwrap_or_else(|_| "<error>".into());
+                println!("  {:<28} {}", key, value);
+            }
             Ok(())
         }
     }
 }
 
+/// Every key `modeld config` can read or write, in display order.
+const CONFIG_KEYS: &[&str] = &[
+    "store.path",
+    "serve.host",
+    "serve.port",
+    "serve.webui",
+    "serve.proxy",
+    "dedup.strategy",
+    "dedup.min_size_bytes",
+    "gc.quarantine_ttl_days",
+    "gc.auto_gc",
+    "auth.token",
+    "auth.allow_ips",
+    "scan.extensions",
+    "proxy.port",
+    "proxy.bind_address",
+    "proxy.range_chunk_bytes",
+    "proxy.auth.require_token",
+    "proxy.auth.tokens",
+    "proxy.network.allow_anonymous",
+    "proxy.network.allowed_ips",
+    "proxy.network.denied_ips",
+];
+
+/// Levenshtein distance, used only for "did you mean" suggestions.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Closest known key to `input`, if it is close enough to be worth suggesting.
+fn suggest_key(input: &str) -> Option<&'static str> {
+    let lowered = input.to_ascii_lowercase();
+    let mut best: Option<(usize, &'static str)> = None;
+    for key in CONFIG_KEYS {
+        let distance = edit_distance(&lowered, key);
+        if best.is_none_or(|(d, _)| distance < d) {
+            best = Some((distance, key));
+        }
+    }
+    match best {
+        // Accept up to a third of the key length (e.g. "serve.prot" → "serve.port").
+        Some((distance, key)) if distance * 3 <= key.len() => Some(key),
+        _ => None,
+    }
+}
+
+fn unknown_config_key(key: &str) -> anyhow::Error {
+    let hint = match suggest_key(key) {
+        Some(candidate) => format!(" Did you mean '{}'?", candidate),
+        None => String::new(),
+    };
+    anyhow::anyhow!(
+        "Unknown config key: '{}'.{hint} Run 'modeld config list' to see all keys.",
+        key
+    )
+}
+
+fn parse_list(value: &str) -> Vec<String> {
+    value.split(',').map(|item| item.trim().to_string()).filter(|item| !item.is_empty()).collect()
+}
+
+fn parse_bool(key: &str, value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => anyhow::bail!("Invalid boolean '{}' for {}: use true or false", other, key),
+    }
+}
+
+/// Tokens are secrets: `config get` prints a fingerprint, not the value.
+fn mask_secret(value: &str) -> String {
+    if value.is_empty() {
+        "<not set>".to_string()
+    } else if value.len() <= 8 {
+        "********".to_string()
+    } else {
+        format!("{}…{} (masked)", &value[..4], &value[value.len() - 4..])
+    }
+}
+
 fn config_get_value(config: &modeld_core::ModeldConfig, key: &str) -> Result<String> {
     match key {
-        "store.path" => Ok(config
-            .store
-            .path
-            .as_deref()
-            .unwrap_or("<not set>")
-            .to_string()),
+        "store.path" => Ok(config.store.path.as_deref().unwrap_or("<not set>").to_string()),
         "serve.host" => Ok(config.serve.host.clone()),
         "serve.port" => Ok(config.serve.port.to_string()),
+        "serve.webui" => Ok(config.serve.webui.to_string()),
+        "serve.proxy" => Ok(config.serve.proxy.to_string()),
         "dedup.strategy" => Ok(config.dedup.strategy.clone()),
+        "dedup.min_size_bytes" => Ok(config.dedup.min_size_bytes.to_string()),
         "gc.quarantine_ttl_days" => Ok(config.gc.quarantine_ttl_days.to_string()),
-        other => anyhow::bail!("Unknown config key: '{}'. Supported keys: store.path, serve.host, serve.port, dedup.strategy, gc.quarantine_ttl_days", other),
+        "gc.auto_gc" => Ok(config.gc.auto_gc.to_string()),
+        "auth.token" => Ok(mask_secret(&config.auth.token)),
+        "auth.allow_ips" => Ok(config.auth.allow_ips.join(",")),
+        "scan.extensions" => Ok(config.scan_extensions().join(",")),
+        "proxy.port" => Ok(config.proxy.port.to_string()),
+        "proxy.bind_address" => Ok(config.proxy.bind_address.clone()),
+        "proxy.range_chunk_bytes" => Ok(config.proxy.range_chunk_bytes.to_string()),
+        "proxy.auth.require_token" => Ok(config.proxy.auth.require_token.to_string()),
+        "proxy.auth.tokens" => Ok(mask_secret(&config.proxy.auth.tokens.join(","))),
+        "proxy.network.allow_anonymous" => Ok(config.proxy.network.allow_anonymous.to_string()),
+        "proxy.network.allowed_ips" => Ok(config.proxy.network.allowed_ips.join(",")),
+        "proxy.network.denied_ips" => Ok(config.proxy.network.denied_ips.join(",")),
+        other => Err(unknown_config_key(other)),
     }
 }
 
@@ -3197,30 +3332,65 @@ fn config_set_value(config: &mut modeld_core::ModeldConfig, key: &str, value: &s
             config.serve.host = value.to_string();
         }
         "serve.port" => {
-            config.serve.port = value
-                .parse::<u16>()
-                .with_context(|| format!("Invalid port number: {}", value))?;
+            config.serve.port =
+                value.parse::<u16>().with_context(|| format!("Invalid port number: {}", value))?;
         }
-        "dedup.strategy" => {
-            match value {
-                "hardlink" | "symlink" | "copy_to_cas" | "virtual_alias" => {
-                    config.dedup.strategy = value.to_string();
-                }
-                other => anyhow::bail!(
-                    "Invalid dedup strategy '{}'. Valid: hardlink, symlink, copy_to_cas, virtual_alias",
-                    other
-                ),
+        "serve.webui" => config.serve.webui = parse_bool(key, value)?,
+        "serve.proxy" => config.serve.proxy = parse_bool(key, value)?,
+        "dedup.strategy" => match value {
+            "hardlink" | "symlink" | "copy_to_cas" | "virtual_alias" => {
+                config.dedup.strategy = value.to_string();
             }
+            other => anyhow::bail!(
+                "Invalid dedup strategy '{}'. Valid: hardlink, symlink, copy_to_cas, virtual_alias",
+                other
+            ),
+        },
+        "dedup.min_size_bytes" => {
+            config.dedup.min_size_bytes = value
+                .parse::<u64>()
+                .with_context(|| format!("Invalid size in bytes: {}", value))?;
         }
         "gc.quarantine_ttl_days" => {
-            config.gc.quarantine_ttl_days = value
-                .parse::<u32>()
-                .with_context(|| format!("Invalid TTL days: {}", value))?;
+            config.gc.quarantine_ttl_days =
+                value.parse::<u32>().with_context(|| format!("Invalid TTL days: {}", value))?;
         }
-        other => anyhow::bail!(
-            "Unknown config key: '{}'. Supported keys: store.path, serve.host, serve.port, dedup.strategy, gc.quarantine_ttl_days",
-            other
-        ),
+        "gc.auto_gc" => config.gc.auto_gc = parse_bool(key, value)?,
+        // The token exists in two schemas; write both so the proxy and older
+        // readers agree (A6).
+        "auth.token" => {
+            if value.is_empty() {
+                config.auth.token.clear();
+                config.proxy.auth.tokens.clear();
+            } else {
+                config.set_proxy_token(value);
+            }
+        }
+        "auth.allow_ips" => config.auth.allow_ips = parse_list(value),
+        "scan.extensions" => config.scan.extensions = parse_list(value),
+        "proxy.port" => {
+            config.proxy.port =
+                value.parse::<u16>().with_context(|| format!("Invalid port number: {}", value))?;
+        }
+        "proxy.bind_address" => config.proxy.bind_address = value.to_string(),
+        "proxy.range_chunk_bytes" => {
+            config.proxy.range_chunk_bytes =
+                value.parse::<u64>().with_context(|| format!("Invalid byte count: {}", value))?;
+        }
+        "proxy.auth.require_token" => {
+            config.proxy.auth.require_token = parse_bool(key, value)?;
+        }
+        "proxy.auth.tokens" => {
+            let tokens = parse_list(value);
+            config.auth.token = tokens.first().cloned().unwrap_or_default();
+            config.proxy.auth.tokens = tokens;
+        }
+        "proxy.network.allow_anonymous" => {
+            config.proxy.network.allow_anonymous = parse_bool(key, value)?;
+        }
+        "proxy.network.allowed_ips" => config.proxy.network.allowed_ips = parse_list(value),
+        "proxy.network.denied_ips" => config.proxy.network.denied_ips = parse_list(value),
+        other => return Err(unknown_config_key(other)),
     }
     Ok(())
 }

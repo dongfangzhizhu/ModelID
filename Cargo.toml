@@ -45,6 +45,7 @@ colored = "2.1"
 # Phase 5: proxy server
 tiny_http = "0.12"
 toml = "0.8"
+toml_edit = "0.22"
 ctrlc = "3.4"
 mdns = "3.0"
 

@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One config schema** — `[proxy]` is now part of `ModeldConfig`
+  (`modeld-core::config::ProxyConfig`), so `modeld.toml` is described by a single
+  struct instead of two competing ones. `modeld-proxy::config` re-exports the
+  types under their historical names. (ROADMAP A6)
 - **`modeld scan` no longer copies models into the store by default** — the new
   `IngestMode` defaults to `Index`, which only writes the database. Copying is
   opt-in via `--copy`, and `--adopt` hard-links the files instead (zero extra
@@ -61,6 +65,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`modeld config list` and a wider `config get/set`** — 20 keys are covered
+  (store, serve, dedup, gc, auth, scan, proxy), an unknown key now gets a
+  "did you mean" suggestion, and `auth.token` is masked when read.
+  (ROADMAP A6)
 - **`modeld scan --adopt`** — hard-links a model into the CAS and atomically
   re-points the original path at the object (`hard_link` to a temporary name +
   `rename`, the same protocol as A1). Adopting a 128 MiB model changed the volume's
@@ -72,6 +80,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`config set` deleted every section it did not know about** — `save_config`
+  serialized the whole struct and overwrote the file, so a hand-written `[proxy]`
+  table, an experimental `[my.experiment]` block or a comment above a section was
+  lost on the next write. It now parses the existing document with `toml_edit`,
+  replaces only the tables it owns, and writes atomically. (ROADMAP A6)
+- **`proxy token-rotate` wrote a token the proxy never read** — rotation
+  updated `[auth] token` only, while the server enforces `[proxy.auth] tokens`,
+  so the old token kept working after a restart. Both sections are written now,
+  and `proxy start` falls back to `[auth] token` for older configs. (ROADMAP A6)
 - **`modeld scan --adopt` refuses a file that changed after it was scanned** —
   the cached scan result skips the re-hash, so a size check now stands between a
   stale hash and a corrupt CAS object. (ROADMAP A5)

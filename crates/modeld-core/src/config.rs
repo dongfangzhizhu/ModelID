@@ -134,6 +134,180 @@ pub struct AuthConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// [proxy] section
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Largest byte range served in a single `206` response (64 MiB).
+pub const DEFAULT_RANGE_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `[proxy]` — the local registry / proxy server.
+///
+/// Every field has a safe default, so a minimal `modeld.toml` (or none at all)
+/// starts a **closed** server on `127.0.0.1:8234`: anonymous requests get 401.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProxyConfig {
+    pub port: u16,
+    pub bind_address: String,
+    /// Overrides the store root when the proxy is started without `--store`.
+    /// Not written back unless it differs from the default, since the real store
+    /// path is resolved by the CLI.
+    #[serde(skip_serializing_if = "is_default_proxy_store_path")]
+    pub store_path: std::path::PathBuf,
+    pub auth: ProxyAuthConfig,
+    pub network: ProxyNetworkConfig,
+    /// Largest byte range served in a single `206` response. A `Range: bytes=0-`
+    /// request for a 20 GB model would otherwise be one 20 GB response.
+    pub range_chunk_bytes: u64,
+}
+
+fn is_default_proxy_store_path(path: &std::path::Path) -> bool {
+    path == std::path::Path::new(".modeld")
+}
+
+/// `[proxy.auth]` — bearer-token access control.
+///
+/// Secure by default: a proxy started without any token configuration refuses
+/// every authenticated route until a token exists. The CLI generates and
+/// persists one on first start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProxyAuthConfig {
+    /// When true, requests must carry a valid `Authorization: Bearer <token>`.
+    pub require_token: bool,
+    /// Accepted bearer tokens.
+    pub tokens: Vec<String>,
+}
+
+impl Default for ProxyAuthConfig {
+    fn default() -> Self {
+        Self { require_token: true, tokens: Vec::new() }
+    }
+}
+
+/// `[proxy.network]` — IP allow/deny lists.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct ProxyNetworkConfig {
+    /// Whether unauthenticated (anonymous) access is permitted at all.
+    pub allow_anonymous: bool,
+    /// Allow-list; empty means "allow all (that aren't denied)".
+    pub allowed_ips: Vec<String>,
+    /// Deny-list; takes precedence over the allow-list.
+    pub denied_ips: Vec<String>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            port: 8234,
+            bind_address: "127.0.0.1".to_string(),
+            store_path: std::path::PathBuf::from(".modeld"),
+            auth: ProxyAuthConfig::default(),
+            network: ProxyNetworkConfig::default(),
+            range_chunk_bytes: DEFAULT_RANGE_CHUNK_BYTES,
+        }
+    }
+}
+
+impl ProxyConfig {
+    /// Load `[proxy]` from a `modeld.toml` **file path**.
+    ///
+    /// If the file or the `[proxy]` table is absent, returns the safe default.
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+        let parsed: ModeldConfig = toml::from_str(&raw)
+            .with_context(|| format!("Failed to parse TOML config: {}", path.display()))?;
+        Ok(parsed.proxy)
+    }
+
+    /// Build a config from CLI overrides applied on top of defaults.
+    pub fn from_cli(
+        port: Option<u16>,
+        bind: Option<String>,
+        store_path: std::path::PathBuf,
+        token: Option<String>,
+        allow_anonymous: bool,
+    ) -> Self {
+        let mut cfg = Self::default();
+        if let Some(p) = port {
+            cfg.port = p;
+        }
+        if let Some(b) = bind {
+            cfg.bind_address = b;
+        }
+        cfg.store_path = store_path;
+        if let Some(t) = token {
+            cfg.auth.require_token = true;
+            cfg.auth.tokens.push(t);
+        }
+        cfg.network.allow_anonymous = allow_anonymous;
+        // Anonymous access and token auth are mutually exclusive; only the
+        // loopback bind may run without a token (enforced by the invariants).
+        if allow_anonymous && cfg.auth.tokens.is_empty() {
+            cfg.auth.require_token = false;
+        }
+        cfg
+    }
+
+    /// `bind_address:port` as a single string for `tiny_http::Server::http`.
+    pub fn bind_addr(&self) -> String {
+        format!("{}:{}", self.bind_address, self.port)
+    }
+
+    /// Return a copy of this config with anonymous access enabled.
+    ///
+    /// Convenience for integration tests and trusted-LAN setups:
+    /// `ProxyConfig::default().with_open_access()`. Anonymous access only
+    /// passes `check_startup_invariants` for a loopback bind.
+    pub fn with_open_access(mut self) -> Self {
+        self.network.allow_anonymous = true;
+        self.auth.require_token = false;
+        self
+    }
+
+    /// True when the configured bind address is a loopback address.
+    pub fn is_loopback_bind(&self) -> bool {
+        is_loopback_addr(&self.bind_address)
+    }
+
+    /// Reject configurations that would expose the store without authentication.
+    ///
+    /// Called from `ProxyServer::start` and from the CLI so a misconfigured
+    /// server fails before it binds the port, not after it starts leaking data.
+    pub fn check_startup_invariants(&self) -> Result<()> {
+        if !self.is_loopback_bind() && self.network.allow_anonymous {
+            anyhow::bail!(
+                "refusing to allow anonymous access on non-loopback bind '{}': \
+                 anonymous access is only permitted on 127.0.0.1/::1",
+                self.bind_address
+            );
+        }
+        if self.auth.require_token && self.auth.tokens.is_empty() {
+            anyhow::bail!(
+                "token authentication is required but no token is configured \
+                 (pass --token or run 'modeld proxy token-rotate')"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// True for `127.0.0.0/8`, `::1` and `localhost`.
+pub fn is_loopback_addr(addr: &str) -> bool {
+    let addr = addr.trim();
+    addr.eq_ignore_ascii_case("localhost")
+        || addr == "::1"
+        || addr == "[::1]"
+        || addr == "127.0.0.1"
+        || addr.starts_with("127.")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Root config struct
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -152,9 +326,39 @@ pub struct ModeldConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub scan: ScanConfig,
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 impl ModeldConfig {
+    /// Effective bearer tokens for the proxy, from either schema.
+    ///
+    /// `[proxy.auth] tokens` wins when it is non-empty; otherwise the legacy
+    /// `[auth] token` is used. Before A6 the two were written independently, so a
+    /// `token-rotate` that only touched `[auth]` left the proxy reading a stale
+    /// `[proxy.auth]` list — see `set_proxy_token`.
+    pub fn proxy_tokens(&self) -> Vec<String> {
+        if !self.proxy.auth.tokens.is_empty() {
+            self.proxy.auth.tokens.clone()
+        } else if !self.auth.token.is_empty() {
+            vec![self.auth.token.clone()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Set the proxy bearer token in **both** schemas.
+    ///
+    /// Keeps `[auth] token` (read by older versions and by `MODELD_AUTH_TOKEN`
+    /// users) and `[proxy.auth]` in sync, and turns token auth on. Callers persist
+    /// with `save_config`.
+    pub fn set_proxy_token(&mut self, token: &str) {
+        self.auth.token = token.to_string();
+        self.proxy.auth.tokens = vec![token.to_string()];
+        self.proxy.auth.require_token = true;
+        self.proxy.network.allow_anonymous = false;
+    }
+
     /// Extensions the scanner should accept, honouring `[scan] extensions`.
     ///
     /// Entries are normalised: a leading dot is stripped and case is lowered, so
@@ -196,20 +400,81 @@ pub fn load_config(store_path: &Path) -> Result<ModeldConfig> {
     Ok(config)
 }
 
-/// Serialize `config` and write it to `<store_path>/modeld.toml`.
+/// Serialize `config` and merge it into `<store_path>/modeld.toml`.
 ///
-/// The parent directory is created if it does not yet exist.
+/// **Only the sections this crate owns are rewritten.** Any other table — a
+/// `[proxy]` section written by an older version, an experimental
+/// `[my.experiment]` block, or a comment in an untouched section — is preserved.
+/// The previous implementation serialized the whole struct and overwrote the
+/// file, silently deleting every section it did not know about.
+///
+/// The parent directory is created if it does not yet exist. The write is
+/// atomic (temporary file + rename) so a crash cannot truncate the config.
 pub fn save_config(store_path: &Path, config: &ModeldConfig) -> Result<()> {
     std::fs::create_dir_all(store_path)
         .with_context(|| format!("Failed to create store directory: {}", store_path.display()))?;
 
     let toml_path = store_path.join("modeld.toml");
 
-    let contents = toml::to_string_pretty(config).context("Failed to serialize config to TOML")?;
+    // Parse the existing document (comments and unknown tables included), then
+    // replace only the tables we serialize.
+    let mut doc = match std::fs::read_to_string(&toml_path) {
+        Ok(existing) => existing.parse::<toml_edit::DocumentMut>().with_context(|| {
+            format!("Failed to parse existing config file: {}", toml_path.display())
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml_edit::DocumentMut::new(),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("Failed to read config file: {}", toml_path.display()))
+        }
+    };
 
-    std::fs::write(&toml_path, contents)
-        .with_context(|| format!("Failed to write config file: {}", toml_path.display()))?;
+    let fresh: toml_edit::DocumentMut = toml::to_string_pretty(config)
+        .context("Failed to serialize config to TOML")?
+        .parse()
+        .context("Serialized config was not valid TOML")?;
 
+    for (key, item) in fresh.iter() {
+        // Don't introduce empty tables (`[store]`, `[auth]`, …) that carry no
+        // information; keep them only if the file already had them.
+        let empty_new_table = matches!(item, toml_edit::Item::Table(t) if t.is_empty());
+        if empty_new_table && doc.get(key).is_none() {
+            continue;
+        }
+
+        let mut replaced = item.clone();
+        // Keep the decor (the comment block above a table header, blank lines)
+        // that belonged to the section we are replacing.
+        if let Some(existing) = doc.get(key) {
+            copy_decor(existing, &mut replaced);
+        }
+        doc[key] = replaced;
+    }
+
+    write_atomic(&toml_path, doc.to_string().as_bytes())
+}
+
+/// Copy the surrounding comments/blank lines from one TOML item to another.
+fn copy_decor(from: &toml_edit::Item, to: &mut toml_edit::Item) {
+    use toml_edit::Item;
+    match (from, to) {
+        (Item::Table(src), Item::Table(dst)) => *dst.decor_mut() = src.decor().clone(),
+        (Item::Value(src), Item::Value(dst)) => *dst.decor_mut() = src.decor().clone(),
+        // Arrays of tables keep their own formatting; nothing to copy.
+        _ => {}
+    }
+}
+
+/// Write `bytes` to `path` via a sibling temporary file + rename.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(".modeld_tmp_{}.tmp", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp, bytes)
+        .with_context(|| format!("Failed to write temporary config: {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("Failed to replace config: {}", path.display()));
+    }
     Ok(())
 }
 
@@ -226,6 +491,108 @@ mod tests {
 
         let loaded = load_config(tmp.path()).unwrap();
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn test_roundtrip_preserves_unknown_sections() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("modeld.toml"),
+            r#"# hand-written comment, keep me
+[serve]
+port = 8234
+
+[proxy]
+port = 9999
+
+[proxy.auth]
+tokens = ["old-token"]
+
+[my.experiment]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        let mut config = load_config(tmp.path()).unwrap();
+        assert_eq!(config.proxy.port, 9999);
+        config.serve.port = 8500;
+        save_config(tmp.path(), &config).unwrap();
+
+        let raw = std::fs::read_to_string(tmp.path().join("modeld.toml")).unwrap();
+        // The section we changed...
+        assert!(raw.contains("8500"), "new value missing:\n{raw}");
+        // ...and everything we did not touch.
+        assert!(raw.contains("[my.experiment]"), "unknown section dropped:\n{raw}");
+        assert!(raw.contains("enabled = true"), "unknown key dropped:\n{raw}");
+        assert!(raw.contains("[proxy]"), "[proxy] section dropped:\n{raw}");
+        assert!(raw.contains("9999"), "[proxy] port dropped:\n{raw}");
+        assert!(raw.contains("# hand-written comment, keep me"), "comment dropped:\n{raw}");
+    }
+
+    #[test]
+    fn test_save_does_not_write_a_placeholder_store_path() {
+        let tmp = TempDir::new().unwrap();
+        save_config(tmp.path(), &ModeldConfig::default()).unwrap();
+        let raw = std::fs::read_to_string(tmp.path().join("modeld.toml")).unwrap();
+        assert!(
+            !raw.contains(".modeld"),
+            "the proxy's default store_path is a placeholder and must not be persisted:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn test_token_rotate_updates_both_sections() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = ModeldConfig::default();
+        config.auth.token = "old-token".to_string();
+        config.proxy.auth.tokens = vec!["old-token".to_string()];
+        save_config(tmp.path(), &config).unwrap();
+
+        let mut config = load_config(tmp.path()).unwrap();
+        config.set_proxy_token("new-token");
+        save_config(tmp.path(), &config).unwrap();
+
+        let reloaded = load_config(tmp.path()).unwrap();
+        assert_eq!(reloaded.auth.token, "new-token", "[auth] token not rotated");
+        assert_eq!(
+            reloaded.proxy.auth.tokens,
+            vec!["new-token".to_string()],
+            "[proxy.auth] tokens not rotated"
+        );
+        assert!(reloaded.proxy.auth.require_token, "token auth must stay on");
+        assert_eq!(reloaded.proxy_tokens(), vec!["new-token".to_string()]);
+        assert!(!reloaded.proxy_tokens().contains(&"old-token".to_string()));
+    }
+
+    #[test]
+    fn test_proxy_tokens_falls_back_to_the_legacy_section() {
+        let mut config = ModeldConfig::default();
+        config.auth.token = "legacy".to_string();
+        assert_eq!(config.proxy_tokens(), vec!["legacy".to_string()]);
+
+        // A configured [proxy.auth] list wins over the legacy single token.
+        config.proxy.auth.tokens = vec!["modern".to_string()];
+        assert_eq!(config.proxy_tokens(), vec!["modern".to_string()]);
+    }
+
+    #[test]
+    fn test_old_config_file_loads_with_defaults() {
+        // A pre-A6 file: no [proxy], no [scan], no [auth].
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("modeld.toml"),
+            "[store]\npath = \"/data\"\n\n[serve]\nhost = \"0.0.0.0\"\nport = 9000\n",
+        )
+        .unwrap();
+
+        let config = load_config(tmp.path()).unwrap();
+        assert_eq!(config.serve.port, 9000);
+        assert_eq!(config.store.path.as_deref(), Some("/data"));
+        // Missing sections fall back to safe defaults.
+        assert!(config.proxy.auth.require_token);
+        assert_eq!(config.proxy.bind_address, "127.0.0.1");
+        assert_eq!(config.scan_extensions().len(), crate::scanner::MODEL_EXTENSIONS.len());
     }
 
     #[test]
@@ -296,8 +663,12 @@ mod tests {
         save_config(tmp.path(), &config).unwrap();
 
         let raw = std::fs::read_to_string(tmp.path().join("modeld.toml")).unwrap();
-        // Empty token must not appear in the file to avoid leaking placeholder
-        assert!(!raw.contains("token"), "empty token should be omitted from TOML");
+        // An empty token must not appear as a value in the file (a placeholder
+        // like `token = ""` would be copied around and look configured).
+        assert!(
+            !raw.lines().any(|line| line.trim() == "token = \"\""),
+            "empty token should be omitted from TOML:\n{raw}"
+        );
     }
 
     #[test]

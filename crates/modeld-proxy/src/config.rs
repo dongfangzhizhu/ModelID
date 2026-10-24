@@ -1,243 +1,37 @@
-//! Proxy configuration.
+//! Proxy configuration — the `[proxy]` table of `modeld.toml`.
 //!
-//! modeld proxy settings live inside the shared `modeld.toml` under the
-//! `[proxy]` section (with `[proxy.auth]` and `[proxy.network]` sub-tables):
+//! The schema itself lives in `modeld_core::config::ProxyConfig` so that a single
+//! `ModeldConfig` describes the whole file. This module re-exports it (with the
+//! historical names used across the proxy crate) and nothing else.
 //!
 //! ```toml
 //! [proxy]
 //! port = 8234
-//! bind_address = "0.0.0.0"
-//! store_path = ".modeld"
+//! bind_address = "127.0.0.1"
 //!
 //! [proxy.auth]
-//! require_token = false
+//! require_token = true
 //! tokens = []
 //!
 //! [proxy.network]
-//! allow_anonymous = false   # default: require auth or explicit allow
+//! allow_anonymous = false
 //! allowed_ips = ["192.168.1.0/24"]
 //! denied_ips = []
 //! ```
 //!
 //! Every field has a safe default, so a minimal `modeld.toml` (or none at all)
 //! starts a **closed** server on port 8234 — anonymous requests return 401.
-//! To allow open access on a trusted LAN, set `allow_anonymous = true`.
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-
-/// Top-level proxy configuration (the `[proxy]` table).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ProxyConfig {
-    pub port: u16,
-    pub bind_address: String,
-    pub store_path: PathBuf,
-    pub auth: AuthConfig,
-    pub network: NetworkConfig,
-    /// Largest byte range served in a single `206` response.
-    ///
-    /// A `Range: bytes=0-` request for a 20 GB model would otherwise be one
-    /// 20 GB response; chunking keeps memory flat and lets clients resume.
-    pub range_chunk_bytes: u64,
-}
-
-/// Default for [`ProxyConfig::range_chunk_bytes`]: 64 MiB.
-pub const DEFAULT_RANGE_CHUNK_BYTES: u64 = 64 * 1024 * 1024;
-
-/// `[proxy.auth]` — Bearer-token access control.
-///
-/// Secure by default: a proxy started without any token configuration refuses
-/// every authenticated route until a token exists. The CLI generates and
-/// persists one on first start.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AuthConfig {
-    /// When true, requests must carry a valid `Authorization: Bearer <token>`.
-    pub require_token: bool,
-    /// Accepted bearer tokens.
-    pub tokens: Vec<String>,
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self { require_token: true, tokens: Vec::new() }
-    }
-}
-
-/// `[proxy.network]` — IP allow/deny lists.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[derive(Default)]
-pub struct NetworkConfig {
-    /// Whether unauthenticated (anonymous) access is permitted at all.
-    pub allow_anonymous: bool,
-    /// Allow-list; empty means "allow all (that aren't denied)".
-    pub allowed_ips: Vec<String>,
-    /// Deny-list; takes precedence over the allow-list.
-    pub denied_ips: Vec<String>,
-}
-
-impl Default for ProxyConfig {
-    fn default() -> Self {
-        Self {
-            port: 8234,
-            bind_address: "127.0.0.1".to_string(),
-            store_path: PathBuf::from(".modeld"),
-            auth: AuthConfig::default(),
-            network: NetworkConfig::default(),
-            range_chunk_bytes: DEFAULT_RANGE_CHUNK_BYTES,
-        }
-    }
-}
-
-impl ProxyConfig {
-    /// Load `[proxy]` from a `modeld.toml` file.
-    ///
-    /// If the file or the `[proxy]` table is absent, returns the safe default.
-    /// Missing sub-fields fall back to their individual defaults via `#[serde(default)]`.
-    pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let raw = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-
-        // The modeld.toml file may contain other tables; we only deserialize
-        // the [proxy] section into our typed config.
-        #[derive(Deserialize, Default)]
-        struct ModeldToml {
-            #[serde(default)]
-            proxy: ProxyConfigFile,
-        }
-
-        // We deserialize [proxy] directly so that a [proxy] table with only
-        // some fields still merges with defaults. Using #[serde(default)] on
-        // ProxyConfig means an entirely missing [proxy] yields defaults.
-        let parsed: ModeldToml = toml::from_str(&raw)
-            .with_context(|| format!("Failed to parse TOML config: {}", path.display()))?;
-        Ok(parsed.proxy.into_config())
-    }
-
-    /// Build a config from CLI overrides applied on top of defaults.
-    pub fn from_cli(
-        port: Option<u16>,
-        bind: Option<String>,
-        store_path: PathBuf,
-        token: Option<String>,
-        allow_anonymous: bool,
-    ) -> Self {
-        let mut cfg = Self::default();
-        if let Some(p) = port {
-            cfg.port = p;
-        }
-        if let Some(b) = bind {
-            cfg.bind_address = b;
-        }
-        cfg.store_path = store_path;
-        if let Some(t) = token {
-            cfg.auth.require_token = true;
-            cfg.auth.tokens.push(t);
-        }
-        cfg.network.allow_anonymous = allow_anonymous;
-        // Anonymous access and token auth are mutually exclusive; only the
-        // loopback bind may run without a token (enforced by the invariants).
-        if allow_anonymous && cfg.auth.tokens.is_empty() {
-            cfg.auth.require_token = false;
-        }
-        cfg
-    }
-
-    /// `bind_address:port` as a single string for `tiny_http::Server::http`.
-    pub fn bind_addr(&self) -> String {
-        format!("{}:{}", self.bind_address, self.port)
-    }
-
-    /// Return a copy of this config with anonymous access enabled.
-    ///
-    /// Convenience for integration tests and trusted-LAN setups:
-    /// `ProxyConfig::default().with_open_access()`. Anonymous access only
-    /// passes `check_startup_invariants` for a loopback bind.
-    pub fn with_open_access(mut self) -> Self {
-        self.network.allow_anonymous = true;
-        self.auth.require_token = false;
-        self
-    }
-
-    /// True when the configured bind address is a loopback address.
-    pub fn is_loopback_bind(&self) -> bool {
-        is_loopback_addr(&self.bind_address)
-    }
-
-    /// Reject configurations that would expose the store without authentication.
-    ///
-    /// Called from `ProxyServer::start` and from the CLI so a misconfigured
-    /// server fails before it binds the port, not after it starts leaking data.
-    pub fn check_startup_invariants(&self) -> Result<()> {
-        if !self.is_loopback_bind() && self.network.allow_anonymous {
-            anyhow::bail!(
-                "refusing to allow anonymous access on non-loopback bind '{}': \
-                 anonymous access is only permitted on 127.0.0.1/::1",
-                self.bind_address
-            );
-        }
-        if self.auth.require_token && self.auth.tokens.is_empty() {
-            anyhow::bail!(
-                "token authentication is required but no token is configured \
-                 (pass --token or run 'modeld proxy token-rotate')"
-            );
-        }
-        Ok(())
-    }
-}
-
-/// True for `127.0.0.0/8`, `::1` and `localhost`.
-pub fn is_loopback_addr(addr: &str) -> bool {
-    let addr = addr.trim();
-    addr.eq_ignore_ascii_case("localhost")
-        || addr == "::1"
-        || addr == "[::1]"
-        || addr == "127.0.0.1"
-        || addr.starts_with("127.")
-}
-
-/// Intermediate deserialization type so a missing `[proxy]` table yields full
-/// defaults rather than failing.
-#[derive(Deserialize, Default)]
-struct ProxyConfigFile {
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    bind_address: Option<String>,
-    #[serde(default)]
-    store_path: Option<PathBuf>,
-    #[serde(default)]
-    auth: AuthConfig,
-    #[serde(default)]
-    network: NetworkConfig,
-    #[serde(default)]
-    range_chunk_bytes: Option<u64>,
-}
-
-impl ProxyConfigFile {
-    fn into_config(self) -> ProxyConfig {
-        let default = ProxyConfig::default();
-        ProxyConfig {
-            port: self.port.unwrap_or(default.port),
-            bind_address: self.bind_address.unwrap_or(default.bind_address),
-            store_path: self.store_path.unwrap_or(default.store_path),
-            auth: self.auth,
-            network: self.network,
-            range_chunk_bytes: self.range_chunk_bytes.unwrap_or(default.range_chunk_bytes),
-        }
-    }
-}
+pub use modeld_core::config::{
+    is_loopback_addr, ProxyAuthConfig as AuthConfig, ProxyConfig,
+    ProxyNetworkConfig as NetworkConfig, DEFAULT_RANGE_CHUNK_BYTES,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::{Path, PathBuf};
     use tempfile::NamedTempFile;
 
     #[test]

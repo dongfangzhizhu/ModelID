@@ -35,7 +35,6 @@ Place a `modeld.toml` next to the store (or pass `--config`):
 [proxy]
 port = 8234
 bind_address = "0.0.0.0"
-store_path = ".modeld"
 
 [proxy.auth]
 require_token = true
@@ -49,6 +48,28 @@ denied_ips = []
 
 > `bind_address = "0.0.0.0"` in a config file is subject to the same rule as the
 > CLI flag: start with `--allow-lan`, otherwise the server refuses to start.
+
+### Editing the config
+
+`modeld.toml` holds every section (store, serve, dedup, gc, auth, scan, proxy).
+Use the CLI rather than editing by hand when you can — it validates values and
+keeps the file consistent:
+
+```bash
+modeld config list                  # every key and its current value
+modeld config get serve.port
+modeld config set serve.port 8500
+modeld config set proxy.auth.tokens "token-a,token-b"
+```
+
+`config set` rewrites **only the section that owns the key**; other sections,
+comments and unknown tables are preserved. Unknown keys get a "did you mean"
+suggestion.
+
+The bearer token lives in two places for compatibility — `[auth] token` (read by
+older versions) and `[proxy.auth] tokens` (what the proxy enforces). `modeld proxy
+token-rotate` and `modeld config set auth.token` update **both**, so a restart always
+picks up the new token and rejects the old one.
 
 See [proxy-api.md](./proxy-api.md) for the full HTTP API.
 

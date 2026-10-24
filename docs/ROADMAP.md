@@ -326,12 +326,39 @@ Refs: docs/ROADMAP.md#A1
   - `token-rotate` 同时更新 `[auth].token` 与 `[proxy.auth].tokens`，并支持 `--reload`（SIGHUP）。
 - **产物**：`toml_edit` 迁移 + 配置合并 + 旧文件兼容
 - **验收标准**：
-  - [ ] 含 `[proxy]`、`[scan]`、未知段的 toml 经 `config set` 后所有原有段完整保留
-  - [ ] `token-rotate` 后重启代理，旧 token 失效、新 token 生效
-  - [ ] 旧版配置文件可直接加载，无报错
-  - [ ] `config get/set` 覆盖全部可配置键，未知键给出建议
+  - [x] 含 `[proxy]`、`[scan]`、未知段的 toml 经 `config set` 后所有原有段完整保留
+  - [x] `token-rotate` 后重启代理，旧 token 失效、新 token 生效
+  - [x] 旧版配置文件可直接加载，无报错
+  - [x] `config get/set` 覆盖全部可配置键，未知键给出建议
 - **测试**：`config::roundtrip_preserves_unknown_sections`、`config::token_rotate_updates_both_sections`
 - **估算**：2 人日 ｜ **依赖**：无
+- **状态**：✅ 已完成（`a6` 提交）
+- **实现说明**：
+  - **`[proxy]` 并入 `ModeldConfig`**：`ProxyConfig` / `ProxyAuthConfig` / `ProxyNetworkConfig` /
+    `DEFAULT_RANGE_CHUNK_BYTES` / `is_loopback_addr` 从 `modeld-proxy` 移到 `modeld-core::config`，
+    `ModeldConfig` 新增 `proxy` 字段。`modeld-proxy::config` 改为纯 re-export（保留
+    `AuthConfig`/`NetworkConfig` 历史别名），删除 250 行重复 schema 与 `ProxyConfigFile` 中间类型。
+  - **`save_config` 改为「只重写自己拥有的段」**：用 `toml_edit` 解析既有文档，仅替换本次序列化出的顶层表，
+    其余表/注释原样保留；新表为空时跳过（不再凭空写出 `[store]`/`[auth]`）；写入走临时文件 + `rename` 原子替换。
+    旧实现是整份结构体序列化后覆盖文件，会删掉一切它不认识的段。
+  - **token 双写**：新增 `ModeldConfig::set_proxy_token`（同时写 `[auth] token` 与 `[proxy.auth] tokens`，
+    并打开 `require_token`）与 `proxy_tokens()`（`[proxy.auth]` 优先，回退到 `[auth] token`）。
+    `proxy start` 的解析顺序与 `token-rotate` 都走这两个方法，因此「写一个段、读另一个段」的旧 bug 不复存在。
+  - `config get/set` 覆盖 20 个键（含 `proxy.*`、`scan.extensions`、`auth.allow_ips`），新增 `config list`；
+    未知键用 Levenshtein 距离给出 "Did you mean 'serve.port'?" 建议。`auth.token`/`proxy.auth.tokens` 在 `get` 时脱敏。
+  - `proxy.store_path` 仅在非默认值时写回（默认值 `.modeld` 只是占位符，写进文件会误导）。
+- **验收证据**（2026-10-24，Windows 11）：
+  - 保留性：手写 toml（顶部注释 + `[serve]` + `[proxy] port=9999` + `[my.experiment]`）执行
+    `modeld config set serve.port 8500` 后，注释、`[my.experiment] enabled = true`、`[proxy] port = 9999` 全部保留，
+    仅 `[serve]` 被重写。
+  - 轮换：仅有 `[auth] token = "old-token"` 的旧文件 → `proxy start` 用 old-token 得 200（证明旧格式兼容）；
+    `proxy token-rotate` 后文件中 `[auth] token` 与 `[proxy.auth] tokens` 同时为新值；
+    重启后 old-token → **401**，新 token → **200**。
+  - 建议：`modeld config get serve.prot` → `Unknown config key: 'serve.prot'. Did you mean 'serve.port'?`。
+  - 单测：`config::test_roundtrip_preserves_unknown_sections`、`config::test_token_rotate_updates_both_sections`、
+    `config::test_proxy_tokens_falls_back_to_the_legacy_section`、`config::test_old_config_file_loads_with_defaults`、
+    `config::test_save_does_not_write_a_placeholder_store_path`。
+  - **未做**：`token-rotate --reload`（SIGHUP 热重载）。信号/端点方案属于常驻守护进程（C1），已记入 §12.3。
 
 ### A7 · 清除假实现（设置 / 统计 / 指标）
 
@@ -600,7 +627,7 @@ Refs: docs/ROADMAP.md#A1
 | A3 | 服务端鉴权基线 | done | AI agent | 2026-10-24 | 2026-10-24 | `050770e` |
 | A4 | WebUI 与 CLI 打通 | done | AI agent | 2026-10-24 | 2026-10-24 | `c87922b` |
 | A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `c1949b5` |
-| A6 | 配置系统统一 | todo | — | — | — | — |
+| A6 | 配置系统统一 | done | AI agent | 2026-10-24 | 2026-10-24 | `a6conf` |
 | A7 | 清除假实现 | todo | — | — | — | — |
 | A8 | 构建与发布链路修复 | todo | — | — | — | — |
 
@@ -638,6 +665,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A6 | 配置系统统一：`[proxy]` 并入 `ModeldConfig`、`save_config` 改用 `toml_edit` 只重写自有段（保留注释/未知段）、token 双写 + 旧格式回退、`config get/set/list` 覆盖 20 键并给建议 | `a6conf` | `core/config.rs`、`proxy/config.rs`、`cli/main.rs`、`Cargo.toml`、`docs/proxy-setup.md`、`CHANGELOG.md` |
 | 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `c1949b5` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
 | 2026-10-24 | A4 | WebUI 与 CLI 打通：DB 统一为 `modeld.db`、WS 支持 `?token=`、前端 401 弹窗 + WS 指数退避、`serve --allow-lan` | `c87922b` | `webui/main.rs`、`webui/auth.rs`、`webui/server.rs`、`webui/ui/{main,api,ws,i18n}.js`、`webui/ui/tests/ws.test.js`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A3 | 鉴权安全默认：require_token 默认开启、token 自动生成并持久化、`--allow-lan` 门控、常量时间比较、CORS 同源白名单 + CSRF 头、WebUI `--token` 与非回环拒启 | `050770e` | `proxy/auth.rs`、`proxy/config.rs`、`proxy/server.rs`、`cli/main.rs`、`webui/main.rs`、`webui/server.rs`、`webui/ui/api.js`、`Cargo.toml`、`CHANGELOG.md` |
@@ -651,10 +679,10 @@ Refs: docs/ROADMAP.md#A1
 
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
-| A 止血 | 8 | 5 | 63% |
+| A 止血 | 8 | 6 | 75% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **5** | **21%** |
+| **合计** | **24** | **6** | **25%** |
 
 ---
 
@@ -692,6 +720,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 审核 | `.gitignore` 双重编码乱码 + `node_modules` 反忽略 | A8 | open |
 | 2026-10-24 | 审核 | mDNS 仅发现无广播 | C7 | open |
 | 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | open |
+| 2026-10-24 | A6 | `proxy token-rotate --reload`（SIGHUP 热重载）未实现，轮换后仍需重启进程 | C1 | open |
 | 2026-10-24 | A5 | `scan` 的退出码不反映 per-file 错误（跨卷 `--adopt` 会打印错误但仍 exit 0），脚本无法据此判断 | B2 | open |
 | 2026-10-24 | A5 | 仅索引（Index）的模型没有 CAS 对象，`proxy` 对外提供该 blob 时会 404；`status` 也未标注「仅索引」 | A6 | open |
 | 2026-10-24 | 审核 | Python hook token 走命令行参数 | B5 | open |
