@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`hf-check`/`hf-setup`/`hf-status`/`workflow-*`/`refs-orphans` moved to
+  `commands/hfstore.rs`** — they only read the local store, so they do not belong
+  with the Hub-facing `hf` module. (ROADMAP B2)
 - **`modeld proxy` moved to its own module** — `commands/proxy.rs` holds
   `ProxyAction`, `ProxyStartOptions` and the start/discover/status/token-rotate
   handlers. (ROADMAP B2)

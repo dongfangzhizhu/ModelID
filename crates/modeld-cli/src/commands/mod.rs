@@ -6,6 +6,7 @@
 pub mod config;
 pub mod db;
 pub mod hf;
+pub mod hfstore;
 pub mod meta;
 pub mod proxy;
 pub mod store;
