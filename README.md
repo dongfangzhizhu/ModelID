@@ -240,6 +240,7 @@ cd python && python -m pytest tests/ -v
 - [Proxy setup guide](docs/proxy-setup.md)
 - [Proxy HTTP API reference](docs/proxy-api.md)
 - [Architecture overview](docs/architecture.md)
+- [Development roadmap](docs/ROADMAP.md) — 开发阶段、验收标准与提交规范（后续开发的唯一权威计划）
 - [RFCs](docs/rfcs/) — storage layout, hash strategy, ref model, dedup, Windows compat, virtual FS, HF interception
 - [Python hook](python/README.md)
 

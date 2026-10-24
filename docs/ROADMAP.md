@@ -1,0 +1,617 @@
+# modeld 开发路线图与任务执行规范
+
+> **文档版本**：v1.0
+> **创建日期**：2026-10-24
+> **基线依据**：2026-10-24 全量代码审核（静态审核，覆盖 5 个 crate / 23k 行 Rust / 3.1k 行前端与脚本）
+> **文档定位**：本文件是 modeld 后续开发的**唯一权威计划**。所有任务的状态、验收、提交记录都以本文件为准。
+> **适用对象**：参与本项目的所有开发者（含 AI 编码代理）。
+
+---
+
+## 0. 如何阅读与使用本文档
+
+1. **开工前**：在 §9 状态看板找到第一个 `todo` 任务，把状态改为 `in_progress`，填写开始日期。
+2. **开发中**：严格按该任务的「改动点 / 产物 / 验收标准」执行，不得夹带无关重构。
+3. **完成后**：按 §3 的协议勾选验收项、更新状态、追加变更日志、填写提交哈希。
+4. **禁止**：未更新本文件就合并代码；未通过验收标准就标记 `done`。
+
+> 本文件中的估算以「1 名熟悉 Rust 的开发者全职投入」为基准，可按实际人力线性调整。
+
+---
+
+## 1. 背景与目标
+
+### 1.1 审核结论摘要
+
+| 维度 | 评分 | 关键问题 |
+|---|---|---|
+| 架构与领域建模 | 7.5/10 | CAS + WAL + 引用图三层设计合理 |
+| 核心正确性 | 6/10 | 链接替换存在「先删后建」窗口 |
+| 数据安全 | 4/10 | `scan` 使磁盘占用翻倍；Windows 非原子替换 |
+| 安全性 | 3/10 | 代理鉴权形同虚设；WebUI 默认无鉴权 + 全开 CORS |
+| 性能与资源 | 5/10 | 代理整文件进内存；单线程串行；重复哈希 |
+| 测试 | 6.5/10 | 核心覆盖好；WebUI/并发/端到端缺失 |
+| 工程化 | 6/10 | 缺依赖审计、MSRV、覆盖率门禁 |
+| 文档 | 5/10 | 计划态文档与实现漂移 |
+| 可维护性 | 5/10 | CLI 单文件 3735 行；重复逻辑 |
+| **综合** | **5.5/10** | 技术骨架扎实，但距可交付 v1.0 约一个季度硬工作 |
+
+### 1.2 本路线图要达成的目标
+
+| 目标 | 衡量方式 |
+|---|---|
+| G1 数据不丢、路径不消失 | 故障注入矩阵 100% 通过，任意中断点均不丢失用户路径 |
+| G2 服务端默认安全 | 默认配置下未授权请求 100% 拒绝；非回环绑定强制鉴权 |
+| G3 磁盘占用不放大 | `scan` 默认模式磁盘增量约等于 0；统计数字与 `du` 一致（正负 1%） |
+| G4 大文件可用 | 20 GB 模型下载/代理期间内存增长 < 100 MB，`/health` p95 < 50 ms |
+| G5 可维护 | `main.rs` < 300 行；库层零 `println!`；单任务改动可独立评审 |
+| G6 可发布 | 三平台安装包 + 校验和；CI 全绿；MSRV 显式声明 |
+
+### 1.3 不可协商的红线（所有任务必须遵守）
+
+1. **不得引入「先删除后创建」的文件替换**。任何替换必须是「临时名 + 原子 rename」。
+2. **库层（`modeld-core` / `modeld-proxy` / `modeld-webui`）不得新增 `unwrap()` / `expect()` / `panic!()`**，已有存量按任务清单逐步清除。
+3. **不得静默吞掉错误**。`let _ =` 仅允许用于「清理动作」与「best-effort 遥测」，且必须带注释说明。
+4. **不得让指标、设置、审计等对外能力停留在假实现**。要么接通真实数据，要么从 UI/文档移除。
+5. **每个破坏性操作必须有可回滚路径**，并在验收标准中给出回滚演练证据。
+
+---
+
+## 2. 阶段总览
+
+| 阶段 | 周期 | 主题 | 出口标准（Gate） |
+|---|---|---|---|
+| **A 止血** | 2 周 | 消除数据丢失、OOM、未授权访问、构建失败 | 10 个 P0 全部关闭；`cargo test` 全绿；三平台 CI 通过；镜像可构建 |
+| **B 架构收敛** | 6–8 周 | 统一事务边界、CLI/日志/配置收敛、测试体系补齐 | 故障注入矩阵全通过；覆盖率达标；文档反映 as-built |
+| **C 产品化** | 3–6 月 | 常驻服务、发布工程、安全增强、生态集成 | 三平台可安装；发布 0.2.0；端到端生态接入验收 |
+
+> 阶段之间不严格串行：B 阶段的 B4/B8 可在 A 阶段后期并行启动，但 **A 阶段 Gate 未通过前不得对外发版**。
+
+---
+
+## 3. 任务执行协议（强制）
+
+### 3.1 单个子任务的标准流程
+
+```
+① 领取   状态 todo -> in_progress，填「开始日期」与「负责人」
+② 分支   git switch -c task/<ID>-<slug>       例：task/A1-atomic-link
+③ 实现   只做该任务范围内的改动；顺带发现的问题记入 §12.3 待办池，不夹带
+④ 自检   cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
+         cargo test --workspace
+⑤ 验收   逐条勾选「验收标准」，收集证据（测试名 / 命令输出 / 指标数据）
+⑥ 提交   一个子任务 = 一个可独立回滚的提交（或一个 PR squash 后的提交）
+⑦ 归档   更新 §9 状态表、§10 变更日志、勾选验收项、填写提交哈希
+⑧ 推送   git push 后确认 CI 全绿
+```
+
+### 3.2 提交信息规范
+
+采用 Conventional Commits，并**必须携带任务 ID**：
+
+```
+<type>(<scope>): <subject> [<TASK-ID>]
+
+<body：做了什么、为什么、如何验证>
+
+Refs: docs/ROADMAP.md#<TASK-ID>
+```
+
+- `type`：`feat` | `fix` | `perf` | `refactor` | `test` | `docs` | `build` | `chore` | `security`
+- `scope`：`core` | `cli` | `proxy` | `webui` | `client` | `py` | `ci` | `docs`
+- 示例：
+
+```
+fix(core): replace delete-then-link with atomic rename [A1]
+
+硬链接替换改为「同目录临时链接 + 原子 rename」，避免 hard_link 失败后
+用户路径消失。新增 fault_injection::link_failure_keeps_original。
+
+Refs: docs/ROADMAP.md#A1
+```
+
+### 3.3 每次完成任务后，必须修改本文档的 4 个位置
+
+| # | 位置 | 修改内容 |
+|---|---|---|
+| 1 | 该任务的「验收标准」 | 把 `- [ ]` 改为 `- [x]`，并在末尾追加 `> 证据：<测试名/命令/数据>` |
+| 2 | §9 状态看板 | `todo/in_progress/done/blocked` + 完成日期 + 提交哈希前 7 位 |
+| 3 | §10 变更日志 | 追加一行：日期、任务 ID、摘要、提交哈希、影响面 |
+| 4 | §11 进度总览 | 更新各阶段完成数与百分比 |
+
+> **评审拒绝条件**：PR 中未包含上述 4 处修改，或验收项未勾选却标记 `done`。
+
+### 3.4 任务完成定义（DoD）
+
+一个任务只有同时满足以下 7 条才算 `done`：
+
+- [ ] 代码通过 `fmt` + `clippy -D warnings` + `test`
+- [ ] 新增或更新了覆盖验收标准的测试
+- [ ] 验收标准全部勾选，且有可复现证据
+- [ ] 未违反 §1.3 红线
+- [ ] 破坏性变更已更新 `CHANGELOG.md`
+- [ ] 本文档 4 处已更新
+- [ ] 提交已推送且 CI 全绿
+
+### 3.5 阻塞处理
+
+任务受阻超过 1 天：状态改 `blocked`，在 §10 记录阻塞原因、已尝试方案、需要的决策。**不得**通过降低验收标准来「完成」任务。
+
+---
+
+## 4. 阶段 A：止血（2 周）
+
+> **目标**：让项目从「不能安全运行」变成「可以内部试用」。
+> **原则**：只修不改架构；每个任务都能独立回滚。
+
+### A1 · 原子链接替换（数据安全，最高优先级）
+
+- **背景**：`crates/modeld-core/src/links.rs` 在 `create_hardlink` / `create_symlink` 中先 `remove_file` 再建链；`unlink.rs` 在 Windows 上先删后 rename。任一步失败，用户路径上的文件消失（内容虽在 CAS，但路径与 DB 状态不一致）。
+- **改动点**：`crates/modeld-core/src/links.rs`、`crates/modeld-core/src/unlink.rs`、`crates/modeld-core/src/dedup.rs`
+- **实现要点**：
+  - 新增 `replace_with_link(source, target) -> Result<AliasType>`：在 `source` 同目录创建 `.modeld_tmp_<uuid>` 链接，再 `rename(tmp, source)`；Windows 用 `ReplaceFileW` 或 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`。
+  - `unlink` 同理：先在同目录写完副本并 `fsync`，再原子替换。
+  - 临时名清理放在 `Drop` guard 中，异常路径不留垃圾。
+- **产物**：`replace_with_link` 公共函数 + 3 个调用点改造 + 故障注入测试
+- **验收标准**：
+  - [ ] 注入「建链成功、rename 前失败」后，`source` 仍存在且内容哈希不变
+  - [ ] 注入「建链失败」后，`source` 仍存在且内容哈希不变
+  - [ ] 成功后 `source` 的 inode/file-id 与 CAS 对象一致（同卷）
+  - [ ] 临时文件在成功/失败路径上均被清理（测试断言目录内无 `.modeld_tmp_*`）
+  - [ ] Windows 上对只读 CAS 对象操作不报 `PermissionDenied`
+- **测试**：`fault_injection_tests::link_failure_keeps_original`、`link_success_is_atomic`、`unlink_failure_keeps_original`
+- **估算**：2 人日 ｜ **依赖**：无
+
+### A2 · 代理流式响应 + 线程池 + panic 隔离
+
+- **背景**：`server.rs` 的 `stream_full` / `stream_range` / `stream_file_with_headers` 用 `read_to_end` 和 `vec![0u8; length]` 把整个文件读入内存；`run_loop` 单线程串行处理；`db.lock().expect(...)` 可被毒化。
+- **改动点**：`crates/modeld-proxy/src/server.rs`、`crates/modeld-proxy/src/range.rs`
+- **实现要点**：
+  - 用 `Response::new(file.take(len), Some(len), content_type, headers)` 流式发送，禁止整文件缓冲。
+  - Range 单次响应上限 64 MiB，超出按分片返回 206。
+  - 改用 `server.incoming_requests()` + 固定大小线程池（如 `rayon` 或 `threadpool`），每请求 `catch_unwind`。
+  - 去掉 `.expect("db lock poisoned")`：中毒时重建连接或返回 503。
+- **产物**：流式响应实现 + 线程池 + 请求级 panic 兜底 + 压力测试脚本
+- **验收标准**：
+  - [ ] 20 GB 文件完整下载时进程 RSS 增长 < 100 MB
+  - [ ] `Range: bytes=0-` 对 20 GB 文件返回 206 分片，不 OOM
+  - [ ] 单客户端下载大文件期间，另一客户端 `/health` p95 < 50 ms（32 并发）
+  - [ ] 人为 panic 的 handler 不影响后续请求（服务存活）
+  - [ ] `cargo test -p modeld-proxy` 全绿，新增并发集成测试
+- **测试**：`proxy_integration::concurrent_health_during_download`、`range_large_file_no_oom`、`handler_panic_does_not_kill_server`
+- **估算**：3 人日 ｜ **依赖**：无
+
+### A3 · 服务端鉴权基线
+
+- **背景**：代理默认 `0.0.0.0` + `require_token=false` 时任何 `Bearer` 字符串均可通过；WebUI 独立二进制鉴权恒关；CORS 全开；token 比较非常量时间。
+- **改动点**：`crates/modeld-proxy/src/auth.rs`、`crates/modeld-proxy/src/config.rs`、`crates/modeld-cli/src/main.rs`、`crates/modeld-webui/src/server.rs`、`crates/modeld-webui/src/auth.rs`、`crates/modeld-webui/src/main.rs`
+- **实现要点**：
+  - 默认 `bind=127.0.0.1`、`require_token=true`；首次启动自动生成 token 并打印一次（`--print-token` 可控）。
+  - `0.0.0.0` 必须显式 `--allow-lan`，且此时强制 token。
+  - token 比较改用 `subtle::ConstantTimeEq`。
+  - CORS 改为同源白名单；变更类接口要求 `X-Modeld-CSRF: 1` 自定义头。
+  - WebUI 增加 `--token` / `MODELD_AUTH_TOKEN`，非回环绑定未提供 token 时拒绝启动。
+- **产物**：鉴权策略 + 启动期不变量校验 + 文档更新（`docs/proxy-api.md`、`README.md`）
+- **验收标准**：
+  - [ ] 默认配置下 `curl /v1/models` 返回 401
+  - [ ] `--token X` 后错误 token 返回 401，正确 token 返回 200
+  - [ ] `--allow-anonymous` 仅在与 `127.0.0.1` 同时使用时生效
+  - [ ] 跨源 `fetch`（无 CSRF 头）对 `POST /api/v1/dedup/apply` 被拒绝
+  - [ ] 非回环 + 无 token 启动 WebUI 时退出码非 0 并给出明确提示
+- **测试**：`auth::constant_time_compare`、`server::cors_rejects_cross_origin_write`、CLI 冒烟脚本
+- **估算**：3 人日 ｜ **依赖**：A2（同文件改动，建议顺序执行）
+
+### A4 · WebUI 与 CLI 打通
+
+- **背景**：独立二进制打开 `metadata.db`（应为 `modeld.db`）；前端 `api.js` 不发送 `Authorization`；WebSocket 无 token；`modeld serve` 生成 token 后页面全部 401。
+- **改动点**：`crates/modeld-webui/src/main.rs`、`crates/modeld-webui/ui/api.js`、`crates/modeld-webui/ui/main.js`、`crates/modeld-webui/src/ws.rs`
+- **实现要点**：
+  - DB 文件名统一为 `modeld.db`，并加启动自检（表不存在时给出 `modeld init` 提示）。
+  - token 获取顺序：URL fragment `#token=...` → `sessionStorage` → 提示输入；统一注入 `Authorization` 头与 WS 查询参数。
+  - 401 时前端展示「输入访问令牌」弹窗，而非静默失败。
+- **产物**：DB 修复 + 前端鉴权链路 + 401 交互
+- **验收标准**：
+  - [ ] `modeld serve` 启动后，浏览器输入 token 可完成一次 scan 并看到进度
+  - [ ] `modeld-webui --store X` 与 `modeld status --store X` 看到同一批模型
+  - [ ] 未提供 token 时 API 返回 401，页面出现输入框而非空白
+  - [ ] WS 在鉴权失败后不再无限重连（退避 + 提示）
+- **测试**：`webui_e2e::scan_with_token`、`webui_e2e::unauthorized_shows_prompt`
+- **估算**：2 人日 ｜ **依赖**：A3
+
+### A5 · 扫描摄取模式（消除磁盘翻倍）
+
+- **背景**：`ingest_scan_results` 无条件把每个文件复制进 CAS，唯一副本的模型永久占用两份空间。
+- **改动点**：`crates/modeld-core/src/ingest.rs`、`crates/modeld-cli/src/main.rs`、`crates/modeld-webui/src/api/scan.rs`、`crates/modeld-core/src/scanner.rs`
+- **实现要点**：
+  - 新增 `IngestMode { Index, Adopt, Copy }`：
+    - `Index`：只写 DB/path_index，不碰文件（**默认**）
+    - `Adopt`：同卷时把 CAS 对象建好，原路径原子替换为硬链接（零额外占用）
+    - `Copy`：现行为，显式 `--copy`
+  - CLI：`modeld scan <path> [--index-only|--adopt|--copy]`；WebUI 请求体增加 `mode` 字段。
+  - 扫描扩展名可通过 `modeld.toml [scan].extensions` 配置，默认补充 `onnx/tflite/h5/pb/engine/npz`。
+- **产物**：三种模式 + 配置化扩展名 + 文档
+- **验收标准**：
+  - [ ] `scan --index-only` 前后 `du -sh <models>` 与 store 增量均 < 1%
+  - [ ] `scan --adopt` 后原文件 inode 与 CAS 对象 inode 相同（同卷）
+  - [ ] 默认（无参数）不产生额外数据副本
+  - [ ] 跨卷时 `--adopt` 明确报错并提示改用 `--copy`，不静默降级
+  - [ ] 配置的扩展名生效（新增 `.onnx` 文件可被索引）
+- **测试**：`ingest::index_mode_writes_no_blob`、`ingest::adopt_shares_inode`、`scanner::custom_extensions_from_config`
+- **估算**：3 人日 ｜ **依赖**：A1（复用原子替换）
+
+### A6 · 配置系统统一
+
+- **背景**：`[auth]` 与 `[proxy.auth]` 两套配置；`save_config` 全量重写会删除 `[proxy]` 段；`proxy token-rotate` 写入代理不读取的字段。
+- **改动点**：`crates/modeld-core/src/config.rs`、`crates/modeld-proxy/src/config.rs`、`crates/modeld-cli/src/main.rs`
+- **实现要点**：
+  - 读写改用 `toml_edit`，只修改目标键，保留未知段。
+  - 合并为单一 `ModeldConfig`，`[proxy]` 作为其子结构。
+  - `token-rotate` 同时更新 `[auth].token` 与 `[proxy.auth].tokens`，并支持 `--reload`（SIGHUP）。
+- **产物**：`toml_edit` 迁移 + 配置合并 + 旧文件兼容
+- **验收标准**：
+  - [ ] 含 `[proxy]`、`[scan]`、未知段的 toml 经 `config set` 后所有原有段完整保留
+  - [ ] `token-rotate` 后重启代理，旧 token 失效、新 token 生效
+  - [ ] 旧版配置文件可直接加载，无报错
+  - [ ] `config get/set` 覆盖全部可配置键，未知键给出建议
+- **测试**：`config::roundtrip_preserves_unknown_sections`、`config::token_rotate_updates_both_sections`
+- **估算**：2 人日 ｜ **依赖**：无
+
+### A7 · 清除假实现（设置 / 统计 / 指标）
+
+- **背景**：`PUT /settings` 是 TODO 空实现；`stats` 的 `deduped_saved_bytes`、`last_scan_at` 硬编码；`/metrics` 计数器从不自增；`rate_limit_per_min` 从未读取；`AuditLogger` 零调用。
+- **改动点**：`crates/modeld-webui/src/api/settings.rs`、`crates/modeld-webui/src/api/stats.rs`、`crates/modeld-webui/src/metrics.rs`、`crates/modeld-webui/src/state.rs`、`crates/modeld-webui/src/server.rs`、`crates/modeld-core/src/audit.rs`
+- **实现要点**：
+  - settings：接通 `modeld.toml` 读写（依赖 A6）；仅暴露真正可生效的字段。
+  - stats：`deduped_saved_bytes` 由 `aliases.alias_type` 聚合；`last_scan_at` 由 `path_index.max(last_seen)` 得出；浪费字节只统计非链接副本。
+  - metrics：在中间件中自增 `requests_total`/`errors`；代理侧自增 `cache_hits/misses/bytes_served`。
+  - `AuditLogger` 接入 dedup / gc / unlink / download / config 五条变更路径。
+- **产物**：真实设置持久化 + 真实统计 + 指标接线 + 审计接线
+- **验收标准**：
+  - [ ] 修改设置并重启后值保持不变
+  - [ ] 仪表盘「去重节省」与 `du` 实测差值 < 1%
+  - [ ] 去重后「浪费字节」下降（不再上升）
+  - [ ] 请求一次 API 后 `/metrics` 的 `requests_total` > 0
+  - [ ] 执行一次 dedup 后 `audit.log` 出现对应 NDJSON 记录
+- **测试**：`settings::persist_roundtrip`、`stats::waste_ignores_hardlinks`、`metrics::middleware_increments`、`audit::dedup_writes_entry`
+- **估算**：3 人日 ｜ **依赖**：A6
+
+### A8 · 构建与发布链路修复
+
+- **背景**：Dockerfile 用 `rust:1.80` 而代码需 1.82（`Option::is_none_or`）；无 `.dockerignore`；`MODELD_AUTH_TOKEN` 无人读取；CI 未跑前端测试、无依赖审计。
+- **改动点**：`docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`Cargo.toml`
+- **实现要点**：
+  - Dockerfile 升至 `rust:1.85-slim`，多阶段构建只拷二进制；补 `.dockerignore`。
+  - `Cargo.toml` 增加 `rust-version = "1.82"`。
+  - `MODELD_AUTH_TOKEN` 在 CLI/WebUI 启动时读取。
+  - CI 增加：`node --test`（ui）、`cargo deny check`、`cargo test --locked`、MSRV job（1.82）。
+- **产物**：可构建镜像 + 完整 CI + MSRV 声明
+- **验收标准**：
+  - [ ] `docker build -f docker/Dockerfile .` 成功，镜像 < 200 MB
+  - [ ] 容器内 `MODELD_AUTH_TOKEN=xxx` 启动后，`Authorization: Bearer xxx` 可访问
+  - [ ] CI 在 ubuntu/windows/macos 全绿，含前端测试与 `cargo-deny`
+  - [ ] `cargo +1.82 build --workspace` 通过
+- **测试**：CI 本身 + 本地 `docker build` 冒烟
+- **估算**：2 人日 ｜ **依赖**：A3（token 读取）
+
+### 阶段 A 出口 Gate
+
+- [ ] A1–A8 全部 `done`
+- [ ] 10 个 P0 问题全部关闭（见 §8 追溯矩阵）
+- [ ] `cargo test --workspace --locked` 全绿，新增测试不少于 20 个
+- [ ] 三平台 CI 全绿
+- [ ] `docker build` 成功
+- [ ] 一次完整人工验收：`init → scan --index-only → dedup → gc --preview → serve → 浏览器操作` 全链路无 401、无 panic、数字可信
+- [ ] 本文件 §9–§11 更新完毕
+
+---
+
+## 5. 阶段 B：架构收敛（6–8 周）
+
+> **目标**：把散落在四个模块的事务语义、CLI 结构、日志、配置收敛为统一实现，并建立可回归的测试体系。
+
+### B1 · 统一事务边界与崩溃恢复
+
+- **目标**：所有文件系统变更只经由 `StoreTxn`，崩溃后自动 roll-forward。
+- **改动点**：新增 `crates/modeld-core/src/store_txn.rs`；改造 `dedup.rs` / `ingest.rs` / `downloader.rs` / `unlink.rs` / `gc.rs`
+- **产物**：
+  - `StoreTxn`：`begin -> stage -> commit -> verify` 四阶段 API
+  - 恢复策略：幂等重放（roll-forward），`modeld tx recover` 可手动触发
+  - `begin/commit` 包在单个 SQLite 事务内；rename 后对父目录 `fsync`
+- **验收标准**：
+  - [ ] 5 个中断点（begin 后 / stage 后 / rename 后 / 部分链接后 / commit 前）乘 3 平台，恢复后数据一致
+  - [ ] `modeld tx list` 无残留 `pending`
+  - [ ] 恢复过程输出每个路径的处置结果（roll-forward / rollback / skip）
+  - [ ] 并发两个 dedup 进程时，一个获锁、另一个等待或明确失败，无损坏
+- **估算**：8 人日 ｜ **依赖**：A1
+
+### B2 · CLI 拆分与输出层
+
+- **目标**：`main.rs` < 300 行；命令模块化；统一 `--store`、输出、退出码。
+- **改动点**：`crates/modeld-cli/src/main.rs` 拆为 `commands/*.rs`、`output.rs`、`error.rs`
+- **产物**：命令注册表 + `OutputFormat { Table, Json, Csv }` + `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`
+- **验收标准**：
+  - [ ] `main.rs` < 300 行，每命令一个文件
+  - [ ] `--store` 为全局参数，子命令无需重复声明
+  - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
+  - [ ] 退出码语义写入 `--help` 与文档
+  - [ ] 所有既有命令行为不变（快照测试）
+- **估算**：5 人日 ｜ **依赖**：无（可与 A 并行）
+
+### B3 · 日志与可观测性
+
+- **目标**：库层零 `println!`；结构化日志；`--json` 纯净。
+- **改动点**：全部 crate；`modeld-core` 引入 `tracing`
+- **验收标准**：
+  - [ ] `rg 'println!|eprintln!' crates/modeld-core crates/modeld-proxy` 结果为 0
+  - [ ] `RUST_LOG=debug` 可输出结构化 JSON（`--log-format json`）
+  - [ ] 每个长任务有 `span`，包含 tx_id / path / duration
+- **估算**：3 人日 ｜ **依赖**：B2（输出层）
+
+### B4 · 下载器加固
+
+- **目标**：流式哈希、断点续传安全、原子提交、内存有界。
+- **改动点**：`crates/modeld-core/src/downloader.rs`
+- **验收标准**：
+  - [ ] 边下边算 BLAKE3，1 GB 下载内存 < 50 MB
+  - [ ] `.part` 附带 `.meta`（URL/ETag/size），URL 或 ETag 变化时丢弃旧分片
+  - [ ] 使用 `If-Range`；服务端不支持 Range 时从 0 重下
+  - [ ] 完成后校验 `bytes_done == expected_size`，不一致即失败
+  - [ ] 元数据缺失时**显式警告**并记录 `unverified` 状态
+  - [ ] 经 `StoreTxn` 原子提交，崩溃后不留半成品
+- **估算**：4 人日 ｜ **依赖**：B1
+
+### B5 · HF 缓存兼容性对拍
+
+- **目标**：与真实 `huggingface_hub` 行为一致。
+- **改动点**：`crates/modeld-core/src/hf_cache.rs`、`python/modeld_hook/*`
+- **验收标准**：
+  - [ ] `refs/main` 内容为 commit SHA（非分支名）
+  - [ ] 快照使用相对符号链接；链接失败时**报错**而非静默复制
+  - [ ] 用 `huggingface_hub>=0.24` 对拍 20 个仓库（含 dataset、subfolder、gated）全部命中
+  - [ ] Python hook 不再在 import 时改写 `HF_HOME`（改为显式 `activate()` 或环境变量）
+  - [ ] `deactivate()` 能完整还原 `hf_hub_download` 与 `file_download.hf_hub_download`
+  - [ ] wrapper 支持 `repo_type` / `subfolder` / `cache_dir` / `local_dir`
+- **估算**：5 人日 ｜ **依赖**：A5
+
+### B6 · 统计语义（逻辑占用 vs 物理占用）
+
+- **目标**：区分 logical / physical，杜绝「假节省」。
+- **改动点**：`crates/modeld-core/src/db.rs`（聚合查询）、`stats.rs`、`dupes.rs`、CLI 的 `stats/dupes`
+- **验收标准**：
+  - [ ] 同时输出 `logical_bytes` 与 `physical_bytes`
+  - [ ] `physical_bytes` 与 `du -sb` 差值 < 1%
+  - [ ] 硬链接/软链不计入浪费；`ReferenceOnly` 明确标注「无空间收益」
+  - [ ] 单条 SQL 聚合，10 万模型仪表盘响应 < 200 ms
+- **估算**：3 人日 ｜ **依赖**：A7
+
+### B7 · 跨进程锁与并发安全
+
+- **目标**：同一 store 的变更操作串行化。
+- **改动点**：新增 `crates/modeld-core/src/lock.rs`（`fd-lock` 或 `fs2`）；接入 dedup/gc/unlink/scan
+- **验收标准**：
+  - [ ] `<store>/.modeld.lock` 存在，持有进程崩溃后锁自动释放
+  - [ ] 第二个变更进程得到明确提示（等待 N 秒或 `--wait`）
+  - [ ] 并发测试：10 进程同时 dedup，无数据损坏、无死锁
+- **估算**：2 人日 ｜ **依赖**：B1
+
+### B8 · 测试体系补齐
+
+- **目标**：核心覆盖率不低于 75%，WebUI 不低于 60%，端到端可用。
+- **产物**：`tests/e2e/`（HTTP 全链路）、`benches/`（scan/dedup 基准）、CI 覆盖率报告
+- **验收标准**：
+  - [ ] 每个 API 路由至少 1 个集成测试（含 4xx）
+  - [ ] 故障注入覆盖 5 个中断点
+  - [ ] 跨卷/挂载点/只读目录/文件锁 4 类环境测试
+  - [ ] `cargo llvm-cov` 报告入库，core 不低于 75%
+  - [ ] 基准回归阈值写入 CI（超过 20% 失败）
+- **估算**：6 人日 ｜ **依赖**：B1–B7（持续进行）
+
+### B9 · 文档重构
+
+- **目标**：文档反映 as-built，不再有「计划态」主文档。
+- **改动点**：`docs/architecture.md` 重写、新增 `docs/adr/`、`SECURITY.md`、`CONTRIBUTING.md`；根目录规划稿归档至 `docs/history/`
+- **验收标准**：
+  - [ ] `architecture.md` 的每个模块描述可在代码中找到对应实现
+  - [ ] ADR 不少于 5 篇（存储布局、事务模型、鉴权、统计语义、HF 兼容）
+  - [ ] 根目录 Markdown 不超过 5 个（README/CHANGELOG/LICENSE/ROADMAP/CONTRIBUTING）
+  - [ ] `docs/proxy-api.md` 与代码默认值一致（含安全默认）
+- **估算**：4 人日 ｜ **依赖**：A3/A6/A7
+
+### 阶段 B 出口 Gate
+
+- [ ] 故障注入矩阵 100% 通过
+- [ ] 覆盖率达标并纳入 CI
+- [ ] `main.rs` < 300 行、库层零 `println!`
+- [ ] 文档 as-built 评审通过
+- [ ] 性能基线建立（10 万文件扫描 / 1 TB 去重）
+
+---
+
+## 6. 阶段 C：产品化（3–6 月）
+
+### C1 · 常驻守护进程与文件监听
+
+- **产物**：`modeld daemon`（`notify` 监听 + 任务队列 + 去抖）
+- **验收**：新增模型文件 5 秒内自动入库；空闲 RSS < 100 MB；异常退出可自动重启
+
+### C2 · 真实可观测性
+
+- **产物**：Prometheus 指标全覆盖、Grafana 面板 JSON、审计日志查询命令
+- **验收**：所有变更路径均产生审计记录；面板可回答「上周谁删了什么」
+
+### C3 · 发布工程
+
+- **产物**：crates.io / PyPI 发布、Homebrew / winget / scoop、SHA256 + 签名、SBOM
+- **验收**：三平台安装包可安装并 `--version` 正常；`cargo install modeld-cli` 可用；发布 0.2.0
+
+### C4 · 安全增强
+
+- **产物**：token 存 OS keyring、模型校验清单（manifest）、可选签名验证、`cargo-deny` 无高危
+- **验收**：`modeld verify --manifest` 可检出被篡改的 CAS 对象；密钥不落盘明文
+
+### C5 · 前端重构
+
+- **产物**：鉴权与会话管理、XSS 全量消除、状态管理规范化、可访问性
+- **验收**：静态扫描无 `innerHTML` 拼接不可信数据；Lighthouse 可访问性不低于 90
+
+### C6 · 性能优化
+
+- **产物**：并行哈希调优、DB 批处理、零拷贝代理、增量 GC
+- **验收**：10 万文件扫描 < 30 分钟（NVMe）；1 TB 去重 < 60 分钟；代理吞吐不低于线速 80%
+
+### C7 · 生态集成
+
+- **产物**：ComfyUI / Forge / A1111 适配器与一键接入脚本、虚拟 FS（RFC 0006 落地）
+- **验收**：三端零配置接入，模型目录指向 store 后可直接出图
+
+---
+
+## 7. 风险与回滚
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| 原子替换在 Windows 上仍有竞态 | 数据可见性 | 保留「先复制到同目录」兜底；失败即中止并保留原文件 |
+| 线程池引入锁竞争 | 吞吐下降 | 每线程独立 DB 连接；基准对比前后 |
+| `toml_edit` 迁移破坏旧配置 | 用户无法启动 | 启动时 schema 校验 + 自动备份 `modeld.toml.bak` |
+| `scan` 默认改为 index | 老用户以为已入库 | 启动提示「仅索引，未复制内容」+ `modeld status` 明确标注 |
+| 阶段 B 重构面过大 | 长期不可发布 | 每任务独立分支，主干始终保持可发布 |
+
+**回滚原则**：每个任务必须能用 `git revert <commit>` 单独回滚，不依赖后续任务；数据层变更必须提供 `modeld store migrate --down`。
+
+---
+
+## 8. 审核问题 → 任务追溯矩阵
+
+| 审核问题 | 级别 | 任务 |
+|---|---|---|
+| 链接替换先删后建 | P0 | A1 |
+| 代理整文件入内存 / OOM | P0 | A2 |
+| 代理单线程 + 下载持锁 | P0 | A2 |
+| 代理鉴权形同虚设 | P0 | A3 |
+| WebUI 无鉴权 + 全开 CORS | P0 | A3 |
+| `serve` token 前端不发 | P0 | A4 |
+| `metadata.db` 错误 | P0 | A4 |
+| `scan` 磁盘翻倍 | P0 | A5 |
+| `token-rotate` 无效 + 配置被清空 | P0 | A6 |
+| 崩溃只标记失败不回滚 | P0 | B1 |
+| 设置/统计/指标假实现 | P1 | A7 |
+| 审计日志未接线 | P1 | A7 |
+| 重复哈希（dedup/ingest） | P1 | B4/B6 |
+| 下载器非原子 + 校验缺失 | P1 | B4 |
+| HF 缓存不兼容 | P1 | B5 |
+| Python hook 副作用 | P1 | B5 |
+| 统计语义错误 | P1 | B6 |
+| 无跨进程锁 | P1 | B7 |
+| CLI 单体 / 无退出码 | P2 | B2 |
+| 库层 println | P2 | B3 |
+| 文档漂移 | P2 | B9 |
+| 构建链路失败 | P0 | A8 |
+
+---
+
+## 9. 状态看板
+
+> 状态：`todo` / `in_progress` / `blocked` / `done`
+> 提交列填短哈希（7 位）；完成后必须回填。
+
+### 阶段 A
+
+| ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
+|---|---|---|---|---|---|---|
+| A1 | 原子链接替换 | todo | — | — | — | — |
+| A2 | 代理流式 + 线程池 + panic 隔离 | todo | — | — | — | — |
+| A3 | 服务端鉴权基线 | todo | — | — | — | — |
+| A4 | WebUI 与 CLI 打通 | todo | — | — | — | — |
+| A5 | 扫描摄取模式 | todo | — | — | — | — |
+| A6 | 配置系统统一 | todo | — | — | — | — |
+| A7 | 清除假实现 | todo | — | — | — | — |
+| A8 | 构建与发布链路修复 | todo | — | — | — | — |
+
+### 阶段 B
+
+| ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
+|---|---|---|---|---|---|---|
+| B1 | 统一事务边界与崩溃恢复 | todo | — | — | — | — |
+| B2 | CLI 拆分与输出层 | todo | — | — | — | — |
+| B3 | 日志与可观测性 | todo | — | — | — | — |
+| B4 | 下载器加固 | todo | — | — | — | — |
+| B5 | HF 缓存兼容性对拍 | todo | — | — | — | — |
+| B6 | 统计语义 | todo | — | — | — | — |
+| B7 | 跨进程锁与并发安全 | todo | — | — | — | — |
+| B8 | 测试体系补齐 | todo | — | — | — | — |
+| B9 | 文档重构 | todo | — | — | — | — |
+
+### 阶段 C
+
+| ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
+|---|---|---|---|---|---|---|
+| C1 | 常驻守护进程 | todo | — | — | — | — |
+| C2 | 真实可观测性 | todo | — | — | — | — |
+| C3 | 发布工程 | todo | — | — | — | — |
+| C4 | 安全增强 | todo | — | — | — | — |
+| C5 | 前端重构 | todo | — | — | — | — |
+| C6 | 性能优化 | todo | — | — | — | — |
+| C7 | 生态集成 | todo | — | — | — | — |
+
+---
+
+## 10. 变更日志
+
+> 每完成一个任务，**必须**在此追加一行（新的在最上方）。
+
+| 日期 | 任务 | 摘要 | 提交 | 影响面 |
+|---|---|---|---|---|
+| 2026-10-24 | — | 创建本文档（基线：全量审核报告） | — | 文档 |
+
+---
+
+## 11. 进度总览
+
+| 阶段 | 任务数 | 完成 | 进度 |
+|---|---|---|---|
+| A 止血 | 8 | 0 | 0% |
+| B 架构收敛 | 9 | 0 | 0% |
+| C 产品化 | 7 | 0 | 0% |
+| **合计** | **24** | **0** | **0%** |
+
+---
+
+## 12. 附录
+
+### 12.1 验收证据模板
+
+在任务验收标准末尾追加：
+
+```md
+> 证据（2026-10-25）：
+> - 测试：cargo test -p modeld-core fault_injection::link_failure_keeps_original 通过
+> - 手动：中断点 3 注入后 sha256sum 与原始一致
+> - 指标：20 GB 下载期间 RSS 峰值 78 MB
+> - 提交：a1b2c3d
+```
+
+### 12.2 提交前自检清单
+
+- [ ] 只改了本任务范围内的文件
+- [ ] `cargo fmt --all -- --check` 通过
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` 通过
+- [ ] `cargo test --workspace` 通过
+- [ ] 新增测试能在修复前失败（回归有效性）
+- [ ] 无新增 `unwrap`/`expect`/`println!`（库层）
+- [ ] 破坏性变更已更新 `CHANGELOG.md`
+- [ ] 本文档 4 处已更新
+
+### 12.3 待办池（不做，但需记录）
+
+> 开发过程中发现但不在当前任务范围内的问题，记录于此，由负责人排期。
+
+| 日期 | 发现人 | 描述 | 建议任务 | 状态 |
+|---|---|---|---|---|
+| 2026-10-24 | 审核 | `.gitignore` 双重编码乱码 + `node_modules` 反忽略 | A8 | open |
+| 2026-10-24 | 审核 | mDNS 仅发现无广播 | C7 | open |
+| 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | open |
+| 2026-10-24 | 审核 | Python hook token 走命令行参数 | B5 | open |
+
+---
+
+*本文档由审核结论生成，随开发推进持续更新。任何与本文档冲突的口头约定均无效，以本文档为准。*
