@@ -9,5 +9,6 @@ pub mod hf;
 pub mod hfstore;
 pub mod meta;
 pub mod proxy;
+pub mod query;
 pub mod store;
 pub mod tx;

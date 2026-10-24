@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`status`/`stats`/`dupes`/`list`/`info` moved to `commands/query.rs`** — the
+  read-only queries now live together. (ROADMAP B2)
 - **`hf-check`/`hf-setup`/`hf-status`/`workflow-*`/`refs-orphans` moved to
   `commands/hfstore.rs`** — they only read the local store, so they do not belong
   with the Hub-facing `hf` module. (ROADMAP B2)
