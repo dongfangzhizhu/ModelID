@@ -363,7 +363,7 @@ Refs: docs/ROADMAP.md#A1
 ### A7 · 清除假实现（设置 / 统计 / 指标）
 
 - **背景**：`PUT /settings` 是 TODO 空实现；`stats` 的 `deduped_saved_bytes`、`last_scan_at` 硬编码；`/metrics` 计数器从不自增；`AuditLogger` 零调用。
-- **状态**：✅ 已完成（`a7impl`）
+- **状态**：✅ 已完成（`234201f`）
 - **改动点**：`crates/modeld-webui/src/api/settings.rs`、`crates/modeld-webui/src/api/stats.rs`、`crates/modeld-webui/src/server.rs`、`crates/modeld-webui/src/api/scan.rs`、`crates/modeld-webui/ui/pages/settings.js`、`crates/modeld-webui/ui/i18n.js`、`crates/modeld-core/src/audit.rs`、`crates/modeld-core/src/db.rs`、`crates/modeld-core/src/gc.rs`、`crates/modeld-core/src/dedup.rs`、`crates/modeld-core/src/unlink.rs`、`crates/modeld-core/src/config.rs`、`crates/modeld-cli/src/main.rs`
 - **实现要点**：
   - **settings 真正落盘**：`GET` 从 `modeld.toml` 读，`PUT` 校验 → 写回（走 A6 的保段 `save_config`）→ 返回落盘后的值 → 写一条 `config_change` 审计。
@@ -645,7 +645,7 @@ Refs: docs/ROADMAP.md#A1
 | A4 | WebUI 与 CLI 打通 | done | AI agent | 2026-10-24 | 2026-10-24 | `c87922b` |
 | A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `c1949b5` |
 | A6 | 配置系统统一 | done | AI agent | 2026-10-24 | 2026-10-24 | `b21c673` |
-| A7 | 清除假实现 | done | AI agent | 2026-10-24 | 2026-10-24 | `a7impl` |
+| A7 | 清除假实现 | done | AI agent | 2026-10-24 | 2026-10-24 | `234201f` |
 | A8 | 构建与发布链路修复 | todo | — | — | — | — |
 
 ### 阶段 B
@@ -682,7 +682,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
-| 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `a7impl` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
+| 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `234201f` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A6 | 配置系统统一：`[proxy]` 并入 `ModeldConfig`、`save_config` 改用 `toml_edit` 只重写自有段（保留注释/未知段）、token 双写 + 旧格式回退、`config get/set/list` 覆盖 20 键并给建议 | `b21c673` | `core/config.rs`、`proxy/config.rs`、`cli/main.rs`、`Cargo.toml`、`docs/proxy-setup.md`、`CHANGELOG.md` |
 | 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `c1949b5` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
 | 2026-10-24 | A4 | WebUI 与 CLI 打通：DB 统一为 `modeld.db`、WS 支持 `?token=`、前端 401 弹窗 + WS 指数退避、`serve --allow-lan` | `c87922b` | `webui/main.rs`、`webui/auth.rs`、`webui/server.rs`、`webui/ui/{main,api,ws,i18n}.js`、`webui/ui/tests/ws.test.js`、`cli/main.rs`、`CHANGELOG.md` |
