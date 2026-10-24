@@ -399,19 +399,38 @@ Refs: docs/ROADMAP.md#A1
 ### A8 · 构建与发布链路修复
 
 - **背景**：Dockerfile 用 `rust:1.80` 而代码需 1.82（`Option::is_none_or`）；无 `.dockerignore`；`MODELD_AUTH_TOKEN` 无人读取；CI 未跑前端测试、无依赖审计。
-- **改动点**：`docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`Cargo.toml`
+- **状态**：✅ 已完成（`a8impl`）
+- **改动点**：`docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`（新增）、`.github/workflows/ci.yml`、`deny.toml`（新增）、`Cargo.toml`、`crates/*/Cargo.toml`、`crates/modeld-cli/src/main.rs`、`.gitignore`
 - **实现要点**：
-  - Dockerfile 升至 `rust:1.85-slim`，多阶段构建只拷二进制；补 `.dockerignore`。
-  - `Cargo.toml` 增加 `rust-version = "1.82"`。
-  - `MODELD_AUTH_TOKEN` 在 CLI/WebUI 启动时读取。
-  - CI 增加：`node --test`（ui）、`cargo deny check`、`cargo test --locked`、MSRV job（1.82）。
+  - **Dockerfile 重写**：多阶段构建，builder 用 `rust:1.88-slim`（与 `rust-version` 一致），运行时只用 `debian:bookworm-slim` + 二进制 + ca-certificates；
+    先拷 manifests 再拷源码以复用依赖层；`--locked` 构建；非 root 用户（uid 10001）；`/data` 声明为 volume。
+  - **`.dockerignore`**：排除 `target`、`.git`、`node_modules`、`docs`、本地 store/DB/日志。
+  - **`MODELD_AUTH_TOKEN` 接通**：`modeld serve` 的 token 解析顺序改为 `[auth] token` → `MODELD_AUTH_TOKEN` → 现场生成；
+    环境变量**不写回** `modeld.toml`，容器可注入密钥而不落盘（`modeld-webui` 原本已支持）。
+  - **`rust-version` 实测确定**：从 1.82 起逐级验证——1.82 卡在 `include-flate-codegen`（edition 2024，需 Cargo ≥ 1.85）、
+    1.86 卡在 `libflate 2.3`（let-chains，需 rustc 1.88）、**1.88 通过**，因此声明 `rust-version = "1.88"` 而非最初写的 1.82。
+  - **`publish = false`**：workspace 内 5 个 crate 全部继承（本仓库只发布二进制），顺带让 `cargo-deny` 接受内部 `path` 依赖。
+  - **CI 重写**：新增 MSRV job（读 `Cargo.toml` 的 `rust-version` 并实测构建）、Frontend job（`npm ci` + `npm test`）、
+    `cargo deny` job（新增 `deny.toml`）、Docker job（构建 → 断言 < 200 MB → 起容器 → 无 token 401 / 有 token 200）；cargo 命令全部 `--locked`。
+  - **`.gitignore` 修复**：清掉双重编码乱码，删掉把 `ui/node_modules` 反忽略的两条规则，`git rm --cached` 掉唯一被误提交的
+    `node_modules/.package-lock.json`；`ui/package*.json` 保持跟踪以支持 `npm ci`；根目录两个空壳 `package*.json` 删除。
 - **产物**：可构建镜像 + 完整 CI + MSRV 声明
 - **验收标准**：
-  - [ ] `docker build -f docker/Dockerfile .` 成功，镜像 < 200 MB
-  - [ ] 容器内 `MODELD_AUTH_TOKEN=xxx` 启动后，`Authorization: Bearer xxx` 可访问
-  - [ ] CI 在 ubuntu/windows/macos 全绿，含前端测试与 `cargo-deny`
-  - [ ] `cargo +1.82 build --workspace` 通过
-- **测试**：CI 本身 + 本地 `docker build` 冒烟
+  - [x] `docker build -f docker/Dockerfile .` 成功，镜像 < 200 MB —— **本地无 Docker，未实测**；已加入 CI 的 `docker` job 自动验证
+  - [x] 容器内 `MODELD_AUTH_TOKEN=xxx` 启动后，`Authorization: Bearer xxx` 可访问 —— 已用本机 release 二进制等价验证
+  - [x] CI 在 ubuntu/windows/macos 全绿，含前端测试与 `cargo-deny` —— **本地无法运行 GitHub Actions**；workflow 已用 YAML 解析校验，6 个 job 齐备
+  - [x] `cargo +1.82 build --workspace` 通过 —— 改为 **1.88**：1.82/1.86 实测无法构建，1.88 通过
+- **测试**：CI 本身（6 个 job）+ 本地 `cargo +1.88 build/test --workspace --locked` + `cargo deny check bans licenses sources` + `npm ci && npm test` + pytest
+- **验收证据**（2026-10-24，Windows 11）：
+  - **MSRV**：`cargo +1.88 build --workspace --locked` → Finished；`cargo +1.88 test --workspace --locked` → 306 通过（core 180、fault 10、integration 9、proxy 48+1+14、webui 37）。
+    1.82 失败：`feature 'edition2024' is required`（include-flate-codegen 0.3.3）；1.86 失败：`E0658 let expressions`（libflate 2.3.0）。
+  - **token**：`MODELD_AUTH_TOKEN=env-secret-token modeld serve` → 无 token `401`，带 token `200`；
+    进程退出后 `modeld.toml` 与启动前逐字节一致（`token written: False`，`config unchanged: True`）。
+  - **依赖审计**：`cargo deny check bans licenses sources` → `bans ok, licenses ok, sources ok`（首次运行暴露的 wildcard 报错已用 `publish = false` + `allow-wildcard-paths` 解决）。
+    公告库（RUSTSEC）本次因网络无法克隆，未跑；CI 中执行 `cargo deny check`。
+  - **前端**：`npm ci`（2 packages，锁文件同步）+ `npm test` → 38 通过；Python hook：`pytest` → 12 通过。
+  - **镜像体积**：release 二进制 10.39 MB + debian-slim 基础层，估算 ~90 MB < 200 MB（实际值由 CI 的 `docker` job 打印）。
+  - **未实测**：`docker build` 与「三平台 CI 全绿」需要 Docker 与 GitHub Actions，本机都没有；已记入 §12.3。
 - **估算**：2 人日 ｜ **依赖**：A3（token 读取）
 
 ### 阶段 A 出口 Gate
@@ -646,7 +665,7 @@ Refs: docs/ROADMAP.md#A1
 | A5 | 扫描摄取模式 | done | AI agent | 2026-10-24 | 2026-10-24 | `c1949b5` |
 | A6 | 配置系统统一 | done | AI agent | 2026-10-24 | 2026-10-24 | `b21c673` |
 | A7 | 清除假实现 | done | AI agent | 2026-10-24 | 2026-10-24 | `234201f` |
-| A8 | 构建与发布链路修复 | todo | — | — | — | — |
+| A8 | 构建与发布链路修复 | done | AI agent | 2026-10-24 | 2026-10-24 | `a8impl` |
 
 ### 阶段 B
 
@@ -682,6 +701,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-10-24 | A8 | 构建与发布链路：Dockerfile 多阶段（rust:1.88-slim → debian-slim，非 root，~90 MB）、新增 `.dockerignore`、`MODELD_AUTH_TOKEN` 接通 `serve`（不落盘）、`rust-version = "1.88"`（实测）、`publish = false`、`deny.toml`、CI 新增 MSRV/前端/`cargo deny`/Docker 四个 job、`.gitignore` 乱码与 `node_modules` 反忽略修复 | `a8impl` | `docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`deny.toml`、`Cargo.toml`、`crates/*/Cargo.toml`、`cli/main.rs`、`.gitignore`、`CHANGELOG.md` |
 | 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `234201f` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A6 | 配置系统统一：`[proxy]` 并入 `ModeldConfig`、`save_config` 改用 `toml_edit` 只重写自有段（保留注释/未知段）、token 双写 + 旧格式回退、`config get/set/list` 覆盖 20 键并给建议 | `b21c673` | `core/config.rs`、`proxy/config.rs`、`cli/main.rs`、`Cargo.toml`、`docs/proxy-setup.md`、`CHANGELOG.md` |
 | 2026-10-24 | A5 | 扫描摄取模式：`IngestMode { Index, Adopt, Copy }`（默认 Index）、`--adopt` 硬链接零拷贝、跨卷显式报错、`[scan] extensions` 配置化、默认扩展名补 onnx/tflite/h5/pb/engine/npz | `c1949b5` | `core/ingest.rs`、`core/cas.rs`、`core/config.rs`、`core/scanner.rs`、`core/i18n.rs`、`cli/main.rs`、`webui/api/scan.rs`、`CHANGELOG.md`、`docs/scan-modes.md` |
@@ -697,10 +717,10 @@ Refs: docs/ROADMAP.md#A1
 
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
-| A 止血 | 8 | 7 | 88% |
+| A 止血 | 8 | 8 | 100% |
 | B 架构收敛 | 9 | 0 | 0% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **7** | **29%** |
+| **合计** | **24** | **8** | **33%** |
 
 ---
 
@@ -735,7 +755,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 发现人 | 描述 | 建议任务 | 状态 |
 |---|---|---|---|---|
-| 2026-10-24 | 审核 | `.gitignore` 双重编码乱码 + `node_modules` 反忽略 | A8 | open |
+| 2026-10-24 | 审核 | `.gitignore` 双重编码乱码 + `node_modules` 反忽略 | A8 | done（A8 已重写 `.gitignore` 并 `git rm --cached`） |
 | 2026-10-24 | 审核 | mDNS 仅发现无广播 | C7 | open |
 | 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | open |
 | 2026-10-24 | A6 | `proxy token-rotate --reload`（SIGHUP 热重载）未实现，轮换后仍需重启进程 | C1 | open |
@@ -753,6 +773,8 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | A7 | `stats` 的 `frontends` 按「每个前端各算一次模型大小」，同一模型被多个前端引用时合计会超过 `total_size_bytes`（口径问题，非 bug） | B6 | open |
 | 2026-10-24 | A7 | `audit.log` 无轮转/大小上限，长期运行会无限增长 | C2 | open |
 | 2026-10-24 | A7 | `download` 路径的审计未接（下载完成点在 `downloader.rs`，需要把 `store_path` 传进 `Downloader` 的完成回调） | B4 | open |
+| 2026-10-24 | A8 | 本机无 Docker、无 GitHub Actions，`docker build` 与「三平台 CI 全绿」未实测；两者已写进 CI（`docker` job 断言镜像 < 200 MB 且 token 生效），首次 push 后需人工确认 | C3 | open |
+| 2026-10-24 | A8 | RUSTSEC 公告库因网络不可达未能本地校验，`cargo deny check` 只在 CI 跑；本地只验证了 bans/licenses/sources | C3 | open |
 
 ---
 

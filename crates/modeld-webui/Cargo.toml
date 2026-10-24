@@ -5,6 +5,7 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Embedded Web UI server for modeld daemon"
+publish.workspace = true
 
 [[bin]]
 name = "modeld-webui"

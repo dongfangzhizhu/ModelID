@@ -1,13 +1,13 @@
-﻿# ============================================================
+# ============================================================
 # Rust
 # ============================================================
 /target/
 **/*.rs.bk
-# NOTE: Cargo.lock is intentionally tracked for this binary crate
-# to guarantee reproducible builds.
+# Cargo.lock is intentionally tracked: this is a binary crate, and a locked
+# dependency graph is what makes the release reproducible.
 
 # ============================================================
-# Python 鈥?build & cache artifacts
+# Python: build and cache artifacts
 # ============================================================
 __pycache__/
 *.py[cod]
@@ -21,7 +21,7 @@ python/.eggs/
 *.tar.gz
 
 # ============================================================
-# Python 鈥?virtual environments
+# Python: virtual environments and local secrets
 # ============================================================
 .venv/
 venv/
@@ -30,30 +30,22 @@ env/
 .env.local
 
 # ============================================================
-# Node / JavaScript (not core to this project)
+# Node: dependencies only
 # ============================================================
+# `crates/modeld-webui/ui` is a small npm project whose `package.json` and
+# `package-lock.json` are tracked so `npm ci` in CI is reproducible. Only the
+# installed tree is ignored; the old rules re-included it by accident.
 node_modules/
-package-lock.json
-# But exclude node_modules installed there
-!/crates/modeld-webui/ui/node_modules/
-package.json
-# Exception: modeld-webui/ui has a minimal package.json to run its
-# frontend property/unit tests (node:test + fast-check) 鈥?track it.
-!/crates/modeld-webui/ui/package.json
-!/crates/modeld-webui/ui/package-lock.json
-# But exclude node_modules installed there
-!/crates/modeld-webui/ui/node_modules/
+npm-debug.log*
 
 # ============================================================
-# IDE & Editor
+# IDE and editor
 # ============================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# Kiro IDE specs (AI-assisted dev tool internals, not for publishing)
 .kiro/
 
 # ============================================================
@@ -64,14 +56,19 @@ Thumbs.db
 desktop.ini
 
 # ============================================================
-# modeld 鈥?local dev / test artifacts
+# modeld: local dev and test artifacts
 # ============================================================
 /test-store/
 /.modeld-test/
 /.modeld/
+*.db
+*.db-wal
+*.db-shm
+*.log
+quarantine/
 
 # ============================================================
-# Secrets & credentials
+# Secrets and credentials
 # ============================================================
 .pypirc
 pypirc
@@ -80,9 +77,9 @@ pypirc
 
 # ============================================================
 # Local development planning docs (internal, not for publishing)
-# These files live in the repo root during development but
-# should not clutter the public-facing repository.
-# Move them under docs/dev/ before the first public release.
+# These live in the repo root during development but should not
+# clutter the public-facing repository. Move them under docs/dev/
+# before the first public release.
 # ============================================================
 DEVELOPMENT_PLAN.md
 PHASE1_PLAN.md

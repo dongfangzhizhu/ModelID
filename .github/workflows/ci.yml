@@ -6,9 +6,12 @@ on:
   pull_request:
     branches: [ main, master ]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   # ---------------------------------------------------------------------------
-  # Rust — fmt + clippy + test
+  # Rust — fmt + clippy + test on all three platforms
   # ---------------------------------------------------------------------------
   rust:
     name: Rust (${{ matrix.os }})
@@ -39,13 +42,124 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build (debug)
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: Run tests
         run: cargo test --workspace --locked
+
+  # ---------------------------------------------------------------------------
+  # MSRV — the version declared in Cargo.toml `rust-version` must actually build
+  # ---------------------------------------------------------------------------
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build with the declared MSRV
+        run: cargo build --workspace --locked
+
+  # ---------------------------------------------------------------------------
+  # Frontend — the Web UI is plain ES modules tested with node --test
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: crates/modeld-webui/ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run tests
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Dependency audit — licences, advisories, banned crates
+  # ---------------------------------------------------------------------------
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: Check licences, advisories, bans and sources
+        run: cargo deny check
+
+  # ---------------------------------------------------------------------------
+  # Docker image — build it and prove the container honours MODELD_AUTH_TOKEN
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker image
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -f docker/Dockerfile -t modeld:ci .
+
+      - name: Report the image size
+        run: |
+          size=$(docker image inspect modeld:ci --format '{{.Size}}')
+          echo "image size: $((size / 1024 / 1024)) MiB"
+          test "$size" -lt $((200 * 1024 * 1024))
+
+      - name: Run the container with a token from the environment
+        run: |
+          docker run -d --name modeld-ci -p 8234:8234 \
+            -e MODELD_AUTH_TOKEN=ci-secret-token \
+            -e MODELD_STORE=/data \
+            modeld:ci
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8234/ 2>/dev/null; then break; fi
+            sleep 1
+          done
+
+      - name: The API rejects requests without the token
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8234/api/v1/status)
+          echo "without token: $code"
+          test "$code" = "401"
+
+      - name: The API accepts the token
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'Authorization: Bearer ci-secret-token' \
+            http://127.0.0.1:8234/api/v1/status)
+          echo "with token: $code"
+          test "$code" = "200"
+
+      - name: Container logs
+        if: always()
+        run: docker logs modeld-ci
 
   # ---------------------------------------------------------------------------
   # Python hook — pytest

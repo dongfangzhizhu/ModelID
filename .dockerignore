@@ -1,0 +1,41 @@
+# Build artefacts
+target/
+**/target/
+
+# Version control and editor state
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Node dependencies and test fixtures for the embedded UI
+**/node_modules/
+**/coverage/
+
+# Python hook environment
+python/.venv/
+python/**/__pycache__/
+**/*.pyc
+
+# Local stores and scratch data
+.modeld/
+data/
+*.db
+*.db-wal
+*.db-shm
+audit.log
+quarantine/
+
+# Documentation and repository metadata (not needed to build the binary)
+docs/
+*.md
+!crates/modeld-webui/ui/**/*.md
+LICENSE
+.github/
+scripts/
+benches/
+tests/
+
+# Anything produced by local verification runs
+*.log
+*.tmp

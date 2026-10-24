@@ -1,0 +1,60 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+#
+# Checked in CI by the `deny` job (cargo deny check).
+
+[graph]
+all-features = false
+targets = [
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "x86_64-pc-windows-msvc" },
+  { triple = "aarch64-apple-darwin" },
+]
+
+[advisories]
+# Deny any RUSTSEC advisory that affects a dependency in the graph.
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Every licence that appears in the current dependency tree (verified with
+# `cargo metadata`), plus a couple of obvious neighbours.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+# `ring` ships its own wording; `unicode-ident` is Unicode-3.0.
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+# `wildcards = "deny"` is about *registry* requirements; a `path` dependency without a
+# `version` is normal inside a private workspace, so those are exempt.
+wildcards = "deny"
+allow-wildcard-paths = true
+# Duplicate versions of a crate are a maintenance smell, not a failure.
+deny = [
+  # Never ship two crypto backends or two TLS stacks by accident.
+  { name = "openssl" },
+  { name = "openssl-sys" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -295,6 +295,10 @@ enum Commands {
         store: Option<PathBuf>,
     },
     /// Start the modeld Web UI server (unified serve command)
+    ///
+    /// The bearer token is read from `[auth] token` in `modeld.toml`, then from
+    /// `MODELD_AUTH_TOKEN`; if neither is set, one is generated for this run and
+    /// printed. The env var is never written to the store.
     Serve {
         /// Bind address (default: 127.0.0.1)
         #[arg(long, default_value = "127.0.0.1")]
@@ -2709,9 +2713,22 @@ fn serve_command(
     let db = Database::open(&db_path)
         .with_context(|| format!("Failed to open database at {}", db_path.display()))?;
 
-    // Load existing config; generate a token if none is configured.
+    // Load existing config. Token resolution: `modeld.toml` → `MODELD_AUTH_TOKEN` →
+    // generate one for this session. The env var is never written to disk, so a
+    // container can inject a secret without it ending up in the store.
     let mut config = load_config(&store_path).unwrap_or_default();
-    let auth_token = if config.auth.token.is_empty() {
+    let env_token = std::env::var("MODELD_AUTH_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+
+    let auth_token = if !config.auth.token.is_empty() {
+        config.auth.token.clone()
+    } else if let Some(token) = env_token {
+        println!("{}", "🔑  Using the token from MODELD_AUTH_TOKEN.".cyan().bold());
+        println!();
+        token
+    } else {
         let new_token = uuid::Uuid::new_v4().to_string();
         config.auth.token = new_token.clone();
         // Print to console only — NOT logged anywhere.
@@ -2725,8 +2742,6 @@ fn serve_command(
         println!("   {}", format!("Authorization: Bearer {}", new_token).dimmed());
         println!();
         new_token
-    } else {
-        config.auth.token.clone()
     };
 
     let (state, _rx) = modeld_webui::AppState::new(db, store_path, Some(auth_token), None);

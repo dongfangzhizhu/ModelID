@@ -63,7 +63,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HF-proxy downloads use their own SQLite connection** — a cache miss no longer
   holds the shared DB mutex for the whole upstream transfer. (ROADMAP A2)
 
+- **`rust-version = "1.88"`** — the declared MSRV was unverified (the Dockerfile
+  pinned 1.80, the roadmap assumed 1.82). Building with 1.82 fails on
+  `include-flate-codegen` (edition 2024) and 1.86 fails on `libflate 2.3` (let-chains);
+  1.88 builds and passes the whole suite. The Dockerfile and the CI MSRV job use the
+  same number. (ROADMAP A8)
+- **The crates are `publish = false`** — this repository ships a binary, not crates; the
+  flag also lets `cargo-deny` accept the workspace-internal path dependencies.
+
 ### Added
+
+- **`MODELD_AUTH_TOKEN` is honoured by `modeld serve`** — the token is resolved as
+  `[auth] token` → `MODELD_AUTH_TOKEN` → generated, and the environment variable is
+  never written to `modeld.toml`, so a container can inject the secret without it
+  landing in the store. Verified: no token → `401`, `Bearer env-secret-token` → `200`,
+  config file byte-identical afterwards. (ROADMAP A8)
+- **A multi-stage Docker image** — `rust:1.88-slim` builder, `debian:bookworm-slim` runtime
+  with only the stripped binary (10.4 MB), a non-root user, `/data` as a volume and
+  `--locked` in the build. `.dockerignore` keeps the build context small. (ROADMAP A8)
+- **`deny.toml` and four new CI jobs** — `cargo deny` (licences, advisories, bans,
+  sources), an MSRV job that reads `rust-version` from `Cargo.toml`, the frontend test
+  suite (`npm ci` + `npm test`), and a Docker job that builds the image, asserts it is
+  under 200 MB and checks `401`/`200` with and without the token. Every cargo command in
+  CI is now `--locked`. (ROADMAP A8)
 
 - **`/metrics` counts requests and errors** — a middleware installed as the outermost
   layer increments `modeld_requests_total` and `modeld_errors_total{status}` for every
@@ -78,7 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed files unless the setting (or `force_rehash`) says otherwise, and
   `modeld serve` opens the browser when the config asks for it. Both are editable
   through `modeld config set`. (ROADMAP A7)
-- **`modeld config list` and a wider `config get/set`** — 20 keys are covered — 20 keys are covered
+- **`modeld config list` and a wider `config get/set`** — 20 keys are covered
   (store, serve, dedup, gc, auth, scan, proxy), an unknown key now gets a
   "did you mean" suggestion, and `auth.token` is masked when read.
   (ROADMAP A6)
@@ -92,6 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modes are selectable from the CLI and from `POST /api/v1/scan`. (ROADMAP A5)
 
 ### Fixed
+
+- **`.gitignore` was double-encoded and re-included `node_modules`** — the file contained
+  mojibake instead of em dashes, and two `!/crates/modeld-webui/ui/node_modules/`
+  rules re-included the installed tree, which is how
+  `ui/node_modules/.package-lock.json` ended up committed. The file is rewritten, that
+  file is untracked, and `ui/package.json` / `ui/package-lock.json` stay tracked so
+  `npm ci` in CI is reproducible. (ROADMAP A8)
 
 - **`PUT /api/v1/settings` was a no-op** — it returned `204` and wrote nothing, while
   `GET` returned hard-coded defaults (`port: 8234`, `quarantine_days: 30`,

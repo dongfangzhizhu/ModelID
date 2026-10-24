@@ -12,8 +12,16 @@ members = [
 version = "0.1.0"
 authors = ["modeld contributors"]
 edition = "2021"
+# Verified with `cargo +1.88 build --workspace --locked` (see ROADMAP A8). Lower
+# versions fail on `include-flate-codegen` (edition 2024, Cargo ≥ 1.85),
+# `icu_properties_data` (rustc 1.86) and `libflate` (let-chains, rustc 1.88).
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/dongfangzhizhu/modeld"
+# The crates are a private workspace: they are built and shipped as the `modeld`
+# binary, never published to crates.io. This also lets `cargo-deny` accept the
+# workspace-internal `path` dependencies.
+publish = false
 
 [workspace.dependencies]
 # Core dependencies

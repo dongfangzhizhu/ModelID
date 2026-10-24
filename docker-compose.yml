@@ -1,15 +1,18 @@
-version: "3.9"
 services:
   modeld:
     build:
       context: .
       dockerfile: docker/Dockerfile
+    image: modeld:local
     volumes:
-      - modeld-store:/data/modeld
+      # The image stores everything (CAS, SQLite, quarantine, audit.log) in /data.
+      - modeld-store:/data
       - ${MODEL_DIR:-/mnt/models}:/models:ro
     environment:
-      - MODELD_STORE=/data/modeld
-      - MODELD_AUTH_TOKEN=${MODELD_AUTH_TOKEN}
+      - MODELD_STORE=/data
+      # Required: the container binds 0.0.0.0, so the Web UI/API needs a token.
+      # export MODELD_AUTH_TOKEN=$(uuidgen) before `docker compose up`.
+      - MODELD_AUTH_TOKEN=${MODELD_AUTH_TOKEN:?set MODELD_AUTH_TOKEN first}
     ports:
       - "127.0.0.1:8234:8234"
     restart: unless-stopped
