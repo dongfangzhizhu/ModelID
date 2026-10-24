@@ -133,8 +133,17 @@ pub async fn trigger_scan(
                     let bytes_arc = bytes_counter.clone();
                     let etx = event_tx2.clone();
                     let sid3 = sid2.clone();
+                    // Hashing runs on rayon threads, so two callbacks can
+                    // interleave "increment counter" and "send event" and
+                    // deliver 2 before 1. The client then sees the progress
+                    // bar jump backwards. Holding this lock makes each
+                    // (counter, event) pair atomic and ordered.
+                    let progress_lock = Arc::new(std::sync::Mutex::new(()));
+                    let progress_lock2 = Arc::clone(&progress_lock);
 
                     let scanned = scanner.scan(&scan_root2, move |path, size| {
+                        let _guard =
+                            progress_lock2.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                         let done = done_arc.fetch_add(1, Ordering::Relaxed) + 1;
                         let bytes_done = bytes_arc.fetch_add(size, Ordering::Relaxed) + size;
                         let _ = etx.send(WsEvent::ScanProgress {
