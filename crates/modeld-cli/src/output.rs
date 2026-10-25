@@ -86,6 +86,16 @@ impl From<ExitCode> for i32 {
     }
 }
 
+/// Write one JSON document to stdout.
+///
+/// This is the **only** place a command may print JSON: keeping it in one
+/// function is what makes "`--json` means stdout is pure JSON" checkable instead
+/// of a convention. Pretty-printed, with a trailing newline, nothing else.
+pub fn write_json<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
 /// The help text appended to `modeld --help`, documenting the exit codes.
 pub const EXIT_CODE_HELP: &str = "\
 Exit codes:

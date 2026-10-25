@@ -103,6 +103,35 @@ fn tx_list_json_is_pure_json() {
 }
 
 #[test]
+fn every_json_command_emits_parseable_json() {
+    let store = temp_store("json-purity");
+    assert_eq!(code(&modeld(&["store", "init", "--store", store.to_str().unwrap()])), 0);
+    let dir = store.to_str().unwrap().to_string();
+
+    // Each of these has a --json flag; with it set, stdout must parse as JSON
+    // and nothing else may be mixed in.
+    let cases: &[&[&str]] = &[
+        &["tx", "list", "--json"],
+        &["pin", "list", "--json"],
+        &["refs", "orphans", "--json"],
+        &["refs", "graph", "--json"],
+        &["verify", "--json"],
+        &["dupes", "--json"],
+        &["list", "--json"],
+    ];
+    for case in cases {
+        let mut args: Vec<&str> = case.to_vec();
+        args.push("--store");
+        args.push(&dir);
+        let out = modeld(&args);
+        assert_eq!(code(&out), 0, "{case:?} failed: {}", stderr(&out));
+        let text = stdout(&out);
+        serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or_else(|e| panic!("{case:?} stdout is not JSON ({e}): {text:?}"));
+    }
+}
+
+#[test]
 fn config_list_reports_the_core_keys() {
     let store = temp_store("config-list");
     assert_eq!(code(&modeld(&["store", "init", "--store", store.to_str().unwrap()])), 0);

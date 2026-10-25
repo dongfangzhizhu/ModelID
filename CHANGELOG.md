@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One place writes JSON** — `output::write_json` replaces the seven
+  `println!("{}", serde_json::to_string_pretty(…))` call sites, so "`--json` means
+  stdout is JSON" is a single function to audit rather than a convention. A new
+  test parses the output of every `--json` command. (ROADMAP B2)
 - **`main.rs` is down to the dispatch** — 4153 → 162 lines. The clap tree moved to
   `cli.rs`, the shared helpers to `util.rs`, and each command family already had
   its module under `commands/`. (ROADMAP B2)

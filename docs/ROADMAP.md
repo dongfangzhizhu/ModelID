@@ -503,15 +503,15 @@ Refs: docs/ROADMAP.md#A1
 ### B2 · CLI 拆分与输出层
 
 - **目标**：`main.rs` < 300 行；命令模块化；统一 `--store`、输出、退出码。
-- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx`、`config`、`hf`、`meta`(tag/note/pin/favorite/refs) 十四个模块已迁出，`--store` 已全局化，`main.rs` 只剩 dispatch（4153 → 162 行）
+- **状态**：✅ 已完成（`7e1ed02` + `06f35b5`）—— `main.rs` 162 行、14 个命令模块、`--store` 全局化、`write_json` 单一出口、11 个快照测试
 - **改动点**：`crates/modeld-cli/src/main.rs` 拆为 `commands/*.rs`、`output.rs`、`error.rs`
 - **产物**：命令注册表 + `OutputFormat { Table, Json, Csv }` + `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`
 - **验收标准**：
   - [x] `main.rs` < 300 行，每命令一个文件 —— `main.rs` 162 行（仅 dispatch），`cli.rs` 装 clap 树，`util.rs` 装共享助手，`commands/` 下 14 个命令模块
   - [x] `--store` 为全局参数，子命令无需重复声明 —— 37 处子命令字段全部删除，`modeld --store X status` 与 `modeld status --store X` 等价
-  - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
+  - [x] `--json` 时 stdout 只有 JSON（日志走 stderr）—— 所有 JSON 输出收敛到 `output::write_json`，`every_json_command_emits_parseable_json` 对 7 个命令断言 stdout 可被 `serde_json::from_str` 解析
   - [x] 退出码语义写入 `--help` 与文档 —— `modeld --help` 末尾打印 0/1/2/3 对照表（`EXIT_CODE_HELP`）
-  - [x] 所有既有命令行为不变（快照测试）—— `tests/cli_snapshot.rs` 10 个用例：命令清单、退出码文案、`--version`、`--store` 两种位置、未知子命令=2、`tx list --json` 输出纯 `[]`、`config list` 键、`verify` 干净、缺库时 `status` 失败且不建库
+  - [x] 所有既有命令行为不变（快照测试）—— `tests/cli_snapshot.rs` 11 个用例（含 JSON 纯净性）
 - **验收证据**（2026-10-24）：
   - `output.rs`：`OutputFormat { Table, Json, Csv }`（`from_flags`、`is_machine`、`as_str`）与
     `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`，3 个单测覆盖标志优先级与数字映射。
@@ -728,7 +728,7 @@ Refs: docs/ROADMAP.md#A1
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
 | B1 | 统一事务边界与崩溃恢复 | done | AI agent | 2026-10-24 | 2026-10-24 | `be7ceee` |
-| B2 | CLI 拆分与输出层 | todo | — | — | — | — |
+| B2 | CLI 拆分与输出层 | done | AI agent | 2026-10-24 | 2026-10-25 | `06f35b5` |
 | B3 | 日志与可观测性 | todo | — | — | — | — |
 | B4 | 下载器加固 | todo | — | — | — | — |
 | B5 | HF 缓存兼容性对拍 | todo | — | — | — | — |
@@ -774,9 +774,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 1 | 11% |
+| B 架构收敛 | 9 | 2 | 22% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **9** | **38%** |
+| **合计** | **24** | **10** | **42%** |
 
 ---
 

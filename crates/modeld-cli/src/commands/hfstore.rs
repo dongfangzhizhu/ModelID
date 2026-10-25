@@ -325,7 +325,7 @@ pub fn refs_orphans_command(store: PathBuf, json_output: bool) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&arr)?);
+        crate::output::write_json(&arr)?;
         return Ok(());
     }
 

@@ -140,7 +140,7 @@ pub fn tag_command(action: TagAction, store: Option<PathBuf>) -> Result<()> {
             if json {
                 let j: Vec<_> =
                     tags.iter().map(|(t, c)| serde_json::json!({"tag": t, "count": c})).collect();
-                println!("{}", serde_json::to_string_pretty(&j)?);
+                crate::output::write_json(&j)?;
             } else {
                 for (tag, count) in &tags {
                     println!("  {} ({})", tag, count);
@@ -194,7 +194,7 @@ pub fn pin_command(action: PinAction, store: Option<PathBuf>) -> Result<()> {
             let pinned = list_pinned(&db)?;
             if json {
                 let hashes: Vec<_> = pinned.iter().map(|h| h.as_hex()).collect();
-                println!("{}", serde_json::to_string_pretty(&hashes)?);
+                crate::output::write_json(&hashes)?;
             } else {
                 for h in &pinned {
                     println!("  {}", h.as_hex());
@@ -261,7 +261,7 @@ pub fn refs_command(action: RefsAction, store: Option<PathBuf>) -> Result<()> {
             let orphans = list_orphans(&db)?;
             if json {
                 let hashes: Vec<_> = orphans.iter().map(|h| h.as_hex()).collect();
-                println!("{}", serde_json::to_string_pretty(&hashes)?);
+                crate::output::write_json(&hashes)?;
             } else {
                 for h in &orphans {
                     println!("  {}", &h.as_hex()[..16]);
@@ -309,7 +309,7 @@ fn refs_graph_command(db: &Database, json_output: bool) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        crate::output::write_json(&entries)?;
         return Ok(());
     }
 

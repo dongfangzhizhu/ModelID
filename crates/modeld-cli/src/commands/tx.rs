@@ -59,7 +59,7 @@ pub fn tx_command(action: TxAction, store: Option<PathBuf>) -> Result<()> {
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&j)?);
+                crate::output::write_json(&j)?;
             } else {
                 for r in &records {
                     let op = r.op_type.as_ref().map(|o| o.as_str()).unwrap_or("unknown");
@@ -93,7 +93,7 @@ pub fn tx_command(action: TxAction, store: Option<PathBuf>) -> Result<()> {
                             .map(|p| p.source.display().to_string())
                             .collect::<Vec<_>>(),
                     });
-                    println!("{}", serde_json::to_string_pretty(&obj)?);
+                    crate::output::write_json(&obj)?;
                 } else {
                     println!("tx_id:  {}", r.tx_id);
                     println!("status: {:?}", r.status);

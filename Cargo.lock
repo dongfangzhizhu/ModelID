@@ -1636,6 +1636,7 @@ dependencies = [
  "modeld-core",
  "modeld-proxy",
  "modeld-webui",
+ "serde",
  "serde_json",
  "tokio",
  "ureq",
