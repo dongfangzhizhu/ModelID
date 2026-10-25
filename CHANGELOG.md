@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`dedup` and `serve` moved to their own modules** — `commands/dedup.rs` and
+  `commands/serve.rs`; `main.rs` is down to the dispatch and the shared helpers.
+  (ROADMAP B2)
 - **`scan` and `gc` moved to their own modules** — `commands/scan.rs` and
   `commands/gc.rs`; the GC keeps its store lock. (ROADMAP B2)
 - **`quarantine`/`verify`/`unlink` moved to `commands/repair.rs`** — the commands

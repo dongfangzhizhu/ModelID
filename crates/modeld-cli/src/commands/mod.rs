@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod db;
+pub mod dedup;
 pub mod gc;
 pub mod hf;
 pub mod hfstore;
@@ -13,5 +14,6 @@ pub mod proxy;
 pub mod query;
 pub mod repair;
 pub mod scan;
+pub mod serve;
 pub mod store;
 pub mod tx;
