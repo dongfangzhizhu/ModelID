@@ -26,7 +26,7 @@ publish = false
 [workspace.dependencies]
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Core dependencies
 blake3 = { version = "1.5", features = ["rayon", "mmap"] }

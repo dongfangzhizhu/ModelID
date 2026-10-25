@@ -188,11 +188,19 @@ pub(crate) fn hf_download_command(
 /// stays machine-readable no matter how chatty the run is. `MODELD_LOG`
 /// overrides the level (`off`, `error`, `warn`, `info`, `debug`, `trace`);
 /// the default is `warn`, which keeps the old `eprintln!` behaviour.
-pub(crate) fn init_logging() {
+pub(crate) fn init_logging(format: crate::output::LogFormat) {
+    use crate::output::LogFormat;
     use tracing_subscriber::{fmt, EnvFilter};
 
     let filter = EnvFilter::try_from_env("MODELD_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = fmt().with_env_filter(filter).with_writer(std::io::stderr).without_time().try_init();
+    let builder = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_span_events(fmt::format::FmtSpan::CLOSE);
+    let _ = match format {
+        LogFormat::Text => builder.without_time().try_init(),
+        LogFormat::Json => builder.json().flatten_event(true).try_init(),
+    };
 }
 
 pub(crate) fn resolve_store(store: Option<PathBuf>) -> PathBuf {

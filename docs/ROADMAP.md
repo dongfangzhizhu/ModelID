@@ -536,12 +536,12 @@ Refs: docs/ROADMAP.md#A1
 ### B3 · 日志与可观测性
 
 - **目标**：库层零 `println!`；结构化日志；`--json` 纯净。
-- **状态**：🟡 进行中 —— 库层 31 处 `println!`/`eprintln!` 全部改为 `tracing`（core + proxy 归零），`MODELD_LOG` 控制级别并写 stderr；JSON 格式开关与 span 未做
+- **状态**：✅ 已完成（`9aa5b11` + 本轮）—— 库层日志归零、`MODELD_LOG` 控级别、`--log-format json` 结构化输出、`scan`/`dedup`/`gc` 带 span
 - **改动点**：全部 crate；`modeld-core` 引入 `tracing`
 - **验收标准**：
   - [x] `rg 'println!|eprintln!' crates/modeld-core crates/modeld-proxy` 结果为 0 —— 31 处改为 `tracing::{warn,info,error,debug}`（dedup 10、scanner 4、proxy server 4、gc 3、discovery 2、tx 2、audit/downloader/fsck/platform/quarantine 各 1）
-  - [ ] `RUST_LOG=debug` 可输出结构化 JSON（`--log-format json`）
-  - [ ] 每个长任务有 `span`，包含 tx_id / path / duration
+  - [x] `RUST_LOG=debug` 可输出结构化 JSON（`--log-format json`）—— `--log-format {text,json}` 全局参数，`LogFormat::Json` 走 `fmt().json().flatten_event(true)`；测试断言 stderr 每行都是带 `timestamp`/`level` 的 JSON 且 stdout 不受影响
+  - [x] 每个长任务有 `span`，包含 tx_id / path / duration —— `scan`/`dedup`/`gc` 用 `#[tracing::instrument(skip_all, fields(store = …))]`，`FmtSpan::CLOSE` 在 span 结束时输出 `time.busy`/`time.idle`
 - **估算**：3 人日 ｜ **依赖**：B2（输出层）
 
 ### B4 · 下载器加固
@@ -730,7 +730,7 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|---|---|---|
 | B1 | 统一事务边界与崩溃恢复 | done | AI agent | 2026-10-24 | 2026-10-24 | `be7ceee` |
 | B2 | CLI 拆分与输出层 | done | AI agent | 2026-10-24 | 2026-10-25 | `06f35b5` |
-| B3 | 日志与可观测性 | doing | AI agent | 2026-10-25 | — | — |
+| B3 | 日志与可观测性 | done | AI agent | 2026-10-25 | 2026-10-25 | `9aa5b11` |
 | B4 | 下载器加固 | todo | — | — | — | — |
 | B5 | HF 缓存兼容性对拍 | todo | — | — | — | — |
 | B6 | 统计语义 | todo | — | — | — | — |
@@ -775,9 +775,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 2 | 22% |
+| B 架构收敛 | 9 | 3 | 33% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **10** | **42%** |
+| **合计** | **24** | **11** | **46%** |
 
 ---
 

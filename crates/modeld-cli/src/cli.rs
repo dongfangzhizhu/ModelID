@@ -21,6 +21,9 @@ use std::path::PathBuf;
 #[command(about = "Content-Addressable Storage for AI models", long_about = None)]
 #[command(after_help = EXIT_CODE_HELP)]
 pub struct Cli {
+    /// Log format on stderr
+    #[arg(long, global = true, value_enum, default_value_t = crate::output::LogFormat::Text)]
+    pub log_format: crate::output::LogFormat,
     /// Store directory (overrides MODELD_STORE and modeld.toml)
     #[arg(short = 's', long, global = true, value_name = "PATH")]
     pub store: Option<PathBuf>,

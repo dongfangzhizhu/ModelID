@@ -127,6 +127,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--log-format json`** — the global flag switches the stderr subscriber to one
+  JSON object per line (`timestamp`, `level`, `message`, span fields); the default
+  stays human-readable. `scan`, `dedup` and `gc` are instrumented, and span close
+  events carry `time.busy`/`time.idle`, so a slow run says where the time went.
+  (ROADMAP B3)
 - **CLI snapshot tests** — `crates/modeld-cli/tests/cli_snapshot.rs` pins what a user
   or a script can depend on: the command list in `--help`, the four documented
   exit codes, `--version`, `--store` in both positions, exit 2 for an unknown

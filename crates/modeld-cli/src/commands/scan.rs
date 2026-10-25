@@ -8,6 +8,7 @@ use modeld_core::{t, tf, CasStore, Database, IngestMode, QuarantineManager, Scan
 use std::path::PathBuf;
 use uuid::Uuid;
 
+#[tracing::instrument(skip_all, fields(store = %store_path.display()))]
 pub fn scan_command(
     scan_path: PathBuf,
     store_path: PathBuf,

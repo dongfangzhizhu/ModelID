@@ -132,6 +132,31 @@ fn every_json_command_emits_parseable_json() {
 }
 
 #[test]
+fn json_logs_go_to_stderr_and_leave_stdout_alone() {
+    let store = temp_store("log-format");
+    let dir = store.to_str().unwrap().to_string();
+    let out = Command::new(env!("CARGO_BIN_EXE_modeld"))
+        .args(["--log-format", "json", "store", "locate", "--store", &dir])
+        .env("MODELD_LOG", "info")
+        .env_remove("MODELD_STORE")
+        .output()
+        .expect("run modeld");
+
+    // stdout keeps its one line, untouched by logging.
+    assert_eq!(stdout(&out).trim(), dir);
+    // Every stderr line is a JSON object with the fields a collector expects.
+    let logs = stderr(&out);
+    let lines: Vec<&str> = logs.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(!lines.is_empty(), "expected at least the start event on stderr");
+    for line in lines {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("stderr line is not JSON ({e}): {line:?}"));
+        assert!(value.get("timestamp").is_some(), "missing timestamp: {line}");
+        assert!(value.get("level").is_some(), "missing level: {line}");
+    }
+}
+
+#[test]
 fn config_list_reports_the_core_keys() {
     let store = temp_store("config-list");
     assert_eq!(code(&modeld(&["store", "init", "--store", store.to_str().unwrap()])), 0);

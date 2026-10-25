@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(store = %store_path.display()))]
 pub fn dedup_command(
     store_path: PathBuf,
     dry_run: bool,

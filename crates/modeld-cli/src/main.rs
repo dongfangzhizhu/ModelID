@@ -37,12 +37,17 @@ use util::hash_command;
 fn main() -> Result<()> {
     // clap exits with 2 for usage errors on its own; everything else goes
     // through ExitCode so the documented table is actually what the shell sees.
-    util::init_logging();
     let cli = Cli::parse();
+    util::init_logging(cli.log_format);
     let _ = ExitCode::Ok;
     // `--store` is a global flag: resolve it once and hand a clone to whichever
     // command runs, so no subcommand has to declare it.
     let store = cli.store.clone();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        store = %store.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+        "modeld start"
+    );
 
     match cli.command {
         Commands::Init { path, interactive } => init_command(path, interactive)?,

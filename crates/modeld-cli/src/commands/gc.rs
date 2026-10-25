@@ -7,6 +7,7 @@ use modeld_core::{t, tf, Database, GcEngine, StoreLock};
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[tracing::instrument(skip_all, fields(store = %store.display(), preview))]
 pub fn gc_command(
     store: PathBuf,
     preview: bool,

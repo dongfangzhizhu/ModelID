@@ -60,6 +60,16 @@ impl OutputFormat {
     }
 }
 
+/// How log lines are rendered on stderr.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum LogFormat {
+    /// Human-readable `LEVEL message field=value` lines.
+    #[default]
+    Text,
+    /// One JSON object per line, for log collectors.
+    Json,
+}
+
 /// Process exit codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
