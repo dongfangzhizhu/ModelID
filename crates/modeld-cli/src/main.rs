@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use commands::config::{config_command, ConfigAction};
 use commands::db::{db_command, DbAction};
+use commands::gc::gc_command;
 use commands::hf::{hf_command, HfAction};
 use commands::hfstore::{
     hf_check_command, hf_setup_command, hf_status_command, refs_orphans_command,
@@ -18,19 +19,18 @@ use commands::meta::{
 use commands::proxy::{proxy_command, ProxyAction};
 use commands::query::{dupes_command, info_command, list_command, stats_command, status_command};
 use commands::repair::{quarantine_command, unlink_command, verify_command, QuarantineAction};
+use commands::scan::scan_command;
 use commands::store::{store_command, StoreAction};
 use commands::tx::{tx_command, TxAction};
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
     hash_file, load_config, resolve_store_path, run_doctor, save_config, t, tf, token_remove,
     token_set, token_status, CasStore, CheckStatus, Database, DedupEngine, DedupMode,
-    DedupStrategy, Downloader, GcEngine, IngestMode, QuarantineManager, ScanOptions, Scanner,
-    StoreLock,
+    DedupStrategy, Downloader, IngestMode, QuarantineManager, StoreLock,
 };
 use output::{ExitCode, EXIT_CODE_HELP};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "modeld")]
@@ -806,129 +806,6 @@ pub(crate) fn init_command(path: Option<PathBuf>, interactive: bool) -> Result<(
     Ok(())
 }
 
-fn scan_command(
-    scan_path: PathBuf,
-    store_path: PathBuf,
-    incremental: bool,
-    full: bool,
-    exclude_globs: Vec<String>,
-    follow_symlinks: bool,
-    mode: IngestMode,
-) -> Result<()> {
-    println!("{}", tf("scan.scanning", &[("path", &scan_path.display())]).cyan().bold());
-
-    // Exclude the store directory from scanning to prevent CAS objects,
-    // quarantine files, and staging temps from being re-ingested (audit 5.8).
-    let store_canonical = std::fs::canonicalize(&store_path).unwrap_or(store_path.clone());
-
-    // Auto-initialize the store so users don't need `modeld init` first.
-    std::fs::create_dir_all(&store_path)
-        .with_context(|| format!("Failed to create store directory: {}", store_path.display()))?;
-    let cas = CasStore::new(&store_path);
-    cas.init()?;
-    let db_path = store_path.join("modeld.db");
-    let mut db = Database::open(&db_path)?;
-    let qm = QuarantineManager::new(&store_path);
-    qm.init()?;
-
-    // Build incremental cache: path → (hash, size) for already-indexed files.
-    // scan() will skip re-hashing files whose on-disk size matches the cached
-    // size (audit 5.6).
-    let preindexed = db.get_all_indexed_paths().unwrap_or_default();
-    let cached_count = preindexed.len();
-
-    // Extensions come from `modeld.toml [scan] extensions` when configured,
-    // otherwise the built-in default list (weights + exported graph formats).
-    let store_config = load_config(&store_path).unwrap_or_default();
-    let extensions = store_config.scan_extensions();
-
-    let scanner = Scanner::new()
-        .with_extensions(extensions)
-        .with_excluded_dirs(vec![store_canonical])
-        .with_preindexed(preindexed)
-        .with_scan_options(ScanOptions { incremental, full, exclude_globs, follow_symlinks });
-
-    // Quick count first
-    let (file_count, total_size) = scanner.count_files(&scan_path)?;
-
-    if file_count == 0 {
-        println!("{}", t("scan.no_files").yellow());
-        return Ok(());
-    }
-
-    let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
-    println!("{}\n", tf("scan.found", &[("count", &file_count), ("gb", &gb)]).bold());
-    if cached_count > 0 {
-        println!("  {}", tf("scan.incremental", &[("count", &cached_count)]).dimmed());
-    }
-
-    // Create progress bar
-    let pb = ProgressBar::new(file_count as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-
-    // Scan and process (hashing now runs in parallel via Rayon — audit 3.3)
-    let results = scanner.scan(&scan_path, |path, size| {
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let mb = format!("{:.2}", size as f64 / 1_048_576.0);
-        pb.set_message(tf("scan.progress_msg", &[("name", &name), ("mb", &mb)]));
-        pb.inc(1);
-    })?;
-
-    pb.finish_with_message(t("progress.done"));
-
-    // Store in CAS and database via the shared ingestion function so that
-    // CLI scans and WebUI scans produce identical CAS/DB state (audit
-    // Wave 1). `scan_id` is generated here since a CLI scan_command run has
-    // no pre-existing scan_id, and is passed through to
-    // `CasStore::store_crash_safe` as the tx_id (audit Wave 5.4).
-    println!("\n{}", t("scan.processing").cyan().bold());
-    println!("  {}", ingest_mode_notice(mode).dimmed());
-    let scan_id = Uuid::new_v4().to_string();
-    let ingest_result =
-        modeld_core::ingest_scan_results(&store_path, &mut db, &results, &scan_id, mode)?;
-
-    println!("\n{}", t("scan.complete").green().bold());
-    println!("  {}", tf("scan.mode", &[("mode", &mode.as_str())]));
-    let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
-    println!("  {}", tf("scan.processed", &[("count", &ingest_result.processed_count)]).bold());
-    println!("  {}", tf("scan.total_size", &[("gb", &gb)]));
-
-    if !ingest_result.errors.is_empty() {
-        println!(
-            "  {}",
-            tf("scan.errors_header", &[("count", &ingest_result.errors.len())]).red().bold()
-        );
-        for err in &ingest_result.errors {
-            println!(
-                "{}",
-                tf("scan.error_line", &[("path", &err.path), ("reason", &err.reason)]).red()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// One-line explanation of what the ingest mode does to the user's files.
-fn ingest_mode_notice(mode: IngestMode) -> &'static str {
-    match mode {
-        IngestMode::Index => {
-            "mode: index — files are catalogued only; nothing is copied or linked \
-             (use --adopt to share them, --copy to duplicate them into the store)"
-        }
-        IngestMode::Adopt => {
-            "mode: adopt — files are hard-linked into the store and become read-only \
-             (zero extra disk space; requires the store and the files on one volume)"
-        }
-        IngestMode::Copy => "mode: copy — files are copied into the store (needs extra disk space)",
-    }
-}
-
 fn hash_command(file: PathBuf) -> Result<()> {
     if !file.exists() {
         let p = file.display().to_string();
@@ -1255,158 +1132,6 @@ pub(crate) fn open_db(store: &std::path::Path) -> Result<Database> {
     let db_path = store.join("modeld.db");
     Database::open(&db_path)
 }
-
-fn gc_command(
-    store: PathBuf,
-    preview: bool,
-    cleanup_quarantine: bool,
-    cleanup_tmp: bool,
-) -> Result<()> {
-    let db_path = store.join("modeld.db");
-    if !db_path.exists() {
-        anyhow::bail!("{}", t("store.not_initialized_exit"));
-    }
-
-    // GC deletes objects; it must not run concurrently with another layout
-    // mutation (dedup, another gc) in the same store.
-    let _lock = StoreLock::acquire(&store, "gc", Duration::from_secs(30))
-        .with_context(|| tf("lock.busy", &[("path", &store.display().to_string())]))?;
-
-    let mut db = Database::open(&db_path)?;
-    let mut gc = GcEngine::new(&mut db, &store);
-
-    if preview {
-        let plan = gc.preview()?;
-
-        println!("{}", t("gc.preview.header").bold());
-        println!();
-
-        println!(
-            "  {}",
-            tf("gc.preview.hard", &[("count", &plan.hard_protected.len())]).green().bold()
-        );
-        if !plan.soft_protected.is_empty() {
-            println!(
-                "  {}",
-                tf("gc.preview.soft_header", &[("count", &plan.soft_protected.len())])
-                    .yellow()
-                    .bold()
-            );
-            for item in &plan.soft_protected {
-                let size = format_bytes(item.size_bytes as u64);
-                println!(
-                    "    {}",
-                    tf(
-                        "gc.preview.soft_line",
-                        &[
-                            ("prefix", &item.hash_prefix),
-                            ("aliases", &item.alias_count),
-                            ("size", &size),
-                        ]
-                    )
-                    .yellow()
-                );
-            }
-        }
-        if !plan.would_quarantine.is_empty() {
-            println!(
-                "  {}",
-                tf("gc.preview.quarantine_header", &[("count", &plan.would_quarantine.len())])
-                    .red()
-                    .bold()
-            );
-            for item in &plan.would_quarantine {
-                let size = format_bytes(item.size_bytes as u64);
-                println!(
-                    "    {}",
-                    tf(
-                        "gc.preview.quarantine_line",
-                        &[("prefix", &item.hash_prefix), ("size", &size)]
-                    )
-                    .red()
-                );
-            }
-            let size = format_bytes(plan.total_reclaimable_bytes as u64);
-            println!("  {}", tf("gc.preview.reclaimable", &[("size", &size)]).yellow().bold());
-        } else {
-            println!("  {}", t("gc.preview.nothing").green());
-        }
-        if plan.expired_quarantine_count > 0 {
-            println!();
-            let size = format_bytes(plan.expired_quarantine_bytes as u64);
-            println!(
-                "  {}",
-                tf(
-                    "gc.preview.expired",
-                    &[("count", &plan.expired_quarantine_count), ("size", &size)]
-                )
-                .yellow()
-                .bold()
-            );
-        }
-        println!();
-        println!("{}", t("gc.preview.run").dimmed());
-        return Ok(());
-    }
-
-    // Execute GC
-    println!("{}", t("gc.running").bold());
-    let result = gc.run_safe()?;
-
-    println!();
-    if result.quarantined.is_empty() {
-        println!("{}", t("gc.nothing_quarantined").green().bold());
-    } else {
-        let size = format_bytes(result.bytes_recovered as u64);
-        println!(
-            "  {}",
-            tf("gc.quarantined", &[("count", &result.quarantined.len()), ("size", &size)]).bold()
-        );
-    }
-    if !result.skipped_protected.is_empty() {
-        println!(
-            "  {} {}",
-            "•".blue(),
-            tf("gc.skipped_hard", &[("count", &result.skipped_protected.len())])
-        );
-    }
-    if !result.skipped_soft.is_empty() {
-        println!(
-            "  {} {}",
-            "⚠".yellow(),
-            tf("gc.skipped_soft", &[("count", &result.skipped_soft.len())])
-        );
-    }
-
-    if cleanup_quarantine {
-        println!();
-        println!("{}", t("gc.cleanup_header").bold());
-        let cleaned = gc.cleanup_quarantine()?;
-        if cleaned > 0 {
-            println!("  {}", tf("gc.cleanup_done", &[("count", &cleaned)]).green().bold());
-        } else {
-            println!("  {}", t("gc.cleanup_none"));
-        }
-    }
-
-    if cleanup_tmp {
-        println!("\n{}", t("gc.cleanup_tmp_header").bold());
-        // Part files: keep for 7 days (in case a slow download can be resumed)
-        // Staging files: keep for 1 day (should be renamed to CAS quickly)
-        let removed = modeld_core::GcEngine::cleanup_tmp(&store, 7 * 24, 24)?;
-        if removed > 0 {
-            println!("  {}", tf("gc.cleanup_tmp_done", &[("count", &removed)]).green().bold());
-        } else {
-            println!("  {}", t("gc.cleanup_tmp_none"));
-        }
-    }
-
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Verify (fsck) command
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Start the embedded Web UI server.
 ///

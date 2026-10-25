@@ -503,11 +503,11 @@ Refs: docs/ROADMAP.md#A1
 ### B2 · CLI 拆分与输出层
 
 - **目标**：`main.rs` < 300 行；命令模块化；统一 `--store`、输出、退出码。
-- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx`、`config`、`hf`、`meta`(tag/note/pin/favorite/refs) 十个模块已迁出（`main.rs` 4153 → 1506 行）
+- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx`、`config`、`hf`、`meta`(tag/note/pin/favorite/refs) 十二个模块已迁出（`main.rs` 4153 → 1231 行）
 - **改动点**：`crates/modeld-cli/src/main.rs` 拆为 `commands/*.rs`、`output.rs`、`error.rs`
 - **产物**：命令注册表 + `OutputFormat { Table, Json, Csv }` + `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`
 - **验收标准**：
-  - [ ] `main.rs` < 300 行，每命令一个文件 —— 已迁出 `commands/{store,db,tx,config,hf,meta,proxy,hfstore,query,repair}.rs`，其余待迁（scan/dedup/gc/serve 四个重命令）
+  - [ ] `main.rs` < 300 行，每命令一个文件 —— 已迁出 `commands/{store,db,tx,config,hf,meta,proxy,hfstore,query,repair,scan,gc}.rs`，其余待迁（dedup/serve 两个重命令）
   - [ ] `--store` 为全局参数，子命令无需重复声明
   - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
   - [x] 退出码语义写入 `--help` 与文档 —— `modeld --help` 末尾打印 0/1/2/3 对照表（`EXIT_CODE_HELP`）
@@ -526,6 +526,7 @@ Refs: docs/ROADMAP.md#A1
   - `commands/hfstore.rs`：`hf-check`/`hf-setup`/`hf-status`/`workflow-scan`/`workflow-deps`/`refs-orphans` 六个只读命令迁出（只查本地库、不联网），`refs orphans` 实测仍正常返回。
   - `commands/query.rs`：`status`/`stats`/`dupes`/`list`/`info` 五个只读查询迁出，`status` 与 `stats` 实测仍正常输出中文表头。
   - `commands/repair.rs`：`QuarantineAction` + `quarantine`/`verify`/`unlink` 迁出，`verify` 实测仍输出「verify.clean」、`quarantine list` 仍输出「没有已隔离的文件」。
+  - `commands/scan.rs` + `commands/gc.rs`：扫描与 GC 迁出，`gc --preview` 实测仍输出「GC 预览（不会做任何更改）」并带锁。
 - **估算**：5 人日 ｜ **依赖**：无（可与 A 并行）
 
 ### B3 · 日志与可观测性

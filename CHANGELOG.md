@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`scan` and `gc` moved to their own modules** — `commands/scan.rs` and
+  `commands/gc.rs`; the GC keeps its store lock. (ROADMAP B2)
 - **`quarantine`/`verify`/`unlink` moved to `commands/repair.rs`** — the commands
   that change or audit store state now live together. (ROADMAP B2)
 - **`status`/`stats`/`dupes`/`list`/`info` moved to `commands/query.rs`** — the

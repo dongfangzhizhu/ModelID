@@ -5,11 +5,13 @@
 
 pub mod config;
 pub mod db;
+pub mod gc;
 pub mod hf;
 pub mod hfstore;
 pub mod meta;
 pub mod proxy;
 pub mod query;
 pub mod repair;
+pub mod scan;
 pub mod store;
 pub mod tx;
