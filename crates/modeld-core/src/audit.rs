@@ -62,7 +62,7 @@ impl AuditEntry {
 /// permission problem is reported on stderr and the caller carries on.
 pub fn record(store_path: &Path, entry: AuditEntry) {
     if let Err(e) = AuditLogger::new(store_path).log(&entry) {
-        eprintln!("warning: could not write audit log: {e}");
+        tracing::warn!("warning: could not write audit log: {e}");
     }
 }
 

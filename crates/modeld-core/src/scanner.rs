@@ -182,7 +182,7 @@ impl Scanner {
                         if let Some(id) = get_dir_id(path, &meta) {
                             let mut vis = visited.borrow_mut();
                             if vis.contains(&id) {
-                                eprintln!(
+                                tracing::warn!(
                                     "scan: symlink cycle detected at {}, skipping",
                                     path.display()
                                 );
@@ -200,7 +200,7 @@ impl Scanner {
             let entry = match entry {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("scan: skipping entry ({e})");
+                    tracing::warn!("scan: skipping entry ({e})");
                     continue;
                 }
             };
@@ -217,7 +217,7 @@ impl Scanner {
             let meta = match entry.metadata() {
                 Ok(m) => m,
                 Err(e) => {
-                    eprintln!("scan: skipping {} (metadata: {e})", path.display());
+                    tracing::warn!("scan: skipping {} (metadata: {e})", path.display());
                     continue;
                 }
             };
@@ -287,7 +287,7 @@ impl Scanner {
                         device_id: *device_id,
                     }),
                     Err(e) => {
-                        eprintln!("scan: skipping {} (hash error: {e})", path.display());
+                        tracing::warn!("scan: skipping {} (hash error: {e})", path.display());
                         None
                     }
                 }

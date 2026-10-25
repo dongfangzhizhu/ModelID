@@ -1,7 +1,7 @@
 //! Internationalization (i18n) for modeld's command-line output.
 //!
 //! Scope: this module localizes the human-facing text printed by the
-//! `modeld` CLI (`println!`/`eprintln!`/`anyhow::bail!`) and the proxy
+//! `modeld` CLI (the stdout/stderr macros, `anyhow::bail!`) and the proxy
 //! server's startup banner. It deliberately does NOT translate:
 //!
 //! - `--json` machine-readable output

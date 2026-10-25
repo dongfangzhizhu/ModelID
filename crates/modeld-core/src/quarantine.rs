@@ -257,7 +257,7 @@ impl QuarantineManager {
                 if let Err(e) = self.delete_permanent(&entry.quarantine_path) {
                     let p = entry.quarantine_path.display().to_string();
                     let es = format!("{:#}", e);
-                    eprintln!(
+                    tracing::warn!(
                         "{}",
                         crate::i18n::tf(
                             "warn.quarantine_cleanup_failed",

@@ -277,7 +277,7 @@ impl<'a> GcEngine<'a> {
                             if let Err(e) =
                                 self.db.quarantine_model(&c.model.blake3_hash, Utc::now())
                             {
-                                eprintln!(
+                                tracing::warn!(
                                     "{}",
                                     crate::i18n::tf(
                                         "warn.gc_db_quarantine_failed",
@@ -291,7 +291,7 @@ impl<'a> GcEngine<'a> {
 
                             // ── Delete dangling aliases ──────────────────────
                             if let Err(e) = self.db.delete_aliases_for_model(&c.model.blake3_hash) {
-                                eprintln!(
+                                tracing::warn!(
                                     "{}",
                                     crate::i18n::tf(
                                         "warn.gc_alias_cleanup_failed",
@@ -304,7 +304,7 @@ impl<'a> GcEngine<'a> {
                             }
                         }
                         Err(e) => {
-                            eprintln!(
+                            tracing::warn!(
                                 "{}",
                                 crate::i18n::tf(
                                     "warn.gc_quarantine_failed",

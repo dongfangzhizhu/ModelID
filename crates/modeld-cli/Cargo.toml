@@ -12,6 +12,8 @@ name = "modeld"
 path = "src/main.rs"
 
 [dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
 modeld-core = { path = "../modeld-core" }
 modeld-proxy = { path = "../modeld-proxy" }
 modeld-client = { path = "../modeld-client" }

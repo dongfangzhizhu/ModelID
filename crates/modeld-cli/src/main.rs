@@ -37,6 +37,7 @@ use util::hash_command;
 fn main() -> Result<()> {
     // clap exits with 2 for usage errors on its own; everything else goes
     // through ExitCode so the documented table is actually what the shell sees.
+    util::init_logging();
     let cli = Cli::parse();
     let _ = ExitCode::Ok;
     // `--store` is a global flag: resolve it once and hand a clone to whichever

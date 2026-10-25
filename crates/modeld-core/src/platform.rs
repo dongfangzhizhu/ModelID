@@ -485,7 +485,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let caps = detect_capabilities(tmp.path());
         // Just ensure it doesn't panic and returns something
-        println!("caps: {:?}", caps);
+        tracing::debug!("caps: {:?}", caps);
         // filesystem_type should not be empty
         assert!(!caps.filesystem_type.is_empty());
     }

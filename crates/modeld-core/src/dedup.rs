@@ -609,7 +609,7 @@ impl DedupEngine {
             if let Err(rename_err) = std::fs::rename(&staging_path, &cas_path) {
                 // Cross-volume moves fail with EXDEV / ERROR_NOT_SAME_DEVICE;
                 // log the reason and fall back to copy+delete.
-                eprintln!(
+                tracing::warn!(
                     "dedup: rename {} → {} failed ({rename_err}); using copy fallback",
                     staging_path.display(),
                     cas_path.display()
@@ -648,7 +648,7 @@ impl DedupEngine {
             // skip it and add to the locked-files report.  Do NOT fail the whole
             // transaction — property 17 (Windows 文件锁跳过).
             if crate::platform::check_file_locked(dup_path) {
-                eprintln!(
+                tracing::warn!(
                     "dedup: {} is locked by another process — skipping (locked-files report)",
                     dup_path.display()
                 );
@@ -673,7 +673,7 @@ impl DedupEngine {
             let alias_type = match &link_result {
                 LinkResult::Success(t) => t.clone(),
                 LinkResult::Failed(err) => {
-                    eprintln!(
+                    tracing::warn!(
                         "{}",
                         crate::i18n::tf(
                             "warn.dedup_link_failed",
@@ -703,7 +703,7 @@ impl DedupEngine {
         if selection.canonical != cas_path {
             // Check if canonical is locked (Windows)
             if crate::platform::check_file_locked(&selection.canonical) {
-                eprintln!(
+                tracing::warn!(
                     "dedup: canonical {} is locked by another process — keeping as independent copy",
                     selection.canonical.display()
                 );
@@ -749,7 +749,7 @@ impl DedupEngine {
         );
 
         if !locked_files.is_empty() {
-            eprintln!(
+            tracing::warn!(
                 "dedup: {} file(s) were locked and skipped in group {}",
                 locked_files.len(),
                 &group.hash.as_hex()[..8]
@@ -774,7 +774,7 @@ impl DedupEngine {
         if strategy == DedupStrategy::Hardlink {
             let same_vol = crate::platform::is_same_volume(source, target);
             if !same_vol {
-                eprintln!(
+                tracing::warn!(
                     "dedup: {} and {} are on different volumes — hardlink not possible, \
                      falling back to copy-to-cas (content is preserved in CAS)",
                     source.display(),
@@ -814,7 +814,7 @@ impl DedupEngine {
                 }
                 Err(e) => {
                     stats.groups_failed += 1;
-                    eprintln!(
+                    tracing::warn!(
                         "{}",
                         crate::i18n::tf(
                             "warn.dedup_group_failed",
@@ -841,19 +841,22 @@ impl DedupEngine {
             let short = &report.tx_id[..8.min(report.tx_id.len())];
             match report.action {
                 crate::recover::TxAction::RolledForward => {
-                    eprintln!(
+                    tracing::warn!(
                         "{}",
                         crate::i18n::tf("warn.recover_phase_b_done", &[("tx", &short)])
                     );
                 }
                 crate::recover::TxAction::RolledBack => {
-                    eprintln!("{}", crate::i18n::tf("warn.recover_rolled_back", &[("tx", &short)]));
+                    tracing::warn!(
+                        "{}",
+                        crate::i18n::tf("warn.recover_rolled_back", &[("tx", &short)])
+                    );
                 }
                 crate::recover::TxAction::Skipped => {}
             }
         }
         if !reports.is_empty() {
-            eprintln!(
+            tracing::warn!(
                 "{}",
                 crate::i18n::tf("warn.recover_processed", &[("count", &reports.len().to_string())])
             );

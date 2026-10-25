@@ -182,6 +182,19 @@ pub(crate) fn hf_download_command(
 /// Resolve an optional CLI store override to a concrete PathBuf.
 ///
 /// Priority: `--store <path>` > `MODELD_STORE` env > `modeld.toml` > platform default.
+/// Install the `tracing` subscriber.
+///
+/// Everything the library logs goes to **stderr**, so `--json` output on stdout
+/// stays machine-readable no matter how chatty the run is. `MODELD_LOG`
+/// overrides the level (`off`, `error`, `warn`, `info`, `debug`, `trace`);
+/// the default is `warn`, which keeps the old `eprintln!` behaviour.
+pub(crate) fn init_logging() {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_env("MODELD_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt().with_env_filter(filter).with_writer(std::io::stderr).without_time().try_init();
+}
+
 pub(crate) fn resolve_store(store: Option<PathBuf>) -> PathBuf {
     resolve_store_path(store.as_deref())
 }

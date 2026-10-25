@@ -1639,6 +1639,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "ureq",
  "uuid",
 ]
@@ -1675,6 +1677,7 @@ dependencies = [
  "thiserror",
  "toml",
  "toml_edit",
+ "tracing",
  "ureq",
  "uuid",
  "walkdir",
@@ -1698,6 +1701,7 @@ dependencies = [
  "tempfile",
  "tiny_http",
  "toml",
+ "tracing",
  "ureq",
 ]
 

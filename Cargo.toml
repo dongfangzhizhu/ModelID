@@ -24,6 +24,10 @@ repository = "https://github.com/dongfangzhizhu/modeld"
 publish = false
 
 [workspace.dependencies]
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Core dependencies
 blake3 = { version = "1.5", features = ["rayon", "mmap"] }
 rusqlite = { version = "0.31", features = ["bundled"] }

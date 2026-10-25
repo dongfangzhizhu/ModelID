@@ -67,7 +67,10 @@ impl ProxyServer {
         let server = Server::http(bind.as_str())
             .map_err(|e| anyhow!("Failed to bind proxy server to {}: {}", bind, e))?;
         let store = self.store_path.display().to_string();
-        eprintln!("{}", modeld_core::tf("proxy.listening", &[("bind", &bind), ("store", &store)]));
+        tracing::info!(
+            "{}",
+            modeld_core::tf("proxy.listening", &[("bind", &bind), ("store", &store)])
+        );
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_handler = shutdown.clone();
@@ -132,7 +135,7 @@ impl ProxyServer {
         if let Some(err) = accept_error {
             return Err(err);
         }
-        eprintln!("{}", modeld_core::t("proxy.shutdown"));
+        tracing::info!("{}", modeld_core::t("proxy.shutdown"));
         Ok(())
     }
 }
@@ -179,7 +182,7 @@ fn worker_loop(rx: Arc<Mutex<Receiver<Job>>>) {
         };
         // One bad request must never take the whole server down.
         if let Err(payload) = catch_unwind(AssertUnwindSafe(job)) {
-            eprintln!("proxy: request handler panicked: {}", panic_message(payload.as_ref()));
+            tracing::error!("proxy: request handler panicked: {}", panic_message(payload.as_ref()));
         }
     }
 }
@@ -196,7 +199,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 fn run_request(request: Request, ctx: &RequestContext) {
     if let Err(e) = handle_request(request, ctx) {
-        eprintln!("request handler error: {:#}", e);
+        tracing::error!("request handler error: {:#}", e);
     }
 }
 

@@ -166,7 +166,7 @@ impl Downloader {
         // Warn when a CLI-supplied token is used instead of the env var.
         // Token value is never printed.
         if self.token_from_cli {
-            eprintln!(
+            tracing::warn!(
                 "warning: --token flag detected. For security, prefer setting the \
                  HF_TOKEN environment variable instead of passing the token on the \
                  command line (it may appear in shell history and process listings)."

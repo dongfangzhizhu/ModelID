@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The library logs through `tracing`, not stderr** — all 31 `println!`/`eprintln!`
+  calls in `modeld-core` and `modeld-proxy` are now `tracing::warn!`/`info!`/`error!`,
+  so a caller decides where they go. The CLI installs a stderr subscriber
+  controlled by `MODELD_LOG` (default `warn`), which keeps `--json` stdout clean
+  no matter how chatty a run is. (ROADMAP B3)
 - **One place writes JSON** — `output::write_json` replaces the seven
   `println!("{}", serde_json::to_string_pretty(…))` call sites, so "`--json` means
   stdout is JSON" is a single function to audit rather than a convention. A new

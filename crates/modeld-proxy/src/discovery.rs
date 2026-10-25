@@ -108,14 +108,14 @@ impl MdnsAnnouncer {
             self.txt.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join(" ");
         let stype = SERVICE_TYPE;
         let port_str = self.port.to_string();
-        eprintln!(
+        tracing::warn!(
             "{}",
             modeld_core::i18n::tf(
                 "warn.mdns_announce",
                 &[("stype", &stype), ("port", &port_str), ("txt", &txt_str)],
             )
         );
-        eprintln!("{}", modeld_core::i18n::t("warn.mdns_announce_hint"));
+        tracing::warn!("{}", modeld_core::i18n::t("warn.mdns_announce_hint"));
     }
 }
 

@@ -248,7 +248,7 @@ impl<'a> TransactionManager<'a> {
                 Ok(plan) => {
                     for entry in &plan.entries {
                         if let Err(e) = self.restore_entry(entry) {
-                            eprintln!(
+                            tracing::warn!(
                                 "tx: rollback entry failed for {}: {:#}",
                                 entry.source.display(),
                                 e
@@ -258,7 +258,7 @@ impl<'a> TransactionManager<'a> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("tx: failed to parse rollback_plan for {}: {}", tx_id, e);
+                    tracing::warn!("tx: failed to parse rollback_plan for {}: {}", tx_id, e);
                 }
             }
         }

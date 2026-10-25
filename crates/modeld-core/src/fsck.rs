@@ -274,7 +274,11 @@ pub fn run_verify(store: &Path, db: &Database, deep: bool) -> Result<VerifyRepor
                                 }
                             }
                             Err(e) => {
-                                eprintln!("verify: failed to hash {}: {:#}", cas_path.display(), e);
+                                tracing::warn!(
+                                    "verify: failed to hash {}: {:#}",
+                                    cas_path.display(),
+                                    e
+                                );
                             }
                         }
                     }
