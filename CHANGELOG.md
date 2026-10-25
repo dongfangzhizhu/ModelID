@@ -31,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`main.rs` is down to the dispatch** — 4153 → 162 lines. The clap tree moved to
+  `cli.rs`, the shared helpers to `util.rs`, and each command family already had
+  its module under `commands/`. (ROADMAP B2)
 - **`--store` is a global flag** — it was declared on 37 separate subcommand
   variants (and again on the nested action enums). One `global = true` argument
   on `Cli` replaces all of them, so `modeld --store X status` and

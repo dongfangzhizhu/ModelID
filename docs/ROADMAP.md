@@ -503,11 +503,11 @@ Refs: docs/ROADMAP.md#A1
 ### B2 · CLI 拆分与输出层
 
 - **目标**：`main.rs` < 300 行；命令模块化；统一 `--store`、输出、退出码。
-- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx`、`config`、`hf`、`meta`(tag/note/pin/favorite/refs) 十四个模块已迁出，`--store` 已全局化（`main.rs` 4153 → 793 行）
+- **状态**：🟡 进行中 —— 输出层与退出码已落地（`output.rs`），`commands/` 目录已建立，`store`、`db`、`tx`、`config`、`hf`、`meta`(tag/note/pin/favorite/refs) 十四个模块已迁出，`--store` 已全局化，`main.rs` 只剩 dispatch（4153 → 162 行）
 - **改动点**：`crates/modeld-cli/src/main.rs` 拆为 `commands/*.rs`、`output.rs`、`error.rs`
 - **产物**：命令注册表 + `OutputFormat { Table, Json, Csv }` + `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`
 - **验收标准**：
-  - [ ] `main.rs` < 300 行，每命令一个文件 —— 已迁出 `commands/{store,db,tx,config,hf,meta,proxy,hfstore,query,repair,scan,gc,dedup,serve}.rs`；`main.rs` 只剩 dispatch 与共享工具函数
+  - [x] `main.rs` < 300 行，每命令一个文件 —— `main.rs` 162 行（仅 dispatch），`cli.rs` 装 clap 树，`util.rs` 装共享助手，`commands/` 下 14 个命令模块
   - [x] `--store` 为全局参数，子命令无需重复声明 —— 37 处子命令字段全部删除，`modeld --store X status` 与 `modeld status --store X` 等价
   - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
   - [x] 退出码语义写入 `--help` 与文档 —— `modeld --help` 末尾打印 0/1/2/3 对照表（`EXIT_CODE_HELP`）
@@ -529,6 +529,7 @@ Refs: docs/ROADMAP.md#A1
   - `commands/scan.rs` + `commands/gc.rs`：扫描与 GC 迁出，`gc --preview` 实测仍输出「GC 预览（不会做任何更改）」并带锁。
   - `commands/dedup.rs` + `commands/serve.rs`：去重与 WebUI 服务迁出，`dedup --store <p>` 实测仍输出「modeld 去重」表头。
   - `--store` 全局化：`Cli` 上 `#[arg(short='s', long, global = true)]`，`main` 解析一次后把 `Option<PathBuf>` 克隆给各命令；两种书写位置实测等价，`scan --help` 里 `-s, --store <PATH>` 出现在「全局参数」段。
+  - 文件拆分收尾：`main.rs` 162 行 = `fn main` + dispatch；`cli.rs` 装 `Cli`/`Commands`；`util.rs` 装共享助手；`--help` 与 `config get serve.port` 实测不变。
 - **估算**：5 人日 ｜ **依赖**：无（可与 A 并行）
 
 ### B3 · 日志与可观测性
