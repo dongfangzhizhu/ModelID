@@ -25,9 +25,6 @@ pub enum NoteAction {
         hash: String,
         /// Note text (empty string clears the note)
         text: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
 }
 
@@ -37,23 +34,14 @@ pub enum PinAction {
     Add {
         /// Full 64-character BLAKE3 hash
         hash: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Unpin a model
     Remove {
         /// Full 64-character BLAKE3 hash
         hash: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// List all pinned models
     List {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -66,17 +54,11 @@ pub enum FavoriteAction {
     Add {
         /// Full 64-character BLAKE3 hash
         hash: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Remove the favourite flag from a model
     Remove {
         /// Full 64-character BLAKE3 hash
         hash: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
 }
 
@@ -86,32 +68,20 @@ pub enum RefsAction {
     Scan {
         /// Workflow JSON file (or directory of JSON files)
         path: PathBuf,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Explain why a model cannot be deleted
     Why {
         /// Full 64-character BLAKE3 hash
         hash: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// List models with no workflow references and no aliases (orphans)
     Orphans {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
     /// Show reference graph: all models with their reference status
     Graph {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -128,9 +98,6 @@ pub enum TagAction {
         hash: String,
         /// Tag to add
         tag: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Remove a tag from a model
     Remove {
@@ -138,41 +105,35 @@ pub enum TagAction {
         hash: String,
         /// Tag to remove
         tag: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// List all tags with usage counts
     List {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
 }
 
-pub fn tag_command(action: TagAction) -> Result<()> {
+pub fn tag_command(action: TagAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        TagAction::Add { hash, tag, store } => {
-            let store_path = resolve_store(store);
+        TagAction::Add { hash, tag } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             add_tag(&mut db, &h, &tag)?;
             println!("✓ Added tag '{}' to {}", tag, &hash[..16]);
         }
-        TagAction::Remove { hash, tag, store } => {
-            let store_path = resolve_store(store);
+        TagAction::Remove { hash, tag } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             remove_tag(&mut db, &h, &tag)?;
             println!("✓ Removed tag '{}' from {}", tag, &hash[..16]);
         }
-        TagAction::List { store, json } => {
-            let store_path = resolve_store(store);
+        TagAction::List { json } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let db = Database::open(&db_path)?;
             let tags = list_all_tags(&db)?;
@@ -192,10 +153,10 @@ pub fn tag_command(action: TagAction) -> Result<()> {
 
 // ── Note management ───────────────────────────────────────────────────────────
 
-pub fn note_command(action: NoteAction) -> Result<()> {
+pub fn note_command(action: NoteAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        NoteAction::Set { hash, text, store } => {
-            let store_path = resolve_store(store);
+        NoteAction::Set { hash, text } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
@@ -208,26 +169,26 @@ pub fn note_command(action: NoteAction) -> Result<()> {
 
 // ── Pin management ────────────────────────────────────────────────────────────
 
-pub fn pin_command(action: PinAction) -> Result<()> {
+pub fn pin_command(action: PinAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        PinAction::Add { hash, store } => {
-            let store_path = resolve_store(store);
+        PinAction::Add { hash } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             pin_model(&mut db, &h)?;
             println!("✓ Pinned {}", &hash[..16]);
         }
-        PinAction::Remove { hash, store } => {
-            let store_path = resolve_store(store);
+        PinAction::Remove { hash } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             unpin_model(&mut db, &h)?;
             println!("✓ Unpinned {}", &hash[..16]);
         }
-        PinAction::List { store, json } => {
-            let store_path = resolve_store(store);
+        PinAction::List { json } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let db = Database::open(&db_path)?;
             let pinned = list_pinned(&db)?;
@@ -246,18 +207,18 @@ pub fn pin_command(action: PinAction) -> Result<()> {
 
 // ── Favorite management ───────────────────────────────────────────────────────
 
-pub fn favorite_command(action: FavoriteAction) -> Result<()> {
+pub fn favorite_command(action: FavoriteAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        FavoriteAction::Add { hash, store } => {
-            let store_path = resolve_store(store);
+        FavoriteAction::Add { hash } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             favorite_model(&mut db, &h)?;
             println!("✓ Favorited {}", &hash[..16]);
         }
-        FavoriteAction::Remove { hash, store } => {
-            let store_path = resolve_store(store);
+        FavoriteAction::Remove { hash } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
@@ -270,17 +231,17 @@ pub fn favorite_command(action: FavoriteAction) -> Result<()> {
 
 // ── Reference graph commands ──────────────────────────────────────────────────
 
-pub fn refs_command(action: RefsAction) -> Result<()> {
+pub fn refs_command(action: RefsAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        RefsAction::Scan { path, store } => {
-            let store_path = resolve_store(store);
+        RefsAction::Scan { path } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let count = scan_workflow_refs(&mut db, &path)?;
             println!("✓ Indexed {} model references from {}", count, path.display());
         }
-        RefsAction::Why { hash, store } => {
-            let store_path = resolve_store(store);
+        RefsAction::Why { hash } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
@@ -293,8 +254,8 @@ pub fn refs_command(action: RefsAction) -> Result<()> {
                 }
             }
         }
-        RefsAction::Orphans { store, json } => {
-            let store_path = resolve_store(store);
+        RefsAction::Orphans { json } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let db = Database::open(&db_path)?;
             let orphans = list_orphans(&db)?;
@@ -307,8 +268,8 @@ pub fn refs_command(action: RefsAction) -> Result<()> {
                 }
             }
         }
-        RefsAction::Graph { store, json } => {
-            let store_path = resolve_store(store);
+        RefsAction::Graph { json } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let db = Database::open(&db_path)?;
             refs_graph_command(&db, json)?;

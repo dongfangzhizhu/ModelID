@@ -9,22 +9,11 @@ use std::path::{Path, PathBuf};
 #[derive(Subcommand)]
 pub enum StoreAction {
     /// Print the resolved store path
-    Locate {
-        /// Store directory (if set, just prints this path)
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Locate {},
     /// Initialize the store (same as `modeld init`)
-    Init {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Init {},
     /// Verify store consistency
     Verify {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -40,19 +29,19 @@ pub enum StoreAction {
     },
 }
 
-pub fn store_command(action: StoreAction) -> Result<()> {
+pub fn store_command(action: StoreAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        StoreAction::Locate { store } => {
-            let path = resolve_store(store);
+        StoreAction::Locate {} => {
+            let path = resolve_store(store.clone());
             println!("{}", path.display());
             Ok(())
         }
-        StoreAction::Init { store } => {
-            let path = resolve_store(store);
+        StoreAction::Init {} => {
+            let path = resolve_store(store.clone());
             init_command(Some(path), false)
         }
-        StoreAction::Verify { store, json } => {
-            let path = resolve_store(store);
+        StoreAction::Verify { json } => {
+            let path = resolve_store(store.clone());
             verify_command(path, json)
         }
         StoreAction::Migrate { from, to } => store_migrate_command(from, to),

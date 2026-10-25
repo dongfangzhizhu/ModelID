@@ -10,9 +10,6 @@ use std::path::PathBuf;
 pub enum TxAction {
     /// List transaction records
     List {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -21,9 +18,6 @@ pub enum TxAction {
     Show {
         /// Transaction ID (UUID)
         tx_id: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -32,31 +26,21 @@ pub enum TxAction {
     Rollback {
         /// Transaction ID (UUID)
         tx_id: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Recover from a crash: mark PENDING transactions as FAILED and clean staging
-    Recover {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Recover {},
     /// Delete transaction records older than a given duration
     Cleanup {
         /// Age threshold, e.g. "30d", "7d", "1h"
         #[arg(long)]
         older_than: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
 }
 
-pub fn tx_command(action: TxAction) -> Result<()> {
+pub fn tx_command(action: TxAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        TxAction::List { store, json } => {
-            let store_path = resolve_store(store);
+        TxAction::List { json } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let tm = TransactionManager::new(&mut db, &store_path);
@@ -89,8 +73,8 @@ pub fn tx_command(action: TxAction) -> Result<()> {
                 }
             }
         }
-        TxAction::Show { tx_id, store, json } => {
-            let store_path = resolve_store(store);
+        TxAction::Show { tx_id, json } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let tm = TransactionManager::new(&mut db, &store_path);
@@ -129,16 +113,16 @@ pub fn tx_command(action: TxAction) -> Result<()> {
                 anyhow::bail!("Transaction not found: {}", tx_id);
             }
         }
-        TxAction::Rollback { tx_id, store } => {
-            let store_path = resolve_store(store);
+        TxAction::Rollback { tx_id } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let mut tm = TransactionManager::new(&mut db, &store_path);
             tm.rollback(&tx_id)?;
             println!("✓ Rolled back transaction {}", &tx_id[..8.min(tx_id.len())]);
         }
-        TxAction::Recover { store } => {
-            let store_path = resolve_store(store);
+        TxAction::Recover {} => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let mut tm = TransactionManager::new(&mut db, &store_path);
@@ -165,8 +149,8 @@ pub fn tx_command(action: TxAction) -> Result<()> {
                 }
             }
         }
-        TxAction::Cleanup { older_than, store } => {
-            let store_path = resolve_store(store);
+        TxAction::Cleanup { older_than } => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let mut db = Database::open(&db_path)?;
             let mut tm = TransactionManager::new(&mut db, &store_path);

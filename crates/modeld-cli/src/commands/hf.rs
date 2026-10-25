@@ -22,9 +22,6 @@ pub enum HfAction {
         /// HuggingFace access token — prefer HF_TOKEN env var instead
         #[arg(long)]
         token: Option<String>,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Download all files in a HuggingFace repo (snapshot)
     Snapshot {
@@ -36,9 +33,6 @@ pub enum HfAction {
         /// HuggingFace access token — prefer HF_TOKEN env var instead
         #[arg(long)]
         token: Option<String>,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// HuggingFace cache management
     Cache {
@@ -55,53 +49,37 @@ pub enum HfAction {
 #[derive(Subcommand)]
 pub enum HfCacheAction {
     /// List files in the HF cache
-    List {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    List {},
     /// Verify integrity of HF cache entries
-    Verify {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Verify {},
 }
 
 #[derive(Subcommand)]
 pub enum HfTokenAction {
     /// Store a HuggingFace access token (reads from stdin)
-    Set {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Set {},
     /// Remove the stored HuggingFace token
-    Remove {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Remove {},
     /// Show whether a token is currently stored
-    Status {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Status {},
 }
 
 // ── Governance subcommand trees ───────────────────────────────────────────────
 
-pub fn hf_command(action: HfAction) -> Result<()> {
+pub fn hf_command(action: HfAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        HfAction::Download { repo_id, filename, revision, token, store } => {
-            hf_subcommand_download(resolve_store(store), &repo_id, &filename, &revision, token)
+        HfAction::Download { repo_id, filename, revision, token } => hf_subcommand_download(
+            resolve_store(store.clone()),
+            &repo_id,
+            &filename,
+            &revision,
+            token,
+        ),
+        HfAction::Snapshot { repo_id, revision, token } => {
+            hf_subcommand_snapshot(resolve_store(store.clone()), &repo_id, &revision, token)
         }
-        HfAction::Snapshot { repo_id, revision, token, store } => {
-            hf_subcommand_snapshot(resolve_store(store), &repo_id, &revision, token)
-        }
-        HfAction::Cache { action } => hf_cache_command(action),
-        HfAction::Token { action } => hf_token_command(action),
+        HfAction::Cache { action } => hf_cache_command(action, store.clone()),
+        HfAction::Token { action } => hf_token_command(action, store.clone()),
     }
 }
 
@@ -211,10 +189,10 @@ fn hf_subcommand_snapshot(
 
 // ── hf cache ─────────────────────────────────────────────────────────────────
 
-fn hf_cache_command(action: HfCacheAction) -> Result<()> {
+fn hf_cache_command(action: HfCacheAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        HfCacheAction::List { store } => {
-            let store_path = resolve_store(store);
+        HfCacheAction::List {} => {
+            let store_path = resolve_store(store.clone());
             let hf_cache = HfCache::new(&store_path);
             let stats = hf_cache.stats().ok();
 
@@ -230,8 +208,8 @@ fn hf_cache_command(action: HfCacheAction) -> Result<()> {
             }
             Ok(())
         }
-        HfCacheAction::Verify { store } => {
-            let store_path = resolve_store(store);
+        HfCacheAction::Verify {} => {
+            let store_path = resolve_store(store.clone());
             let hf_cache = HfCache::new(&store_path);
             let db_path = store_path.join("modeld.db");
 
@@ -256,10 +234,10 @@ fn hf_cache_command(action: HfCacheAction) -> Result<()> {
 
 // ── hf token ─────────────────────────────────────────────────────────────────
 
-fn hf_token_command(action: HfTokenAction) -> Result<()> {
+fn hf_token_command(action: HfTokenAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        HfTokenAction::Set { store } => {
-            let store_path = resolve_store(store);
+        HfTokenAction::Set {} => {
+            let store_path = resolve_store(store.clone());
             std::fs::create_dir_all(&store_path).context("Failed to create store directory")?;
 
             print!("Enter your HuggingFace token: ");
@@ -281,14 +259,14 @@ fn hf_token_command(action: HfTokenAction) -> Result<()> {
             );
             Ok(())
         }
-        HfTokenAction::Remove { store } => {
-            let store_path = resolve_store(store);
+        HfTokenAction::Remove {} => {
+            let store_path = resolve_store(store.clone());
             token_remove(&store_path)?;
             println!("{}", "Token removed.".yellow().bold());
             Ok(())
         }
-        HfTokenAction::Status { store } => {
-            let store_path = resolve_store(store);
+        HfTokenAction::Status {} => {
+            let store_path = resolve_store(store.clone());
             let status = token_status(&store_path)?;
             println!("HF token: {}", status.bold());
             Ok(())

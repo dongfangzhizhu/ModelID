@@ -9,46 +9,27 @@ use std::path::PathBuf;
 #[derive(Subcommand)]
 pub enum DbAction {
     /// Show database status (schema version, file sizes, integrity)
-    Status {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Status {},
     /// Backup the database to <store>/backups/
-    Backup {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Backup {},
     /// Restore the database from a backup file
     Restore {
         /// Path to the backup file
         backup: PathBuf,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
     },
     /// VACUUM the database to reclaim disk space
-    Vacuum {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Vacuum {},
     /// Run any pending schema migrations
-    Migrate {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Migrate {},
 }
 
-pub fn db_command(action: DbAction) -> Result<()> {
+pub fn db_command(action: DbAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        DbAction::Status { store } => {
-            let store_path = resolve_store(store);
+        DbAction::Status {} => {
+            let store_path = resolve_store(store.clone());
             let db_path = store_path.join("modeld.db");
             if !db_path.exists() {
                 anyhow::bail!("Database not found at {}", db_path.display());
@@ -70,8 +51,8 @@ pub fn db_command(action: DbAction) -> Result<()> {
             let integrity_ok = integrity_result.eq_ignore_ascii_case("ok");
             println!("integrity      : {}", if integrity_ok { "OK" } else { &integrity_result });
         }
-        DbAction::Backup { store } => {
-            let store_path = resolve_store(store);
+        DbAction::Backup {} => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let backups_dir = store_path.join("backups");
             std::fs::create_dir_all(&backups_dir)?;
@@ -83,11 +64,11 @@ pub fn db_command(action: DbAction) -> Result<()> {
             std::fs::copy(&db_path, &backup_path)?;
             println!("✓ Database backed up to {}", backup_path.display());
         }
-        DbAction::Restore { backup, store, yes } => {
+        DbAction::Restore { backup, yes } => {
             if !backup.exists() {
                 anyhow::bail!("Backup file not found: {}", backup.display());
             }
-            let store_path = resolve_store(store);
+            let store_path = resolve_store(store.clone());
             let db_path = store_path.join("modeld.db");
             if !yes {
                 print!("Replace {} with {}? [y/N]: ", db_path.display(), backup.display());
@@ -102,15 +83,15 @@ pub fn db_command(action: DbAction) -> Result<()> {
             std::fs::copy(&backup, &db_path)?;
             println!("✓ Database restored from {}", backup.display());
         }
-        DbAction::Vacuum { store } => {
-            let store_path = resolve_store(store);
+        DbAction::Vacuum {} => {
+            let store_path = resolve_store(store.clone());
             let db_path = require_store_db(&store_path)?;
             let db = Database::open(&db_path)?;
             db.vacuum()?;
             println!("✓ Database vacuumed");
         }
-        DbAction::Migrate { store } => {
-            let store_path = resolve_store(store);
+        DbAction::Migrate {} => {
+            let store_path = resolve_store(store.clone());
             let db_path = store_path.join("modeld.db");
             if !db_path.exists() {
                 anyhow::bail!("Database not found at {}", db_path.display());

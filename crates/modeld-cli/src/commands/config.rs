@@ -12,9 +12,6 @@ pub enum ConfigAction {
     Get {
         /// Key in dot notation, e.g. store.path, serve.port
         key: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Write a configuration value to modeld.toml
     Set {
@@ -22,29 +19,22 @@ pub enum ConfigAction {
         key: String,
         /// New value
         value: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// List every configurable key and its current value
-    List {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    List {},
 }
 
-pub fn config_command(action: ConfigAction) -> Result<()> {
+pub fn config_command(action: ConfigAction, store: Option<PathBuf>) -> Result<()> {
     match action {
-        ConfigAction::Get { key, store } => {
-            let store_path = resolve_store(store);
+        ConfigAction::Get { key } => {
+            let store_path = resolve_store(store.clone());
             let config = load_config(&store_path)?;
             let value = config_get_value(&config, &key)?;
             println!("{}", value);
             Ok(())
         }
-        ConfigAction::Set { key, value, store } => {
-            let store_path = resolve_store(store);
+        ConfigAction::Set { key, value } => {
+            let store_path = resolve_store(store.clone());
             let mut config = load_config(&store_path)?;
             config_set_value(&mut config, &key, &value)?;
             // `save_config` merges into the existing document, so unrelated
@@ -66,8 +56,8 @@ pub fn config_command(action: ConfigAction) -> Result<()> {
             println!("{} {} = {}", "✓".green().bold(), key.bold(), value);
             Ok(())
         }
-        ConfigAction::List { store } => {
-            let store_path = resolve_store(store);
+        ConfigAction::List {} => {
+            let store_path = resolve_store(store.clone());
             let config = load_config(&store_path)?;
             println!(
                 "{} {}",

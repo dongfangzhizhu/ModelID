@@ -39,6 +39,9 @@ use std::path::{Path, PathBuf};
 #[command(about = "Content-Addressable Storage for AI models", long_about = None)]
 #[command(after_help = EXIT_CODE_HELP)]
 struct Cli {
+    /// Store directory (overrides MODELD_STORE and modeld.toml)
+    #[arg(short = 's', long, global = true, value_name = "PATH")]
+    store: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -58,9 +61,6 @@ enum Commands {
     Scan {
         /// Directory to scan
         path: PathBuf,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Skip re-hashing files whose size matches the cache (default: true)
         #[arg(long, default_value = "true")]
         incremental: bool,
@@ -84,22 +84,11 @@ enum Commands {
         copy: bool,
     },
     /// Show store statistics
-    Status {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Status {},
     /// Show store statistics and duplicate-space summary
-    Stats {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    Stats {},
     /// Report duplicate model files
     Dupes {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Minimum duplicate file size to include, e.g. 100MB, 2GB
         #[arg(long)]
         min_size: Option<String>,
@@ -109,9 +98,6 @@ enum Commands {
     },
     /// List indexed models
     List {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Maximum number of models to show
         #[arg(short, long)]
         limit: Option<i64>,
@@ -127,9 +113,6 @@ enum Commands {
     Info {
         /// Full 64-character BLAKE3 hash
         hash: String,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output result as JSON
         #[arg(long)]
         json: bool,
@@ -141,9 +124,6 @@ enum Commands {
     },
     /// Deduplicate model files
     Dedup {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Preview mode - show what would be done without making changes
         #[arg(long)]
         dry_run: bool,
@@ -187,9 +167,6 @@ enum Commands {
     },
     /// Manage quarantine
     Quarantine {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         #[command(subcommand)]
         action: QuarantineAction,
     },
@@ -205,9 +182,6 @@ enum Commands {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Download a file from HuggingFace via modeld CAS
     HfDownload {
@@ -224,55 +198,33 @@ enum Commands {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Configure HF_HOME to point to the modeld HF cache
     HfSetup {
         /// Only print the HF_HOME path without making changes
         #[arg(long)]
         print_path: bool,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Show HuggingFace cache statistics
-    HfStatus {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    HfStatus {},
     /// Scan workflow files and index model dependencies
     WorkflowScan {
         /// Directory containing workflow JSON files
         path: PathBuf,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Show model dependencies of a single workflow file
     WorkflowDeps {
         /// Workflow JSON file
         file: PathBuf,
-        /// Store directory (optional, for resolved hash lookup)
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// List models with no workflow references (orphans)
     RefsOrphans {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
     /// Safe garbage collection: quarantine unreferenced models
     Gc {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Preview what would be collected without making changes
         #[arg(long)]
         preview: bool,
@@ -285,9 +237,6 @@ enum Commands {
     },
     /// Verify store consistency: check CAS, aliases, and DB agree
     Verify {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Output result as JSON
         #[arg(long)]
         json: bool,
@@ -296,9 +245,6 @@ enum Commands {
     Unlink {
         /// File path to restore (must have a hardlink/symlink alias in the DB)
         path: PathBuf,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Local registry & proxy server (Phase 5)
     Proxy {
@@ -310,9 +256,6 @@ enum Commands {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
     },
     /// Start the modeld Web UI server (unified serve command)
     ///
@@ -329,9 +272,6 @@ enum Commands {
         /// Open browser after starting
         #[arg(long)]
         open: bool,
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
         /// Reject all write operations (read-only mode)
         #[arg(long)]
         read_only: bool,
@@ -571,12 +511,14 @@ fn main() -> Result<()> {
     // through ExitCode so the documented table is actually what the shell sees.
     let cli = Cli::parse();
     let _ = ExitCode::Ok;
+    // `--store` is a global flag: resolve it once and hand a clone to whichever
+    // command runs, so no subcommand has to declare it.
+    let store = cli.store.clone();
 
     match cli.command {
         Commands::Init { path, interactive } => init_command(path, interactive)?,
         Commands::Scan {
             path,
-            store,
             incremental,
             full,
             exclude_globs,
@@ -596,7 +538,7 @@ fn main() -> Result<()> {
             };
             scan_command(
                 path,
-                resolve_store(store),
+                resolve_store(store.clone()),
                 incremental,
                 full,
                 exclude_globs,
@@ -604,18 +546,17 @@ fn main() -> Result<()> {
                 mode,
             )?
         }
-        Commands::Status { store } => status_command(resolve_store(store))?,
-        Commands::Stats { store } => stats_command(resolve_store(store))?,
-        Commands::Dupes { store, min_size, json } => {
-            dupes_command(resolve_store(store), min_size, json)?
+        Commands::Status {} => status_command(resolve_store(store.clone()))?,
+        Commands::Stats {} => stats_command(resolve_store(store.clone()))?,
+        Commands::Dupes { min_size, json } => {
+            dupes_command(resolve_store(store.clone()), min_size, json)?
         }
-        Commands::List { store, limit, json, export_csv } => {
-            list_command(resolve_store(store), limit, json, export_csv)?
+        Commands::List { limit, json, export_csv } => {
+            list_command(resolve_store(store.clone()), limit, json, export_csv)?
         }
-        Commands::Info { hash, store, json } => info_command(resolve_store(store), &hash, json)?,
+        Commands::Info { hash, json } => info_command(resolve_store(store.clone()), &hash, json)?,
         Commands::Hash { file } => hash_command(file)?,
         Commands::Dedup {
-            store,
             dry_run,
             auto,
             apply,
@@ -629,7 +570,7 @@ fn main() -> Result<()> {
             yes,
             json,
         } => dedup_command(
-            resolve_store(store),
+            resolve_store(store.clone()),
             dry_run,
             auto || apply,
             report,
@@ -642,44 +583,51 @@ fn main() -> Result<()> {
             yes,
             json,
         )?,
-        Commands::Quarantine { store, action } => quarantine_command(resolve_store(store), action)?,
-        Commands::HfCheck { repo_id, filename, revision, json, store } => {
-            hf_check_command(resolve_store(store), &repo_id, &filename, &revision, json)?
+        Commands::Quarantine { action } => {
+            quarantine_command(resolve_store(store.clone()), action)?
         }
-        Commands::HfDownload { repo_id, filename, revision, token, json, store } => {
-            hf_download_command(resolve_store(store), &repo_id, &filename, &revision, token, json)?
+        Commands::HfCheck { repo_id, filename, revision, json } => {
+            hf_check_command(resolve_store(store.clone()), &repo_id, &filename, &revision, json)?
         }
-        Commands::HfSetup { print_path, store } => {
-            hf_setup_command(resolve_store(store), print_path)?
+        Commands::HfDownload { repo_id, filename, revision, token, json } => hf_download_command(
+            resolve_store(store.clone()),
+            &repo_id,
+            &filename,
+            &revision,
+            token,
+            json,
+        )?,
+        Commands::HfSetup { print_path } => {
+            hf_setup_command(resolve_store(store.clone()), print_path)?
         }
-        Commands::HfStatus { store } => hf_status_command(resolve_store(store))?,
-        Commands::WorkflowScan { path, store } => {
-            workflow_scan_command(resolve_store(store), path)?
+        Commands::HfStatus {} => hf_status_command(resolve_store(store.clone()))?,
+        Commands::WorkflowScan { path } => {
+            workflow_scan_command(resolve_store(store.clone()), path)?
         }
-        Commands::WorkflowDeps { file, store } => {
-            workflow_deps_command(resolve_store(store), file)?
+        Commands::WorkflowDeps { file } => {
+            workflow_deps_command(resolve_store(store.clone()), file)?
         }
-        Commands::RefsOrphans { store, json } => refs_orphans_command(resolve_store(store), json)?,
-        Commands::Gc { store, preview, cleanup_quarantine, cleanup_tmp } => {
-            gc_command(resolve_store(store), preview, cleanup_quarantine, cleanup_tmp)?
+        Commands::RefsOrphans { json } => refs_orphans_command(resolve_store(store.clone()), json)?,
+        Commands::Gc { preview, cleanup_quarantine, cleanup_tmp } => {
+            gc_command(resolve_store(store.clone()), preview, cleanup_quarantine, cleanup_tmp)?
         }
-        Commands::Verify { store, json } => verify_command(resolve_store(store), json)?,
-        Commands::Unlink { path, store } => unlink_command(resolve_store(store), path)?,
-        Commands::Proxy { action } => proxy_command(action)?,
-        Commands::Doctor { json, store } => doctor_command(resolve_store(store), json)?,
-        Commands::Store { action } => store_command(action)?,
-        Commands::Config { action } => config_command(action)?,
-        Commands::Hf { action } => hf_command(action)?,
-        Commands::Serve { host, port, open, store, read_only, allow_lan } => {
-            serve_command(host, port, open, resolve_store(store), read_only, allow_lan)?
+        Commands::Verify { json } => verify_command(resolve_store(store.clone()), json)?,
+        Commands::Unlink { path } => unlink_command(resolve_store(store.clone()), path)?,
+        Commands::Proxy { action } => proxy_command(action, store.clone())?,
+        Commands::Doctor { json } => doctor_command(resolve_store(store.clone()), json)?,
+        Commands::Store { action } => store_command(action, store.clone())?,
+        Commands::Config { action } => config_command(action, store.clone())?,
+        Commands::Hf { action } => hf_command(action, store.clone())?,
+        Commands::Serve { host, port, open, read_only, allow_lan } => {
+            serve_command(host, port, open, resolve_store(store.clone()), read_only, allow_lan)?
         }
-        Commands::Tag { action } => tag_command(action)?,
-        Commands::Note { action } => note_command(action)?,
-        Commands::Pin { action } => pin_command(action)?,
-        Commands::Favorite { action } => favorite_command(action)?,
-        Commands::Refs { action } => refs_command(action)?,
-        Commands::Tx { action } => tx_command(action)?,
-        Commands::Db { action } => db_command(action)?,
+        Commands::Tag { action } => tag_command(action, store.clone())?,
+        Commands::Note { action } => note_command(action, store.clone())?,
+        Commands::Pin { action } => pin_command(action, store.clone())?,
+        Commands::Favorite { action } => favorite_command(action, store.clone())?,
+        Commands::Refs { action } => refs_command(action, store.clone())?,
+        Commands::Tx { action } => tx_command(action, store.clone())?,
+        Commands::Db { action } => db_command(action, store.clone())?,
     }
 
     Ok(())

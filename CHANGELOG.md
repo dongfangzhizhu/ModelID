@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`--store` is a global flag** — it was declared on 37 separate subcommand
+  variants (and again on the nested action enums). One `global = true` argument
+  on `Cli` replaces all of them, so `modeld --store X status` and
+  `modeld status --store X` both work and no command has to repeat it.
+  (ROADMAP B2)
 - **`dedup` and `serve` moved to their own modules** — `commands/dedup.rs` and
   `commands/serve.rs`; `main.rs` is down to the dispatch and the shared helpers.
   (ROADMAP B2)

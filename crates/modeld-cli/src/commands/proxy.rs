@@ -18,9 +18,6 @@ pub enum ProxyAction {
         /// Port (default: 8234)
         #[arg(long)]
         port: Option<u16>,
-        /// Store directory
-        #[arg(short = 's', long, default_value = ".modeld")]
-        store: PathBuf,
         /// Bearer token (a random one is generated and saved when omitted)
         #[arg(long)]
         token: Option<String>,
@@ -53,19 +50,14 @@ pub enum ProxyAction {
         token: Option<String>,
     },
     /// Rotate (regenerate) the bearer token stored in modeld.toml
-    TokenRotate {
-        /// Store directory
-        #[arg(short = 's', long)]
-        store: Option<PathBuf>,
-    },
+    TokenRotate {},
 }
 
-pub fn proxy_command(action: ProxyAction) -> Result<()> {
+pub fn proxy_command(action: ProxyAction, store: Option<PathBuf>) -> Result<()> {
     match action {
         ProxyAction::Start {
             bind,
             port,
-            store,
             token,
             allow_anonymous,
             config,
@@ -76,7 +68,7 @@ pub fn proxy_command(action: ProxyAction) -> Result<()> {
             proxy_start_command(ProxyStartOptions {
                 bind,
                 port,
-                store,
+                store: resolve_store(store.clone()),
                 token,
                 allow_anonymous,
                 config,
@@ -86,7 +78,7 @@ pub fn proxy_command(action: ProxyAction) -> Result<()> {
         }
         ProxyAction::Discover { timeout } => proxy_discover_command(timeout),
         ProxyAction::Status { url, token } => proxy_status_command(&url, token),
-        ProxyAction::TokenRotate { store } => proxy_token_rotate_command(resolve_store(store)),
+        ProxyAction::TokenRotate {} => proxy_token_rotate_command(resolve_store(store.clone())),
     }
 }
 
