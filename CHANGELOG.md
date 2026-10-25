@@ -118,6 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CLI snapshot tests** — `crates/modeld-cli/tests/cli_snapshot.rs` pins what a user
+  or a script can depend on: the command list in `--help`, the four documented
+  exit codes, `--version`, `--store` in both positions, exit 2 for an unknown
+  subcommand, pure-JSON `tx list --json`, the `config list` keys, a clean
+  `verify`, and a `status` that fails (without creating a database) on a store
+  that does not exist. Ten tests, no new dependencies. (ROADMAP B2)
 - **Documented exit codes and an output-format type** — `output::ExitCode` (0 ok,
   1 failure, 2 usage, 3 partial) is printed by `modeld --help`, and
   `OutputFormat { Table, Json, Csv }` gives the upcoming command modules one place

@@ -511,7 +511,7 @@ Refs: docs/ROADMAP.md#A1
   - [x] `--store` 为全局参数，子命令无需重复声明 —— 37 处子命令字段全部删除，`modeld --store X status` 与 `modeld status --store X` 等价
   - [ ] `--json` 时 stdout 只有 JSON（日志走 stderr）
   - [x] 退出码语义写入 `--help` 与文档 —— `modeld --help` 末尾打印 0/1/2/3 对照表（`EXIT_CODE_HELP`）
-  - [ ] 所有既有命令行为不变（快照测试）
+  - [x] 所有既有命令行为不变（快照测试）—— `tests/cli_snapshot.rs` 10 个用例：命令清单、退出码文案、`--version`、`--store` 两种位置、未知子命令=2、`tx list --json` 输出纯 `[]`、`config list` 键、`verify` 干净、缺库时 `status` 失败且不建库
 - **验收证据**（2026-10-24）：
   - `output.rs`：`OutputFormat { Table, Json, Csv }`（`from_flags`、`is_machine`、`as_str`）与
     `ExitCode { Ok=0, Failure=1, Usage=2, Partial=3 }`，3 个单测覆盖标志优先级与数字映射。
@@ -530,6 +530,7 @@ Refs: docs/ROADMAP.md#A1
   - `commands/dedup.rs` + `commands/serve.rs`：去重与 WebUI 服务迁出，`dedup --store <p>` 实测仍输出「modeld 去重」表头。
   - `--store` 全局化：`Cli` 上 `#[arg(short='s', long, global = true)]`，`main` 解析一次后把 `Option<PathBuf>` 克隆给各命令；两种书写位置实测等价，`scan --help` 里 `-s, --store <PATH>` 出现在「全局参数」段。
   - 文件拆分收尾：`main.rs` 162 行 = `fn main` + dispatch；`cli.rs` 装 `Cli`/`Commands`；`util.rs` 装共享助手；`--help` 与 `config get serve.port` 实测不变。
+  - 快照测试：`cargo test -p modeld-cli --test cli_snapshot` 10 passed，不引入新依赖（直接 `Command::new(env!("CARGO_BIN_EXE_modeld"))`）。
 - **估算**：5 人日 ｜ **依赖**：无（可与 A 并行）
 
 ### B3 · 日志与可观测性
