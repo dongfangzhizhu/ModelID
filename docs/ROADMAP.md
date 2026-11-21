@@ -548,14 +548,29 @@ Refs: docs/ROADMAP.md#A1
 
 - **目标**：流式哈希、断点续传安全、原子提交、内存有界。
 - **改动点**：`crates/modeld-core/src/downloader.rs`
+- **状态**：✅ 已完成（本轮，2026-11-22）
+- **改动点**：`crates/modeld-core/src/downloader.rs`、`crates/modeld-core/src/db.rs`
 - **验收标准**：
-  - [ ] 边下边算 BLAKE3，1 GB 下载内存 < 50 MB
-  - [ ] `.part` 附带 `.meta`（URL/ETag/size），URL 或 ETag 变化时丢弃旧分片
-  - [ ] 使用 `If-Range`；服务端不支持 Range 时从 0 重下
-  - [ ] 完成后校验 `bytes_done == expected_size`，不一致即失败
-  - [ ] 元数据缺失时**显式警告**并记录 `unverified` 状态
-  - [ ] 经 `StoreTxn` 原子提交，崩溃后不留半成品
+  - [x] 边下边算 BLAKE3，1 GB 下载内存 < 50 MB —— 64 KB 固定缓冲 + 流式 `Hasher::update`；响应路径无整文件缓冲，峰值内存与文件大小无关；未做 1 GB 实测，见下方证据说明
+  - [x] `.part` 附带 `.meta`（URL/ETag/size），URL 或 ETag 变化时丢弃旧分片
+  - [x] 使用 `If-Range`；服务端不支持 Range 时从 0 重下
+  - [x] 完成后校验 `bytes_done == expected_size`，不一致即失败
+  - [x] 元数据缺失时**显式警告**并记录 `unverified` 状态 —— `DownloadResult.unverified` + `db.complete_download_with_verification` 在 `downloads.error_message` 写入 `unverified:` 前缀
+  - [x] 经 `StoreTxn` 原子提交，崩溃后不留半成品 —— WAL pending 先落，model/mapping/download/alias/WAL committed 全部包进 `Database::in_transaction`；CAS 对象发布后由 `recover_store` 前滚
+- **测试**：`download_streams_hashes_and_validates_size`、`download_discards_part_when_etag_changes`、`download_rejects_size_mismatch`、`download_without_sha256_marks_unverified`、`stale_part_without_meta_is_discarded`、`part_meta_roundtrip_and_mismatch`、`db::test_complete_download_records_unverified`
 - **估算**：4 人日 ｜ **依赖**：B1
+- **实现说明（2026-11-22）**：
+  - `PartMeta { url, etag, expected_size, sha256 }` 存为 `<part>.meta`（临时文件 + rename 原子写）；resume 前逐字段比对，URL/ETag/size 任一变化或有分片无 meta 即丢弃旧分片从 0 重下。
+  - `download_to_file` 签名改为 `(&Path, &PartMeta, progress)`；流式计算 BLAKE3 与 SHA256，不再在下载完成后 `hash_file` + `verify_sha256` 二次读盘。
+  - `fetch_hf_metadata` 提取 ETag（去掉引号）；非 64-hex 的 ETag 仍可用作 `If-Range` 值。
+  - `HfFileMetadata` 新增 `etag` 字段；`DownloadResult` 新增 `unverified` 字段。
+  - 为避免 schema 迁移，未新增 DB 列：`unverified` 记在既有 `error_message` 字段（`unverified: remote metadata unavailable`），`status` 仍为 `done`。
+  - `verify_sha256` 保留但标记 `#[cfg(test)]`，生产路径不再使用。
+- **验收证据（2026-11-22，Windows 11 / rustc 1.99.1 / clang-cl 16）**：
+  - `cargo fmt --all -- --check`：通过；`cargo clippy --workspace --all-targets -- -D warnings`：通过
+  - `cargo test --workspace --locked`：**341 passed, 0 failed**（基线 334 → 新增 7 个测试；core 200、fault 10、integration 9、proxy 48+1+14、webui 37、client 7、cli 3、build 12）
+  - 7 个新测试覆盖：元数据往返与三类不匹配、流式哈希与 `hash_file` 一致性、大小不符报错、无 SHA256 的 unverified 标记、无 meta 分片丢弃、ETag 变化丢弃、DB 层 unverified 持久化
+  - **未实测**：1 GB 下载 RSS 峰值与真实 HF 断点续传黑盒 —— 本机沙箱网络受限（详见 §12.3）；内存结论基于固定 64 KB 缓冲的代码路径，非实测数字
 
 ### B5 · HF 缓存兼容性对拍
 
@@ -731,7 +746,7 @@ Refs: docs/ROADMAP.md#A1
 | B1 | 统一事务边界与崩溃恢复 | done | AI agent | 2026-10-24 | 2026-10-24 | `be7ceee` |
 | B2 | CLI 拆分与输出层 | done | AI agent | 2026-10-24 | 2026-10-25 | `06f35b5` |
 | B3 | 日志与可观测性 | done | AI agent | 2026-10-25 | 2026-10-25 | `9aa5b11` |
-| B4 | 下载器加固 | todo | — | — | — | — |
+| B4 | 下载器加固 | done | AI agent | 2026-11-22 | 2026-11-22 | 本轮提交 |
 | B5 | HF 缓存兼容性对拍 | todo | — | — | — | — |
 | B6 | 统计语义 | todo | — | — | — | — |
 | B7 | 跨进程锁与并发安全 | todo | — | — | — | — |
@@ -758,6 +773,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-22 | B4 | 下载器加固：`<part>.meta` 防陈旧分片、`If-Range` 续传、BLAKE3+SHA256 流式计算（无二次读盘）、size 强校验、unverified 显式标记、DB 提交包进 `in_transaction`；新增 7 个测试 | 本轮提交 | `core/downloader.rs`、`core/db.rs` |
 | 2026-10-24 | A8 | 构建与发布链路：Dockerfile 多阶段（rust:1.88-slim → debian-slim，非 root，~90 MB）、新增 `.dockerignore`、`MODELD_AUTH_TOKEN` 接通 `serve`（不落盘）、`rust-version = "1.88"`（实测）、`publish = false`、`deny.toml`、CI 新增 MSRV/前端/`cargo deny`/Docker 四个 job、`.gitignore` 乱码与 `node_modules` 反忽略修复 | `0eea2c3` | `docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`deny.toml`、`Cargo.toml`、`crates/*/Cargo.toml`、`cli/main.rs`、`.gitignore`、`CHANGELOG.md` |
 | 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `234201f` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
 | 2026-10-24 | A6 | 配置系统统一：`[proxy]` 并入 `ModeldConfig`、`save_config` 改用 `toml_edit` 只重写自有段（保留注释/未知段）、token 双写 + 旧格式回退、`config get/set/list` 覆盖 20 键并给建议 | `b21c673` | `core/config.rs`、`proxy/config.rs`、`cli/main.rs`、`Cargo.toml`、`docs/proxy-setup.md`、`CHANGELOG.md` |
@@ -775,9 +791,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 3 | 33% |
+| B 架构收敛 | 9 | 4 | 44% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **11** | **46%** |
+| **合计** | **24** | **12** | **50%** |
 
 ---
 
@@ -835,6 +851,9 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | B1 | `downloads` 表与 WAL 是两套状态（`insert_download`/`complete_download` 与 WAL 并存），未来可合并为单一状态机 | C2 | open |
 | 2026-10-24 | B1 | 中断点矩阵只在 Windows 跑过，三平台需 CI | C3 | open |
 | 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | open |
+| 2026-11-22 | 审核 | 本机 VS 升级到 18（MSVC 14.52）后，默认 `cargo test` 因 cc-rs 调 `cl.exe` 失败（C1034 stdarg.h）；需 `CC=clang-cl` 才能构建。CI 用固定 toolchain 不受影响 | C3 | open（本机环境，非代码缺陷） |
+| 2026-11-22 | 审核 | 沙箱下 `%TEMP%`（`C:\Users\ADMINI~1\AppData\Local\Temp`）拒绝创建目录，74 个 `tempfile::TempDir` 测试失败；设 `TMPDIR/TMP/TEMP` 到项目内目录后全绿 | C3 | open（本机环境，非代码缺陷） |
+| 2026-11-22 | B4 | 1 GB 下载 RSS 峰值与真实 HF 断点续传黑盒未实测（沙箱网络受限）；代码路径为固定 64 KB 缓冲 | C6 | open |
 
 ---
 

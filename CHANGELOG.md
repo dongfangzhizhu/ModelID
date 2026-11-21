@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Downloader no longer trusts stale partial files** — a `.part` file is only
+  resumed when its `<part>.meta` side-car still matches the URL, ETag and
+  expected size. A changed object or a missing side-car discards the partial.
+  `If-Range` is sent on resume; a server ignoring Range restarts from byte 0.
+  (ROADMAP B4)
+- **Downloads are verified while streaming** — BLAKE3 and SHA256 are computed
+  in a fixed 64 KB buffer as bytes arrive, instead of re-reading the finished
+  file twice. A known expected size must match exactly; when remote metadata
+  is unavailable the result is explicitly marked `unverified` (both in the
+  API result and `downloads.error_message`) instead of silently claiming
+  success. (ROADMAP B4)
+- **Download DB writes are atomic** — the WAL `pending` row, model / SHA256
+  mapping / download record / HF alias and the `committed` transition now run
+  in one `Database::in_transaction`, so `recover_store` can finish or roll
+  back a crash consistently. (ROADMAP B4)
+
 ### Security
 
 - **The proxy is secure by default** — it now binds `127.0.0.1` and requires a

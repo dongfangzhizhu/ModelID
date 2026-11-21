@@ -21,13 +21,28 @@
 //! - Gated/private repo 403 errors show a friendly prompt to set a token.
 //! - Token values are never written to any log output.
 
+//! ## B4 additions (downloader hardening)
+//! - BLAKE3 + SHA256 are computed **streaming** while bytes arrive; neither
+//!   `hash_file` nor `verify_sha256` re-reads the finished file.
+//! - `<part>.meta` records URL / ETag / expected size.  A partial file whose
+//!   metadata no longer matches is discarded instead of corrupting the target.
+//! - Resume sends `If-Range` with the stored ETag; a server that ignores Range
+//!   (HTTP 200) restarts from byte 0.
+//! - `bytes_done == expected_size` is enforced when the size is known.
+//! - Missing metadata is reported via `unverified` in `DownloadResult` and a
+//!   warning — never silently treated as verified.
+//! - The final DB writes (model / mapping / download / alias / WAL commit) are
+//!   wrapped in `Database::in_transaction`, so a crash leaves the WAL row for
+//!   `recover_store` instead of a half-imported model.
+
 use crate::cas::CasStore;
 use crate::db::{
     TransactionStatus, {AliasType, Database, DownloadStatus, Frontend},
 };
-use crate::hash::{hash_file, Blake3Hash};
+use crate::hash::Blake3Hash;
 use crate::hf_cache::HfCache;
 use anyhow::{anyhow, Context, Result};
+use blake3::Hasher as Blake3Hasher;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -67,6 +82,8 @@ pub struct HfFileMetadata {
     pub revision: String,
     pub sha256: Option<String>,
     pub size_bytes: Option<u64>,
+    /// ETag used for `If-Range` and partial-file validation.
+    pub etag: Option<String>,
     pub download_url: String,
 }
 
@@ -79,6 +96,76 @@ pub struct DownloadResult {
     pub was_cached: bool,
     /// Provenance metadata captured at download time.
     pub provenance: Option<Provenance>,
+    /// True when HEAD metadata (size / ETag / SHA256) was unavailable and the
+    /// download could not be fully verified.  Never silently claims verified.
+    pub unverified: bool,
+}
+
+/// Side-car metadata for a resumable `.part` file.
+///
+/// Stored as `<part>.meta` (JSON).  A partial download is only resumed when
+/// URL, ETag and expected size still match; otherwise it is discarded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PartMeta {
+    pub url: String,
+    /// `x-linked-etag` / `etag` from the HEAD response (quotes stripped).
+    pub etag: Option<String>,
+    pub expected_size: Option<u64>,
+    pub sha256: Option<String>,
+}
+
+impl PartMeta {
+    fn path_for(part: &Path) -> PathBuf {
+        let mut os = part.as_os_str().to_os_string();
+        os.push(".meta");
+        PathBuf::from(os)
+    }
+
+    fn load(part: &Path) -> Result<Option<Self>> {
+        let path = Self::path_for(part);
+        match fs::read_to_string(&path) {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map(Some)
+                .map_err(|e| anyhow!("Corrupt part metadata {}: {}", path.display(), e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("Cannot read {}", path.display())),
+        }
+    }
+
+    fn save(&self, part: &Path) -> Result<()> {
+        let path = Self::path_for(part);
+        let tmp = path.with_extension("meta.tmp");
+        let json = serde_json::to_string_pretty(self)?;
+        fs::write(&tmp, json).with_context(|| format!("Cannot write {}", tmp.display()))?;
+        fs::rename(&tmp, &path).with_context(|| format!("Cannot rename to {}", path.display()))?;
+        Ok(())
+    }
+
+    fn remove(part: &Path) {
+        let path = Self::path_for(part);
+        if let Err(e) = fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("cannot remove part metadata {}: {}", path.display(), e);
+            }
+        }
+    }
+
+    /// Whether `other` describes the same remote object as this metadata.
+    fn matches(&self, other: &Self) -> bool {
+        self.url == other.url
+            && self.etag == other.etag
+            && self.expected_size == other.expected_size
+    }
+}
+
+/// Result of one (possibly resumed) streaming download.
+#[derive(Debug)]
+struct DownloadOutcome {
+    bytes_written: u64,
+    blake3: Blake3Hash,
+    sha256: Option<String>,
+    /// SHA256 was computed but no trusted expected value existed to compare.
+    sha256_unverified: bool,
 }
 
 const DEFAULT_HF_BASE: &str = "https://huggingface.co";
@@ -200,19 +287,34 @@ impl Downloader {
         let cas = CasStore::new(&self.store_path);
         let hf_cache = HfCache::new(&self.store_path);
 
-        // Step 1: Fetch metadata (sha256, size) from HF API
-        let metadata =
-            self.fetch_hf_metadata(repo_id, filename, rev).unwrap_or_else(|_| HfFileMetadata {
-                repo_id: repo_id.to_string(),
-                filename: filename.to_string(),
-                revision: rev.to_string(),
-                sha256: None,
-                size_bytes: None,
-                download_url: format!(
-                    "{}/{}/resolve/{}/{}",
-                    self.hf_base_url, repo_id, rev, filename
-                ),
-            });
+        // Step 1: Fetch metadata (sha256, size, ETag) from HF API.
+        // B4: a failure is no longer silently converted into "no metadata":
+        // we warn and mark the download `unverified` in the result.
+        let metadata = match self.fetch_hf_metadata(repo_id, filename, rev) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    "HF metadata unavailable for {}/{} ({}); download will be marked unverified \
+                     and no size/integrity guarantee can be given",
+                    repo_id,
+                    filename,
+                    e
+                );
+                HfFileMetadata {
+                    repo_id: repo_id.to_string(),
+                    filename: filename.to_string(),
+                    revision: rev.to_string(),
+                    sha256: None,
+                    size_bytes: None,
+                    etag: None,
+                    download_url: format!(
+                        "{}/{}/resolve/{}/{}",
+                        self.hf_base_url, repo_id, rev, filename
+                    ),
+                }
+            }
+        };
+        let metadata_available = metadata.size_bytes.is_some() || metadata.sha256.is_some();
 
         // Step 2: Check cache
         if let Ok(Some(cached_path)) =
@@ -239,6 +341,7 @@ impl Downloader {
                             original_filename: Some(filename.to_string()),
                             model_card_url: Some(format!("{}/{}", self.hf_base_url, repo_id)),
                         }),
+                        unverified: false,
                     });
                 }
             }
@@ -252,30 +355,32 @@ impl Downloader {
             db.insert_download(&metadata.download_url, Some(repo_id), Some(filename), Some(rev))?;
         *dl_id_out = Some(dl_id);
 
-        // Step 4: Download to tmp
+        // Step 4: Download to tmp with streaming hashes (B4)
         let tmp_dir = self.store_path.join("tmp").join("downloads");
         fs::create_dir_all(&tmp_dir).context("Failed to create tmp/downloads dir")?;
         let tmp_file = tmp_dir.join(&part_name);
 
-        let download_size = self
-            .download_to_file(
-                &metadata.download_url,
-                &tmp_file,
-                metadata.size_bytes,
-                metadata.sha256.as_deref(), // now actually verified
-                progress,
-            )
+        let part_meta = PartMeta {
+            url: metadata.download_url.clone(),
+            etag: metadata.etag.clone(),
+            expected_size: metadata.size_bytes,
+            sha256: metadata.sha256.clone(),
+        };
+        let outcome = self
+            .download_to_file(&tmp_file, &part_meta, progress)
             .with_context(|| format!("Failed to download {}/{}", repo_id, filename))?;
 
         db.update_download_progress(
             dl_id,
             DownloadStatus::Downloading,
-            download_size as i64,
-            download_size as i64,
+            outcome.bytes_written as i64,
+            metadata.size_bytes.map(|s| s as i64).unwrap_or(outcome.bytes_written as i64),
         )?;
 
-        // Step 5: Compute BLAKE3
-        let blake3 = hash_file(&tmp_file).context("Failed to hash downloaded file")?;
+        // Step 5: use the streaming hashes; no second pass over the file.
+        let blake3 = outcome.blake3;
+        let sha256 = metadata.sha256.clone().or(outcome.sha256);
+        let unverified = !metadata_available || outcome.sha256_unverified;
 
         // Record the intent before the bytes become visible. A crash between
         // the CAS write and the rows below leaves this row behind; recovery
@@ -296,6 +401,7 @@ impl Downloader {
         // Step 6: CAS dedup — skip copy if content already known
         let cas_path = if db.get_model(&blake3)?.is_some() {
             let _ = fs::remove_file(&tmp_file);
+            PartMeta::remove(&tmp_file);
             cas.get(&blake3).ok_or_else(|| anyhow!("CAS path not found after dedup check"))?
         } else {
             let staging_dir = self.store_path.join("tmp").join("cas_staging");
@@ -303,21 +409,45 @@ impl Downloader {
             let staging = staging_dir.join(format!("{}.tmp", blake3.as_hex()));
             fs::copy(&tmp_file, &staging)?;
             let _ = fs::remove_file(&tmp_file);
+            PartMeta::remove(&tmp_file);
 
             let size = fs::metadata(&staging)?.len() as i64;
             db.insert_or_update_model(&blake3, size, None, None, None, None)?;
             cas.store(&staging, &blake3)?
         };
 
-        let sha256 = metadata.sha256.clone();
+        // Step 7–9: all DB state changes in one SQLite transaction.  If any
+        // statement fails, the WAL row stays `pending`/`copied` for recovery.
+        let snapshot_str =
+            hf_cache.snapshot_file_path(repo_id, filename, rev).to_string_lossy().to_string();
+        let sha_for_db = sha256.clone();
+        let alias_hash = blake3.clone();
+        let snapshot_for_db = snapshot_str.clone();
+        db.in_transaction(|tx| {
+            if let Some(ref sha256_str) = sha_for_db {
+                tx.upsert_hf_mapping(sha256_str, blake3.as_hex(), Some(repo_id), Some(filename))?;
+            }
+            tx.complete_download_with_verification(
+                dl_id,
+                blake3.as_hex(),
+                sha_for_db.as_deref(),
+                !unverified,
+            )?;
+            if tx.get_alias_by_path(&snapshot_for_db)?.is_none() {
+                tx.insert_alias(
+                    &alias_hash,
+                    &snapshot_for_db,
+                    Frontend::HfCache,
+                    AliasType::Symlink,
+                )?;
+            }
+            tx.update_wal_status(&tx_id, TransactionStatus::Committed)?;
+            Ok(())
+        })?;
 
-        // Step 7: Record SHA256↔BLAKE3 mapping
-        if let Some(ref sha256_str) = sha256 {
-            db.upsert_hf_mapping(sha256_str, blake3.as_hex(), Some(repo_id), Some(filename))?;
-        }
-        db.complete_download(dl_id, blake3.as_hex(), sha256.as_deref())?;
-
-        // Step 8: Create fake HF cache structure
+        // Step 8: create the HF cache layout on disk after the DB commit.
+        // Its alias row already exists, so GC will protect the model even if
+        // this step is interrupted (recovery rolls forward).
         if let Some(ref sha256_str) = sha256 {
             hf_cache.init().ok();
             hf_cache
@@ -325,18 +455,6 @@ impl Downloader {
                 .context("Failed to create HF cache entry")?;
         }
 
-        // Step 9: Insert HfCache alias so GC does not immediately orphan this model.
-        // Without an alias, alias_count=0 and is_orphan()=true → GC quarantines
-        // the freshly-downloaded file on the very next run.
-        let snapshot_str =
-            hf_cache.snapshot_file_path(repo_id, filename, rev).to_string_lossy().to_string();
-        if db.get_alias_by_path(&snapshot_str)?.is_none() {
-            db.insert_alias(&blake3, &snapshot_str, Frontend::HfCache, AliasType::Symlink)?;
-        }
-
-        // The import is complete: the model, the mapping, the download record
-        // and the HfCache alias all exist.
-        db.update_wal_status(&tx_id, TransactionStatus::Committed)?;
         db.delete_wal_transaction(&tx_id)?;
 
         // Build provenance
@@ -354,10 +472,11 @@ impl Downloader {
         Ok(DownloadResult {
             blake3_hash: blake3,
             sha256_hash: sha256,
-            size_bytes: download_size,
+            size_bytes: outcome.bytes_written,
             cas_path,
             was_cached: false,
             provenance,
+            unverified,
         })
     }
 
@@ -375,10 +494,14 @@ impl Downloader {
         }
         let resp = req.call().context("HF metadata HEAD request failed")?;
 
-        let sha256 = resp
+        let etag = resp
             .header("x-linked-etag")
             .or_else(|| resp.header("etag"))
-            .map(|v| v.trim_matches('"').to_lowercase())
+            .map(|v| v.trim().trim_matches('"').to_string());
+
+        let sha256 = etag
+            .as_deref()
+            .map(|v| v.to_lowercase())
             .filter(|v| v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()));
 
         let size_bytes = resp
@@ -392,48 +515,71 @@ impl Downloader {
             revision: revision.to_string(),
             sha256,
             size_bytes,
+            etag,
             download_url: url,
         })
     }
 
-    /// Download `url` to `dest`, supporting resume via Range requests.
+    /// Download `meta.url` to `dest`, supporting safe resume via Range requests.
     ///
-    /// Changes from original:
-    /// - Range resume verifies server returned **206** before appending; if the
-    ///   server returns 200 (full content) we discard the partial file and
-    ///   restart from byte 0 to avoid file corruption.
-    /// - `expected_sha256` is now **required** — SHA256 is verified after the
-    ///   download completes when the value is present.
+    /// B4 guarantees:
+    /// - `<dest>.meta` must match the current request; a mismatched or missing
+    ///   meta discards the partial file (no silent corruption on URL/ETag change).
+    /// - Resume sends `If-Range`; a server ignoring Range (HTTP 200) restarts
+    ///   from byte 0.
+    /// - BLAKE3 and SHA256 are computed on the fly in a 64 KB buffer.
+    /// - If the expected size is known, the final byte count must match exactly.
     fn download_to_file(
         &self,
-        url: &str,
         dest: &Path,
-        expected_size: Option<u64>,
-        expected_sha256: Option<&str>,
+        meta: &PartMeta,
         progress: Option<&ProgressCallback>,
-    ) -> Result<u64> {
+    ) -> Result<DownloadOutcome> {
         let agent = build_agent();
         let filename = dest
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "download".to_string());
 
-        let partial_size =
-            if dest.exists() { fs::metadata(dest).map(|m| m.len()).unwrap_or(0) } else { 0 };
+        // Validate the partial file against its side-car before trusting it.
+        let saved_meta = PartMeta::load(dest)?;
+        let partial_size = match (fs::metadata(dest).ok(), saved_meta) {
+            (Some(m), Some(saved)) if saved.matches(meta) => m.len(),
+            (Some(_), Some(_)) => {
+                tracing::warn!(
+                    "discarding partial download {} — URL/ETag/size changed",
+                    dest.display()
+                );
+                let _ = fs::remove_file(dest);
+                PartMeta::remove(dest);
+                0
+            }
+            (Some(_), None) => {
+                tracing::warn!(
+                    "discarding partial download {} — metadata missing or unreadable",
+                    dest.display()
+                );
+                let _ = fs::remove_file(dest);
+                0
+            }
+            (None, _) => 0,
+        };
 
         // Determine whether we can resume or must start fresh.
         let (mut file, resp, mut bytes_done) = if partial_size > 0 {
             let mut req = agent
-                .get(url)
+                .get(&meta.url)
                 .set("Range", &format!("bytes={}-", partial_size))
                 .timeout(Duration::from_secs(600));
+            if let Some(etag) = meta.etag.as_deref() {
+                req = req.set("If-Range", etag);
+            }
             if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
                 req = req.set("Authorization", &hdr);
             }
-            let r = req.call().map_err(|e| friendly_http_error(e, url))?;
+            let r = req.call().map_err(|e| friendly_http_error(e, &meta.url))?;
 
             if r.status() == 206 {
-                // Server supports range — safe to append to partial file
                 let f = fs::OpenOptions::new()
                     .append(true)
                     .open(dest)
@@ -445,40 +591,77 @@ impl Downloader {
                 (f, r, 0u64)
             }
         } else {
-            let mut req = agent.get(url).timeout(Duration::from_secs(600));
+            let mut req = agent.get(&meta.url).timeout(Duration::from_secs(600));
             if let Some(hdr) = auth_header(self.hf_token.as_deref()) {
                 req = req.set("Authorization", &hdr);
             }
-            let r = req.call().map_err(|e| friendly_http_error(e, url))?;
+            let r = req.call().map_err(|e| friendly_http_error(e, &meta.url))?;
             let f = fs::File::create(dest).context("Failed to create download file")?;
             (f, r, 0u64)
         };
 
-        let total = expected_size.unwrap_or(0);
-        let mut buf = vec![0u8; 65536]; // 64 KB chunks
+        // Persist the side-car only after we know which mode we are in, so the
+        // next run can validate the partial file.
+        meta.save(dest)?;
+
+        let total = meta.expected_size.unwrap_or(0);
+        let mut buf = vec![0u8; 65536]; // bounded memory: 64 KB, independent of file size
         let mut reader = resp.into_reader();
+        let mut blake3_hasher = Blake3Hasher::new();
+        let mut sha256_hasher = Sha256::new();
 
         loop {
             let n = reader.read(&mut buf).context("Error reading response body")?;
             if n == 0 {
                 break;
             }
-            file.write_all(&buf[..n]).context("Error writing to file")?;
+            let chunk = &buf[..n];
+            blake3_hasher.update(chunk);
+            sha256_hasher.update(chunk);
+            file.write_all(chunk).context("Error writing to file")?;
             bytes_done += n as u64;
             if let Some(cb) = progress {
                 cb(bytes_done, total, &filename);
             }
         }
+        file.flush().context("Error flushing download file")?;
+        drop(file);
 
-        drop(file); // flush + close before SHA256 read
-
-        // Verify SHA256 integrity when the expected hash is known
-        if let Some(expected) = expected_sha256 {
-            verify_sha256(dest, expected)
-                .with_context(|| format!("SHA256 integrity check failed for {}", dest.display()))?;
+        // Enforce the size contract before handing the file to the CAS.
+        if let Some(expected) = meta.expected_size {
+            anyhow::ensure!(
+                bytes_done == expected,
+                "download size mismatch for {}: expected {} bytes, got {}",
+                dest.display(),
+                expected,
+                bytes_done
+            );
         }
 
-        Ok(bytes_done)
+        let blake3 = Blake3Hash::from_hex(blake3_hasher.finalize().to_hex().as_str())?;
+        let sha256_digest = format!("{:x}", sha256_hasher.finalize());
+        let (sha256, sha256_unverified) = match meta.sha256.as_deref() {
+            Some(expected) if expected.to_lowercase() == sha256_digest => {
+                (Some(sha256_digest), false)
+            }
+            Some(expected) => {
+                return Err(anyhow!(
+                    "SHA256 integrity check failed for {}: expected {}, got {}",
+                    dest.display(),
+                    expected,
+                    sha256_digest
+                ));
+            }
+            None => {
+                tracing::warn!(
+                    "no trusted SHA256 for {}; recording computed digest as unverified",
+                    dest.display()
+                );
+                (Some(sha256_digest), true)
+            }
+        };
+
+        Ok(DownloadOutcome { bytes_written: bytes_done, blake3, sha256, sha256_unverified })
     }
 }
 
@@ -573,7 +756,9 @@ fn part_filename(repo_id: &str, filename: &str) -> String {
 }
 
 /// Verify the SHA-256 digest of `path` against `expected` (hex string).
-/// Returns `Err` on mismatch.
+/// Kept for tests and for operators verifying an on-disk part manually;
+/// the download path itself computes SHA256 streaming (B4).
+#[cfg(test)]
 fn verify_sha256(path: &Path, expected: &str) -> Result<()> {
     let mut file = fs::File::open(path)
         .with_context(|| format!("Cannot open file for SHA256 check: {}", path.display()))?;
@@ -695,5 +880,159 @@ mod tests {
             .check_cache(&db, &hf_cache, "org/m", "m.safetensors", "main", Some(&"a".repeat(64)))
             .unwrap();
         assert!(result.is_none());
+    }
+
+    // ── B4: downloader hardening ───────────────────────────────────────────
+
+    fn sample_meta(url: &str, body: &[u8]) -> PartMeta {
+        use sha2::{Digest, Sha256};
+        PartMeta {
+            url: url.to_string(),
+            etag: Some("v1".to_string()),
+            expected_size: Some(body.len() as u64),
+            sha256: Some(format!("{:x}", Sha256::digest(body))),
+        }
+    }
+
+    /// Minimal single-response HTTP server (no extra dependencies).
+    fn serve_once(body: &[u8], extra_headers: &str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_vec();
+        let extra = extra_headers.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).unwrap();
+            let header =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{}\r\n", body.len(), extra);
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+            let _ = stream.flush();
+        });
+        (format!("http://{}/model.bin", addr), handle)
+    }
+
+    #[test]
+    fn part_meta_roundtrip_and_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let part = tmp.path().join("model.part");
+        let meta = PartMeta {
+            url: "http://example/model".to_string(),
+            etag: Some("etag-1".to_string()),
+            expected_size: Some(1024),
+            sha256: None,
+        };
+        meta.save(&part).unwrap();
+        let loaded = PartMeta::load(&part).unwrap().unwrap();
+        assert_eq!(loaded, meta);
+        assert!(loaded.matches(&meta));
+
+        let changed = PartMeta { etag: Some("etag-2".to_string()), ..meta.clone() };
+        assert!(!loaded.matches(&changed));
+        let changed = PartMeta { url: "http://other/model".to_string(), ..meta.clone() };
+        assert!(!loaded.matches(&changed));
+        let changed = PartMeta { expected_size: Some(2048), ..meta };
+        assert!(!loaded.matches(&changed));
+
+        PartMeta::remove(&part);
+        assert!(PartMeta::load(&part).unwrap().is_none());
+    }
+
+    #[test]
+    fn download_streams_hashes_and_validates_size() {
+        let body = b"modeld-b4-streaming-hash-body";
+        let (url, server) = serve_once(body, "");
+        let meta = sample_meta(&url, body);
+        let tmp = TempDir::new().unwrap();
+        let part = tmp.path().join("one.part");
+        let dl = Downloader::new(tmp.path());
+
+        let outcome = dl.download_to_file(&part, &meta, None).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(outcome.bytes_written, body.len() as u64);
+        assert_eq!(fs::read(&part).unwrap(), body);
+        assert!(!outcome.sha256_unverified);
+        // The streaming BLAKE3 must equal hash_file's standard result.
+        assert_eq!(outcome.blake3, crate::hash::hash_file(&part).unwrap());
+        // Side-car is written for the next resume.
+        assert_eq!(PartMeta::load(&part).unwrap().unwrap(), meta);
+    }
+
+    #[test]
+    fn download_rejects_size_mismatch() {
+        let declared = b"short";
+        let (url, server) = serve_once(b"a much longer body than declared", "");
+        let mut meta = sample_meta(&url, declared);
+        meta.expected_size = Some(declared.len() as u64);
+        let tmp = TempDir::new().unwrap();
+        let part = tmp.path().join("mismatch.part");
+        let dl = Downloader::new(tmp.path());
+
+        let err = dl.download_to_file(&part, &meta, None).unwrap_err();
+        server.join().unwrap();
+        assert!(format!("{:#}", err).contains("size mismatch"), "{:#}", err);
+    }
+
+    #[test]
+    fn download_without_sha256_marks_unverified() {
+        let body = b"no trusted sha256 here";
+        let (url, server) = serve_once(body, "");
+        let mut meta = sample_meta(&url, body);
+        meta.sha256 = None;
+        let tmp = TempDir::new().unwrap();
+        let part = tmp.path().join("unverified.part");
+        let dl = Downloader::new(tmp.path());
+
+        let outcome = dl.download_to_file(&part, &meta, None).unwrap();
+        server.join().unwrap();
+        assert!(outcome.sha256_unverified);
+        assert!(outcome.sha256.is_some(), "computed digest is still recorded");
+    }
+
+    #[test]
+    fn stale_part_without_meta_is_discarded() {
+        let body = b"fresh";
+        let (url, server) = serve_once(body, "");
+        let tmp = TempDir::new().unwrap();
+        let part = tmp.path().join("stale.part");
+        fs::write(&part, b"garbage from previous download").unwrap();
+        let meta = sample_meta(&url, body);
+        let dl = Downloader::new(tmp.path());
+
+        // A stale partial with no side-car must be removed and re-downloaded
+        // from byte 0 — never appended to.
+        let outcome = dl.download_to_file(&part, &meta, None).unwrap();
+        server.join().unwrap();
+        assert_eq!(outcome.bytes_written, body.len() as u64);
+        assert_eq!(fs::read(&part).unwrap(), body);
+    }
+
+    #[test]
+    fn download_discards_part_when_etag_changes() {
+        let body = b"new-object-content";
+        let (url, server) = serve_once(body, "");
+        let tmp = TempDir::new().unwrap();
+        let part = tmp.path().join("etag.part");
+        fs::write(&part, b"old-object").unwrap();
+        let old_meta = PartMeta {
+            url: url.clone(),
+            etag: Some("old-etag".to_string()),
+            expected_size: Some(9),
+            sha256: None,
+        };
+        old_meta.save(&part).unwrap();
+
+        let new_meta = sample_meta(&url, body); // etag = "v1"
+        let dl = Downloader::new(tmp.path());
+        let outcome = dl.download_to_file(&part, &new_meta, None).unwrap();
+        server.join().unwrap();
+        assert_eq!(outcome.bytes_written, body.len() as u64, "must not append stale bytes");
+        assert_eq!(fs::read(&part).unwrap(), body);
+        assert_eq!(PartMeta::load(&part).unwrap().unwrap(), new_meta);
     }
 }

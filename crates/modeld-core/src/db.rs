@@ -1682,13 +1682,30 @@ impl Database {
     }
 
     /// Mark download as done with hash information
+    ///
+    /// `unverified` records a download whose remote metadata (size / ETag /
+    /// SHA256) was unavailable: the bytes arrived but integrity could not be
+    /// proven.  It is stored as a prefix on `error_message` so no schema
+    /// migration is needed, and is visible in CLI/WebUI downloads lists.
     pub fn complete_download(
         &mut self,
         id: i64,
         model_hash: &str,
         sha256_hash: Option<&str>,
     ) -> Result<()> {
+        self.complete_download_with_verification(id, model_hash, sha256_hash, true)
+    }
+
+    /// Same as `complete_download` but allows marking the result unverified.
+    pub fn complete_download_with_verification(
+        &mut self,
+        id: i64,
+        model_hash: &str,
+        sha256_hash: Option<&str>,
+        verified: bool,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let note = if verified { "" } else { "unverified: remote metadata unavailable" };
         self.conn.execute(
             r#"
             UPDATE downloads SET
@@ -1696,10 +1713,11 @@ impl Database {
                 model_hash = ?2,
                 sha256_hash = ?3,
                 finished_at = ?4,
+                error_message = ?5,
                 bytes_done = bytes_total
             WHERE id = ?1
             "#,
-            params![id, model_hash, sha256_hash, now],
+            params![id, model_hash, sha256_hash, now, note],
         )?;
         Ok(())
     }
@@ -2627,5 +2645,44 @@ mod tests {
         let result = db.insert_alias(&hash, "C:\\test.txt", Frontend::User, AliasType::Original);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_complete_download_records_unverified() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        db.insert_or_update_model(
+            &Blake3Hash::from_hex(&hash_a).unwrap(),
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        db.insert_or_update_model(
+            &Blake3Hash::from_hex(&hash_b).unwrap(),
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = db.insert_download("http://example/model", None, None, None).unwrap();
+
+        db.complete_download_with_verification(id, &hash_a, None, false).unwrap();
+        let rows = db.list_downloads(None).unwrap();
+        let row = rows.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(row.status, DownloadStatus::Done);
+        assert!(row.error_message.as_deref().unwrap_or("").starts_with("unverified:"));
+
+        let id2 = db.insert_download("http://example/model2", None, None, None).unwrap();
+        db.complete_download(id2, &hash_b, None).unwrap();
+        let rows = db.list_downloads(None).unwrap();
+        let row2 = rows.iter().find(|d| d.id == id2).unwrap();
+        assert_eq!(row2.error_message.as_deref().unwrap_or(""), "");
     }
 }
