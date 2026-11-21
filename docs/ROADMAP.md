@@ -762,7 +762,7 @@ Refs: docs/ROADMAP.md#A1
 | B2 | CLI 拆分与输出层 | done | AI agent | 2026-10-24 | 2026-10-25 | `06f35b5` |
 | B3 | 日志与可观测性 | done | AI agent | 2026-10-25 | 2026-10-25 | `9aa5b11` |
 | B4 | 下载器加固 | done | AI agent | 2026-11-22 | 2026-11-22 | `0655f92` |
-| B5 | HF 缓存兼容性对拍 | done | AI agent | 2026-11-22 | 2026-11-22 | 本轮提交 |
+| B5 | HF 缓存兼容性对拍 | done | AI agent | 2026-11-22 | 2026-11-22 | `04a516a` |
 | B6 | 统计语义 | todo | — | — | — | — |
 | B7 | 跨进程锁与并发安全 | todo | — | — | — | — |
 | B8 | 测试体系补齐 | todo | — | — | — | — |
@@ -788,7 +788,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
-| 2026-11-22 | B5 | HF 缓存兼容性：commit SHA refs、相对符号链接（失败报错而非静默复制）、`RepoType` 三类型贯通 CLI、Python hook 去除 import 副作用 + `deactivate()` 完整还原 + 四参数 wrapper；新增 8 个测试（Rust 3 + Python 5） | 本轮提交 | `core/hf_cache.rs`、`core/downloader.rs`、`cli/*`、`python/modeld_hook/*`、`python/tests/*` |
+| 2026-11-22 | B5 | HF 缓存兼容性：commit SHA refs、相对符号链接（失败报错而非静默复制）、`RepoType` 三类型贯通 CLI、Python hook 去除 import 副作用 + `deactivate()` 完整还原 + 四参数 wrapper；新增 8 个测试（Rust 3 + Python 5） | `04a516a` | `core/hf_cache.rs`、`core/downloader.rs`、`cli/*`、`python/modeld_hook/*`、`python/tests/*` |
 | 2026-11-22 | B4 | 下载器加固：`<part>.meta` 防陈旧分片、`If-Range` 续传、BLAKE3+SHA256 流式计算（无二次读盘）、size 强校验、unverified 显式标记、DB 提交包进 `in_transaction`；新增 7 个测试 | `0655f92` | `core/downloader.rs`、`core/db.rs` |
 | 2026-10-24 | A8 | 构建与发布链路：Dockerfile 多阶段（rust:1.88-slim → debian-slim，非 root，~90 MB）、新增 `.dockerignore`、`MODELD_AUTH_TOKEN` 接通 `serve`（不落盘）、`rust-version = "1.88"`（实测）、`publish = false`、`deny.toml`、CI 新增 MSRV/前端/`cargo deny`/Docker 四个 job、`.gitignore` 乱码与 `node_modules` 反忽略修复 | `0eea2c3` | `docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`deny.toml`、`Cargo.toml`、`crates/*/Cargo.toml`、`cli/main.rs`、`.gitignore`、`CHANGELOG.md` |
 | 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `234201f` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
