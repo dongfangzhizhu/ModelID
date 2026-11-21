@@ -67,7 +67,7 @@ pub use governance::{
     set_provenance, unfavorite_model, unpin_model, ProvenanceInfo,
 };
 pub use hash::{hash_file, Blake3Hash};
-pub use hf_cache::{HfCache, HfCacheStats};
+pub use hf_cache::{HfCache, HfCacheStats, RepoType};
 pub use i18n::{detect, t, tf, Lang};
 pub use ingest::{ingest_scan_results, IngestError, IngestMode, IngestResult};
 pub use platform::{check_file_locked, detect_capabilities, is_same_volume, PlatformCapabilities};

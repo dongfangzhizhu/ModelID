@@ -164,6 +164,9 @@ pub enum Commands {
         /// Git revision / branch (default: main)
         #[arg(long, default_value = "main")]
         revision: String,
+        /// HF repository type: model / dataset / space (default: model)
+        #[arg(long, default_value = "model")]
+        repo_type: String,
         /// Output result as JSON
         #[arg(long)]
         json: bool,
@@ -177,6 +180,9 @@ pub enum Commands {
         /// Git revision / branch (default: main)
         #[arg(long, default_value = "main")]
         revision: String,
+        /// HF repository type: model / dataset / space (default: model)
+        #[arg(long, default_value = "model")]
+        repo_type: String,
         /// HuggingFace access token (or set HF_TOKEN env var)
         #[arg(long)]
         token: Option<String>,

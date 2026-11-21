@@ -49,6 +49,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **HF cache layout matches `huggingface_hub`** — `refs/{branch}` now stores a
+  resolved 40-hex commit SHA (never a branch name) extracted from the download
+  redirect; `blobs/*` and `snapshots/*/*` are relative symlinks. Symlink failure
+  is reported explicitly instead of silently copying. `RepoType` selects the
+  `models--` / `datasets--` / `spaces--` prefix, exposed as `--repo-type` on
+  `hf-check` / `hf-download`. (ROADMAP B5)
+- **The Python hook no longer changes your environment on import** — activation
+  is explicit (`modeld_hook.activate()`) or opt-in via `MODELD_AUTO_HOOK=1`.
+  `deactivate()` now restores both `hf_hub_download` patch sites and the
+  original `HF_HOME`. The wrapper honours `repo_type`, `subfolder`, `cache_dir`
+  and `local_dir`, deferring to upstream when caller-owned paths are requested.
+  (ROADMAP B5)
 - **The library logs through `tracing`, not stderr** — all 31 `println!`/`eprintln!`
   calls in `modeld-core` and `modeld-proxy` are now `tracing::warn!`/`info!`/`error!`,
   so a caller decides where they go. The CLI installs a stderr subscriber

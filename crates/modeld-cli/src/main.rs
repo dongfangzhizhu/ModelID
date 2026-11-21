@@ -120,17 +120,25 @@ fn main() -> Result<()> {
         Commands::Quarantine { action } => {
             quarantine_command(resolve_store(store.clone()), action)?
         }
-        Commands::HfCheck { repo_id, filename, revision, json } => {
-            hf_check_command(resolve_store(store.clone()), &repo_id, &filename, &revision, json)?
-        }
-        Commands::HfDownload { repo_id, filename, revision, token, json } => hf_download_command(
+        Commands::HfCheck { repo_id, filename, revision, repo_type, json } => hf_check_command(
             resolve_store(store.clone()),
             &repo_id,
             &filename,
             &revision,
-            token,
+            &repo_type,
             json,
         )?,
+        Commands::HfDownload { repo_id, filename, revision, repo_type, token, json } => {
+            hf_download_command(
+                resolve_store(store.clone()),
+                &repo_id,
+                &filename,
+                &revision,
+                &repo_type,
+                token,
+                json,
+            )?
+        }
         Commands::HfSetup { print_path } => {
             hf_setup_command(resolve_store(store.clone()), print_path)?
         }

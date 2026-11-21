@@ -133,16 +133,34 @@ fn test_hf_proxy_miss_then_hit() {
     assert_eq!(cas_bytes, payload);
 
     // --- Verify the fake HF cache entry was created. ---
+    // B5: the HF cache uses relative symlinks. Windows without Developer Mode
+    // cannot create them, so the downloader reports `hf_cache_degraded` and
+    // skips this cache layout — verify the entry only where symlinks work.
     let hf_cache = HfCache::new(&store_path);
-    assert!(
-        hf_cache.check_cache("mockorg/mockmodel", "main", "mock.safetensors"),
-        "fake HF cache entry created"
-    );
+    let symlink_probe = store.path().join("_symlink_probe");
+    let symlink_target = store.path().join("_symlink_target");
+    std::fs::write(&symlink_target, b"x").unwrap();
+    #[cfg(windows)]
+    let symlinks_ok = std::os::windows::fs::symlink_file(&symlink_target, &symlink_probe).is_ok();
+    #[cfg(unix)]
+    let symlinks_ok = std::os::unix::fs::symlink(&symlink_target, &symlink_probe).is_ok();
+    if symlinks_ok {
+        assert!(
+            hf_cache.check_cache("mockorg/mockmodel", "main", "mock.safetensors"),
+            "fake HF cache entry created"
+        );
+    }
 
-    // --- Second request: cache HIT (served from fake HF cache, no download). ---
+    // --- Second request: cache HIT where symlinks work; otherwise a CAS-backed
+    //     re-download that still returns the same bytes. ---
     let resp2 = ureq::get(&url).call().expect("second hf-proxy request");
     assert_eq!(resp2.status(), 200);
-    assert_eq!(resp2.header("X-Modeld-Cache").unwrap(), "hit");
+    if symlinks_ok {
+        assert_eq!(resp2.header("X-Modeld-Cache").unwrap(), "hit");
+    } else {
+        assert_eq!(resp2.header("X-Modeld-Cache").unwrap(), "miss");
+        // HF cache symlinks unavailable on this host; second fetch stays a miss.
+    }
     let mut got2 = Vec::new();
     resp2.into_reader().read_to_end(&mut got2).unwrap();
     assert_eq!(got2, payload);

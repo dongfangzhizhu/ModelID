@@ -39,6 +39,7 @@ def _check_modeld_cache(
     repo_id: str,
     filename: str,
     revision: str = "main",
+    repo_type: str = "model",
 ) -> Optional[str]:
     """
     Check if modeld already has the file in its cache.
@@ -49,6 +50,7 @@ def _check_modeld_cache(
         repo_id,
         filename,
         "--revision", revision,
+        "--repo-type", repo_type,
     ])
     if result and result.get("found"):
         return result.get("path")
@@ -60,11 +62,13 @@ def _download_via_modeld(
     filename: str,
     revision: str = "main",
     token: Optional[str] = None,
+    repo_type: str = "model",
 ) -> Optional[str]:
     """
     Trigger a download via modeld and return the local path when done.
     """
-    cmd = ["hf-download", repo_id, filename, "--revision", revision]
+    cmd = ["hf-download", repo_id, filename, "--revision", revision,
+           "--repo-type", repo_type]
     if token:
         cmd += ["--token", token]
 
@@ -78,6 +82,15 @@ def make_hf_hub_download_wrapper(original_func: Callable) -> Callable:
     """
     Create a wrapper around `huggingface_hub.hf_hub_download` that checks
     the modeld cache first, and falls back to the original function.
+
+    B5: all four HF path parameters are honoured:
+    - `subfolder` is joined into the filename (modeld's cache stores the
+      full relative path inside `snapshots/{revision}/`).
+    - `repo_type` selects modeld's `models--` / `datasets--` / `spaces--` prefix.
+    - `cache_dir` / `local_dir` request caller-owned paths. Returning a modeld
+      CAS path would violate their contract, so the wrapper deliberately
+      falls through to the original function (with a debug note) — an explicit,
+      observable decision, never a silent path mismatch.
     """
     @functools.wraps(original_func)
     def wrapper(
@@ -86,30 +99,68 @@ def make_hf_hub_download_wrapper(original_func: Callable) -> Callable:
         *,
         revision: Optional[str] = None,
         token: Optional[str] = None,
+        subfolder: Optional[str] = None,
+        repo_type: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+        local_dir: Optional[str] = None,
+        force_download: bool = False,
         **kwargs,
     ):
         rev = revision or "main"
+        _RTYPE_ALIASES = {
+            "model": "model", "models": "model",
+            "dataset": "dataset", "datasets": "dataset",
+            "space": "space", "spaces": "space",
+        }
+        requested_type = (repo_type or "model").lower()
+        rtype = _RTYPE_ALIASES.get(requested_type, "model")
 
-        logger.debug(f"modeld intercept: hf_hub_download({repo_id}, {filename}@{rev})")
+        if cache_dir is not None or local_dir is not None:
+            logger.debug(
+                "modeld intercept: cache_dir/local_dir requested for %s/%s; "
+                "deferring to huggingface_hub (modeld owns its own store path)",
+                repo_id, filename,
+            )
+            return original_func(
+                repo_id, filename,
+                revision=revision, token=token, subfolder=subfolder,
+                repo_type=repo_type, cache_dir=cache_dir, local_dir=local_dir,
+                **kwargs,
+            )
+
+        if force_download:
+            logger.debug("modeld intercept: force_download requested; bypassing cache")
+            return original_func(
+                repo_id, filename,
+                revision=revision, token=token, subfolder=subfolder,
+                repo_type=repo_type, **kwargs,
+            )
+
+        full_name = f"{subfolder.strip('/')}/{filename}" if subfolder else filename
+        logger.debug(f"modeld intercept: hf_hub_download({repo_id}, {full_name}@{rev}, {rtype})")
 
         # Step 1: Check modeld cache
-        cached_path = _check_modeld_cache(repo_id, filename, rev)
+        cached_path = _check_modeld_cache(repo_id, full_name, rev, rtype)
         if cached_path:
-            logger.info(f"modeld cache hit: {repo_id}/{filename} → {cached_path}")
+            logger.info(f"modeld cache hit: {repo_id}/{full_name} → {cached_path}")
             return cached_path
 
         # Step 2: Try to download via modeld (gets it into CAS + creates HF cache links)
         try:
-            modeld_path = _download_via_modeld(repo_id, filename, rev, token)
+            modeld_path = _download_via_modeld(repo_id, full_name, rev, token, rtype)
             if modeld_path:
-                logger.info(f"modeld download complete: {repo_id}/{filename} → {modeld_path}")
+                logger.info(f"modeld download complete: {repo_id}/{full_name} → {modeld_path}")
                 return modeld_path
         except Exception as e:
             logger.warning(f"modeld download failed, falling back to HF: {e}")
 
         # Step 3: Fall back to original HuggingFace download
-        logger.debug(f"Falling back to original hf_hub_download for {repo_id}/{filename}")
-        return original_func(repo_id, filename, revision=revision, token=token, **kwargs)
+        logger.debug(f"Falling back to original hf_hub_download for {repo_id}/{full_name}")
+        return original_func(
+            repo_id, filename,
+            revision=revision, token=token, subfolder=subfolder,
+            repo_type=repo_type, **kwargs,
+        )
 
     return wrapper
 

@@ -576,14 +576,29 @@ Refs: docs/ROADMAP.md#A1
 
 - **目标**：与真实 `huggingface_hub` 行为一致。
 - **改动点**：`crates/modeld-core/src/hf_cache.rs`、`python/modeld_hook/*`
+- **状态**：✅ 已完成（本轮，2026-11-22；真实 20 仓库对拍待外部网络环境）
+- **改动点**：`crates/modeld-core/src/hf_cache.rs`、`crates/modeld-core/src/downloader.rs`、`crates/modeld-core/src/lib.rs`、`crates/modeld-cli/src/{cli.rs,main.rs,commands/hfstore.rs,util.rs}`、`python/modeld_hook/{__init__.py,intercept.py}`、`python/tests/test_modeld_hook.py`、`crates/modeld-proxy/tests/{hf_proxy_test.rs,proxy_integration.rs}`
 - **验收标准**：
-  - [ ] `refs/main` 内容为 commit SHA（非分支名）
-  - [ ] 快照使用相对符号链接；链接失败时**报错**而非静默复制
-  - [ ] 用 `huggingface_hub>=0.24` 对拍 20 个仓库（含 dataset、subfolder、gated）全部命中
-  - [ ] Python hook 不再在 import 时改写 `HF_HOME`（改为显式 `activate()` 或环境变量）
-  - [ ] `deactivate()` 能完整还原 `hf_hub_download` 与 `file_download.hf_hub_download`
-  - [ ] wrapper 支持 `repo_type` / `subfolder` / `cache_dir` / `local_dir`
+  - [x] `refs/main` 内容为 commit SHA（非分支名）—— commit SHA 从 HF resolve 重定向 URL 的 `/resolve/{40-hex}/` 提取；非 40-hex 的 commit 值直接拒绝（写代码前校验，不留半成品）；无 commit SHA 时**跳过 refs 写入并告警**，绝不写分支名
+  - [x] 快照使用相对符号链接；链接失败时**报错**而非静默复制 —— `create_relative_symlink` 写 `../../blobs/{sha}` 相对链接；删除旧的 copy/hardlink fallback；Windows 无开发者模式时 downloader 捕获并标记 `hf_cache_degraded`（显式告警，不再静默复制）
+  - [ ] 用 `huggingface_hub>=0.24` 对拍 20 个仓库（含 dataset、subfolder、gated）全部命中 —— **待外部环境**：本机无 `huggingface_hub` 且沙箱无外网，见 §12.3
+  - [x] Python hook 不再在 import 时改写 `HF_HOME` —— 移除无条件 auto-activate；仅 `MODELD_AUTO_HOOK=1` 显式开启；`activate()` 记录原 HF_HOME 供还原
+  - [x] `deactivate()` 能完整还原 `hf_hub_download` 与 `file_download.hf_hub_download` —— 分别保存两份原始引用（旧实现先清空原引用导致第二处永远无法还原），同时还原 HF_HOME
+  - [x] wrapper 支持 `repo_type` / `subfolder` / `cache_dir` / `local_dir` —— subfolder 拼进 filename；repo_type 贯通 CLI `--repo-type` 到缓存目录前缀；cache_dir/local_dir/force_download 显式交回原函数（不静默返回 modeld 路径）
 - **估算**：5 人日 ｜ **依赖**：A5
+- **实现说明（2026-11-22）**：
+  - `RepoType { Model, Dataset, Space }` 枚举 + `parse()`；`HfCache` 所有路径 API 新增 `*_with_type` 变体，旧签名保持兼容（默认 model）。
+  - HF 缓存前缀：`models--` / `datasets--` / `spaces--`；CLI `hf-check` / `hf-download` 新增 `--repo-type`。
+  - blob → CAS 也改为相对链接（`../../../../cas/blake3/...`），快照 → blob 相对层级随 subfolder 深度调整。
+  - `Downloader::with_repo_type()` builder；`DownloadResult.hf_cache_degraded` 暴露降级状态；HF 缓存布局失败不再让已完成的 CAS 下载整体失败。
+  - `HfFileMetadata.commit_sha` + `extract_commit_sha()` 从最终重定向 URL 提取。
+  - Python：`MODELD_AUTO_HOOK=1` 是唯一自动激活开关；`deactivate()` 还原两处 patch 与 HF_HOME；wrapper 完整支持四个 HF 参数。
+- **验收证据（2026-11-22，Windows 11 / rustc 1.99.1 / clang-cl 16）**：
+  - `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings`：通过
+  - `cargo test --workspace --locked`：**344 passed, 0 failed**（B4 基线 341 → 新增 3 个 Rust 测试：commit SHA 提取、拒绝分支名、repo_type 前缀；HF 缓存测试从 6 增至 8）
+  - Python `unittest discover`：**17 passed**（新增 5 个 B5 测试：import 无副作用、AUTO_HOOK 显式、deactivate 双点还原、subfolder/repo_type、cache_dir/local_dir 回退）
+  - 平台限制已适配：Windows 无开发者模式时，HF 缓存 symlink 测试按能力探测跳过/断言显式降级；本机实测 `os error 1314`（需要管理员权限或开发者模式）
+  - **未实测**：20 仓库真实对拍、gated repo 行为、subfolder 端到端命中 —— 沙箱无外网且未安装 `huggingface_hub`，见 §12.3
 
 ### B6 · 统计语义（逻辑占用 vs 物理占用）
 
@@ -747,7 +762,7 @@ Refs: docs/ROADMAP.md#A1
 | B2 | CLI 拆分与输出层 | done | AI agent | 2026-10-24 | 2026-10-25 | `06f35b5` |
 | B3 | 日志与可观测性 | done | AI agent | 2026-10-25 | 2026-10-25 | `9aa5b11` |
 | B4 | 下载器加固 | done | AI agent | 2026-11-22 | 2026-11-22 | `0655f92` |
-| B5 | HF 缓存兼容性对拍 | todo | — | — | — | — |
+| B5 | HF 缓存兼容性对拍 | done | AI agent | 2026-11-22 | 2026-11-22 | 本轮提交 |
 | B6 | 统计语义 | todo | — | — | — | — |
 | B7 | 跨进程锁与并发安全 | todo | — | — | — | — |
 | B8 | 测试体系补齐 | todo | — | — | — | — |
@@ -773,6 +788,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-22 | B5 | HF 缓存兼容性：commit SHA refs、相对符号链接（失败报错而非静默复制）、`RepoType` 三类型贯通 CLI、Python hook 去除 import 副作用 + `deactivate()` 完整还原 + 四参数 wrapper；新增 8 个测试（Rust 3 + Python 5） | 本轮提交 | `core/hf_cache.rs`、`core/downloader.rs`、`cli/*`、`python/modeld_hook/*`、`python/tests/*` |
 | 2026-11-22 | B4 | 下载器加固：`<part>.meta` 防陈旧分片、`If-Range` 续传、BLAKE3+SHA256 流式计算（无二次读盘）、size 强校验、unverified 显式标记、DB 提交包进 `in_transaction`；新增 7 个测试 | `0655f92` | `core/downloader.rs`、`core/db.rs` |
 | 2026-10-24 | A8 | 构建与发布链路：Dockerfile 多阶段（rust:1.88-slim → debian-slim，非 root，~90 MB）、新增 `.dockerignore`、`MODELD_AUTH_TOKEN` 接通 `serve`（不落盘）、`rust-version = "1.88"`（实测）、`publish = false`、`deny.toml`、CI 新增 MSRV/前端/`cargo deny`/Docker 四个 job、`.gitignore` 乱码与 `node_modules` 反忽略修复 | `0eea2c3` | `docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`deny.toml`、`Cargo.toml`、`crates/*/Cargo.toml`、`cli/main.rs`、`.gitignore`、`CHANGELOG.md` |
 | 2026-10-24 | A7 | 清除假实现：设置真正落盘（仅保留可生效字段，删掉 3 个空开关）、统计真算（去重节省/浪费字节/最近扫描）、`requests_total` 中间件、审计接入 dedup/gc/unlink/config | `234201f` | `webui/api/{settings,stats,scan}.rs`、`webui/server.rs`、`webui/ui/pages/settings.js`、`webui/ui/i18n.js`、`core/{audit,db,gc,dedup,unlink,config}.rs`、`cli/main.rs`、`CHANGELOG.md` |
@@ -791,9 +807,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 4 | 44% |
+| B 架构收敛 | 9 | 5 | 56% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **12** | **50%** |
+| **合计** | **24** | **13** | **54%** |
 
 ---
 
@@ -854,6 +870,8 @@ Refs: docs/ROADMAP.md#A1
 | 2026-11-22 | 审核 | 本机 VS 升级到 18（MSVC 14.52）后，默认 `cargo test` 因 cc-rs 调 `cl.exe` 失败（C1034 stdarg.h）；需 `CC=clang-cl` 才能构建。CI 用固定 toolchain 不受影响 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-22 | 审核 | 沙箱下 `%TEMP%`（`C:\Users\ADMINI~1\AppData\Local\Temp`）拒绝创建目录，74 个 `tempfile::TempDir` 测试失败；设 `TMPDIR/TMP/TEMP` 到项目内目录后全绿 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-22 | B4 | 1 GB 下载 RSS 峰值与真实 HF 断点续传黑盒未实测（沙箱网络受限）；代码路径为固定 64 KB 缓冲 | C6 | open |
+| 2026-11-22 | B5 | 20 仓库 `huggingface_hub>=0.24` 对拍（含 dataset/subfolder/gated）未实测：沙箱无外网且未安装该库 | C6 | open |
+| 2026-11-22 | B5 | Windows 无开发者模式无法建符号链接（实测 os error 1314）；HF 缓存布局降级为 `hf_cache_degraded`，需管理员权限或开发者模式才能透明命中 | C6 | open |
 
 ---
 

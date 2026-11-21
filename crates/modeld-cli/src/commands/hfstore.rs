@@ -7,7 +7,7 @@ use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use modeld_core::{
     build_model_lookup, find_workflow_files, index_workflow, parse_workflow, t, tf, Database,
-    HfCache,
+    HfCache, RepoType,
 };
 use std::path::PathBuf;
 
@@ -17,13 +17,15 @@ pub fn hf_check_command(
     repo_id: &str,
     filename: &str,
     revision: &str,
+    repo_type: &str,
     json_output: bool,
 ) -> Result<()> {
     let db = open_db(&store)?;
     let hf_cache = HfCache::new(&store);
+    let rtype = RepoType::parse(repo_type)?;
 
-    // Check snapshot path
-    let snapshot_path = hf_cache.snapshot_file_path(repo_id, revision, filename);
+    // Check snapshot path (repo_type-aware)
+    let snapshot_path = hf_cache.snapshot_file_path_with_type(repo_id, revision, filename, rtype);
     let found = snapshot_path.exists();
 
     if json_output {

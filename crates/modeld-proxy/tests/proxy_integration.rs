@@ -250,6 +250,20 @@ fn test_hf_proxy_hit_from_fake_cache() {
     db.insert_or_update_model(&hash, content.len() as i64, None, None, None, None).unwrap();
 
     // Build a fake HF cache entry pointing at this CAS object.
+    // B5: the cache uses mandatory relative symlinks; Windows without
+    // Developer Mode cannot create them, so this test cannot run there.
+    let probe = proxy.store_path.join("_symlink_probe");
+    let probe_target = proxy.store_path.join("_symlink_probe_target");
+    std::fs::write(&probe_target, b"x").unwrap();
+    #[cfg(windows)]
+    let symlinks_ok = std::os::windows::fs::symlink_file(&probe_target, &probe).is_ok();
+    #[cfg(unix)]
+    let symlinks_ok = std::os::unix::fs::symlink(&probe_target, &probe).is_ok();
+    if !symlinks_ok {
+        eprintln!("skipping HF fake-cache hit test: symlinks unavailable on this host");
+        return;
+    }
+    let _ = std::fs::remove_file(&probe);
     let sha256 = "a".repeat(64);
     hf_cache
         .create_cache_entry(

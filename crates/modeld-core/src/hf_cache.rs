@@ -18,11 +18,52 @@
 //!             └── {filename}  →  ../../blobs/{sha256}
 //! ```
 
+//! ## B5 compatibility notes
+//! - `refs/{branch}` stores the resolved **commit SHA**, never a branch name.
+//! - Snapshot entries are **relative symlinks** (`../../blobs/{sha256}`), as
+//!   `huggingface_hub` writes them.  A failed symlink is an error, never a
+//!   silent copy — a copy would break HF's cache identity and dedup.
+//! - `repo_type` selects the HF cache prefix (`models--` / `datasets--` /
+//!   `spaces--`), matching `huggingface_hub`'s directory naming.
+
 use crate::cas::CasStore;
 use crate::hash::Blake3Hash;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// HF repository type, mapped to the cache directory prefix used by
+/// `huggingface_hub` (e.g. `models--org--name`, `datasets--org--name`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepoType {
+    #[default]
+    Model,
+    Dataset,
+    Space,
+}
+
+impl RepoType {
+    pub fn prefix(self) -> &'static str {
+        match self {
+            RepoType::Model => "models--",
+            RepoType::Dataset => "datasets--",
+            RepoType::Space => "spaces--",
+        }
+    }
+
+    /// Parse the CLI / Python value (`model` / `dataset` / `space`).
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "model" | "models" => Ok(RepoType::Model),
+            "dataset" | "datasets" => Ok(RepoType::Dataset),
+            "space" | "spaces" => Ok(RepoType::Space),
+            other => Err(anyhow::anyhow!(
+                "unknown HF repo type '{}' (expected model/dataset/space)",
+                other
+            )),
+        }
+    }
+}
 
 /// Manages the fake HuggingFace cache directory structure
 pub struct HfCache {
@@ -60,42 +101,86 @@ impl HfCache {
     /// Convert a HuggingFace repo_id to a model directory name
     /// e.g. "stabilityai/sdxl-base" → "models--stabilityai--sdxl-base"
     pub fn repo_to_dir_name(repo_id: &str) -> String {
-        format!("models--{}", repo_id.replace('/', "--"))
+        Self::repo_to_dir_name_with_type(repo_id, RepoType::Model)
+    }
+
+    /// `repo_type`-aware variant of `repo_to_dir_name`.
+    pub fn repo_to_dir_name_with_type(repo_id: &str, repo_type: RepoType) -> String {
+        format!("{}{}", repo_type.prefix(), repo_id.replace('/', "--"))
     }
 
     /// Get the model-specific directory path
     pub fn model_dir(&self, repo_id: &str) -> PathBuf {
-        self.hub_dir().join(Self::repo_to_dir_name(repo_id))
+        self.model_dir_with_type(repo_id, RepoType::Model)
+    }
+
+    pub fn model_dir_with_type(&self, repo_id: &str, repo_type: RepoType) -> PathBuf {
+        self.hub_dir().join(Self::repo_to_dir_name_with_type(repo_id, repo_type))
     }
 
     /// Get the blobs directory for a model
     pub fn blobs_dir(&self, repo_id: &str) -> PathBuf {
-        self.model_dir(repo_id).join("blobs")
+        self.blobs_dir_with_type(repo_id, RepoType::Model)
+    }
+
+    pub fn blobs_dir_with_type(&self, repo_id: &str, repo_type: RepoType) -> PathBuf {
+        self.model_dir_with_type(repo_id, repo_type).join("blobs")
     }
 
     /// Get the snapshots directory for a model
     pub fn snapshots_dir(&self, repo_id: &str) -> PathBuf {
-        self.model_dir(repo_id).join("snapshots")
+        self.snapshots_dir_with_type(repo_id, RepoType::Model)
+    }
+
+    pub fn snapshots_dir_with_type(&self, repo_id: &str, repo_type: RepoType) -> PathBuf {
+        self.model_dir_with_type(repo_id, repo_type).join("snapshots")
     }
 
     /// Get the refs directory for a model
     pub fn refs_dir(&self, repo_id: &str) -> PathBuf {
-        self.model_dir(repo_id).join("refs")
+        self.refs_dir_with_type(repo_id, RepoType::Model)
+    }
+
+    pub fn refs_dir_with_type(&self, repo_id: &str, repo_type: RepoType) -> PathBuf {
+        self.model_dir_with_type(repo_id, repo_type).join("refs")
     }
 
     /// Get the snapshot path for a specific revision
     pub fn snapshot_dir(&self, repo_id: &str, revision: &str) -> PathBuf {
-        self.snapshots_dir(repo_id).join(revision)
+        self.snapshot_dir_with_type(repo_id, revision, RepoType::Model)
+    }
+
+    pub fn snapshot_dir_with_type(
+        &self,
+        repo_id: &str,
+        revision: &str,
+        repo_type: RepoType,
+    ) -> PathBuf {
+        self.snapshots_dir_with_type(repo_id, repo_type).join(revision)
     }
 
     /// Get the path of a specific file in a snapshot
     pub fn snapshot_file_path(&self, repo_id: &str, revision: &str, filename: &str) -> PathBuf {
-        self.snapshot_dir(repo_id, revision).join(filename)
+        self.snapshot_file_path_with_type(repo_id, revision, filename, RepoType::Model)
+    }
+
+    pub fn snapshot_file_path_with_type(
+        &self,
+        repo_id: &str,
+        revision: &str,
+        filename: &str,
+        repo_type: RepoType,
+    ) -> PathBuf {
+        self.snapshot_dir_with_type(repo_id, revision, repo_type).join(filename)
     }
 
     /// Get the blob path for a given SHA256 hash
     pub fn blob_path(&self, repo_id: &str, sha256: &str) -> PathBuf {
-        self.blobs_dir(repo_id).join(sha256)
+        self.blob_path_with_type(repo_id, sha256, RepoType::Model)
+    }
+
+    pub fn blob_path_with_type(&self, repo_id: &str, sha256: &str, repo_type: RepoType) -> PathBuf {
+        self.blobs_dir_with_type(repo_id, repo_type).join(sha256)
     }
 
     /// Check if a file already exists in the fake HF cache
@@ -103,17 +188,49 @@ impl HfCache {
         self.snapshot_file_path(repo_id, revision, filename).exists()
     }
 
+    pub fn check_cache_with_type(
+        &self,
+        repo_id: &str,
+        revision: &str,
+        filename: &str,
+        repo_type: RepoType,
+    ) -> bool {
+        self.snapshot_file_path_with_type(repo_id, revision, filename, repo_type).exists()
+    }
+
     /// Check if a blob (by SHA256) is already in the fake HF cache
     pub fn has_blob(&self, repo_id: &str, sha256: &str) -> bool {
         self.blob_path(repo_id, sha256).exists()
     }
 
+    /// Create a *relative* symlink at `link` pointing to `relative_target`.
+    ///
+    /// B5: symlink failure is a hard error.  Falling back to a copy silently
+    /// would break `huggingface_hub`'s cache identity (it resolves blobs by
+    /// inode/link, and a copy would never be deduplicated).
+    fn create_relative_symlink(link: &Path, relative_target: &str) -> Result<()> {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(relative_target, link).with_context(|| {
+            format!(
+                "cannot create relative symlink {} -> {} (symlinks are required for HF cache compatibility)",
+                link.display(), relative_target
+            )
+        })?;
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(relative_target, link).with_context(|| {
+            format!(
+                "cannot create relative symlink {} -> {} (enable Developer Mode or run as administrator; symlinks are required for HF cache compatibility)",
+                link.display(), relative_target
+            )
+        })?;
+        Ok(())
+    }
+
     /// Create the full fake HF cache entry for a downloaded file.
     ///
-    /// This creates:
-    /// - `blobs/{sha256}` → symlink to CAS object
-    /// - `snapshots/{revision}/{filename}` → relative symlink to blob
-    /// - `refs/{branch}` → text file with revision hash
+    /// `commit_sha` must be the resolved 40-hex git commit — never a branch
+    /// name.  `huggingface_hub` reads `refs/{branch}` to resolve a branch to a
+    /// commit and then looks under `snapshots/{commit_sha}`.
     pub fn create_cache_entry(
         &self,
         repo_id: &str,
@@ -123,10 +240,58 @@ impl HfCache {
         blake3_hash: &Blake3Hash,
         branch: Option<&str>,
     ) -> Result<PathBuf> {
-        // 1. Ensure directories exist
-        let blobs_dir = self.blobs_dir(repo_id);
-        let snapshot_dir = self.snapshot_dir(repo_id, revision);
-        let refs_dir = self.refs_dir(repo_id);
+        self.create_cache_entry_with_type(
+            repo_id,
+            filename,
+            revision,
+            sha256,
+            blake3_hash,
+            branch,
+            RepoType::Model,
+            None,
+        )
+    }
+
+    /// `repo_type` / `commit_sha`-aware variant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_cache_entry_with_type(
+        &self,
+        repo_id: &str,
+        filename: &str,
+        revision: &str,
+        sha256: &str,
+        blake3_hash: &Blake3Hash,
+        branch: Option<&str>,
+        repo_type: RepoType,
+        commit_sha: Option<&str>,
+    ) -> Result<PathBuf> {
+        // Validate the commit SHA *before* touching the filesystem, so a
+        // rejected branch name never leaves a half-built cache entry.
+        let commit = match commit_sha {
+            Some(sha) if is_commit_sha(sha) => Some(sha.to_ascii_lowercase()),
+            Some(sha) => anyhow::bail!(
+                "refusing to write refs: '{}' is not a 40-hex commit SHA \
+                 (huggingface_hub requires a commit SHA, not a branch name)",
+                sha
+            ),
+            None if is_commit_sha(revision) => Some(revision.to_ascii_lowercase()),
+            None => {
+                tracing::warn!(
+                    "no resolved commit SHA for {}/{} revision '{}'; skipping refs/{} — \
+                     branch resolution will not work in huggingface_hub",
+                    repo_id,
+                    filename,
+                    revision,
+                    branch.unwrap_or("main")
+                );
+                None
+            }
+        };
+
+        // 1. Ensure directories exist (repo_type-aware)
+        let blobs_dir = self.blobs_dir_with_type(repo_id, repo_type);
+        let snapshot_dir = self.snapshot_dir_with_type(repo_id, revision, repo_type);
+        let refs_dir = self.refs_dir_with_type(repo_id, repo_type);
 
         // Handle subdirectories in filename (e.g. "text_encoder/model.safetensors")
         let file_path_in_snapshot = snapshot_dir.join(filename);
@@ -134,38 +299,56 @@ impl HfCache {
 
         fs::create_dir_all(&blobs_dir).context("Failed to create blobs directory")?;
         fs::create_dir_all(parent_dir).context("Failed to create snapshot subdirectory")?;
-        fs::create_dir_all(&refs_dir).context("Failed to create refs directory")?;
+        fs::create_dir_all(&refs_dir)
+            .context("Failed to write refs: failed to create refs directory")?;
 
-        // 2. Create blob → CAS symlink
+        // 2. blob → CAS: relative symlink from blobs/{sha} to cas/blake3/{p}/{hash}.
+        // The blob lives at <store>/hf_cache/hub/<model-dir>/blobs/{sha}; CAS is
+        // <store>/cas/blake3/{p}/{hash}. Depth: blobs → model-dir → hub → hf_cache → store.
         let blob_path = blobs_dir.join(sha256);
-        if !blob_path.exists() {
+        if !blob_path.exists() || fs::symlink_metadata(&blob_path).is_err() {
             let cas_path = self.cas.get(blake3_hash).ok_or_else(|| {
                 anyhow::anyhow!("CAS object not found for blake3 hash: {}", blake3_hash.as_hex())
             })?;
-            create_symlink_or_copy(&cas_path, &blob_path).with_context(|| {
+            let cas_rel = cas_path
+                .strip_prefix(self.root.parent().context("store root unavailable")?)
+                .context("CAS path is not inside the store")?;
+            let up = "../../../../"; // blobs → model-dir → hub → hf_cache → store
+            let target = format!("{}{}", up, cas_rel.to_string_lossy().replace('\\', "/"));
+            if blob_path.exists() {
+                fs::remove_file(&blob_path)?;
+            }
+            Self::create_relative_symlink(&blob_path, &target).with_context(|| {
                 format!(
-                    "Failed to create blob symlink {} → {}",
-                    blob_path.display(),
-                    cas_path.display()
+                    "Failed to create blob symlink {} -> {} (symlinks required for HF cache compatibility)",
+                    blob_path.display(), target
                 )
             })?;
         }
 
-        // 3. Create snapshot/{revision}/{filename} → ../../blobs/{sha256}
-        if !file_path_in_snapshot.exists() {
-            // Calculate relative path from snapshot file to blob
-            let depth = filename.matches('/').count() + 1; // how many dirs deep
-            let relative_prefix = "../".repeat(depth + 1); // +1 for snapshots/{rev}/
+        // 3. snapshot/{revision}/{filename} → ../../../blobs/{sha256} (relative).
+        // Depth depends on subfolder nesting inside the snapshot.
+        if !file_path_in_snapshot.exists() || fs::symlink_metadata(&file_path_in_snapshot).is_err()
+        {
+            let depth = 2 + filename.matches('/').count(); // rev + snapshots, plus subdirs
+            let relative_prefix = "../".repeat(depth);
             let relative_blob = format!("{}blobs/{}", relative_prefix, sha256);
-            create_symlink_or_copy_rel(&blob_path, &file_path_in_snapshot, &relative_blob)
+            if file_path_in_snapshot.exists() {
+                fs::remove_file(&file_path_in_snapshot)?;
+            }
+            Self::create_relative_symlink(&file_path_in_snapshot, &relative_blob)
                 .with_context(|| format!("Failed to create snapshot symlink for {}", filename))?;
         }
 
-        // 4. Write refs/{branch} = revision
-        let branch_name = branch.unwrap_or("main");
-        let ref_file = refs_dir.join(branch_name);
-        if !ref_file.exists() {
-            fs::write(&ref_file, revision).context("Failed to write refs file")?;
+        // 4. refs/{branch} = resolved commit SHA (validated before any FS write).
+        if let Some(sha) = commit {
+            let branch_name = branch.unwrap_or("main");
+            let ref_file = refs_dir.join(branch_name);
+            let existing = fs::read_to_string(&ref_file).unwrap_or_default();
+            if existing.trim() != sha {
+                fs::write(&ref_file, &sha)
+                    .with_context(|| format!("Failed to write refs file {}", ref_file.display()))?;
+            }
         }
 
         Ok(file_path_in_snapshot)
@@ -187,7 +370,11 @@ impl HfCache {
                 .cas
                 .get(blake3_hash)
                 .ok_or_else(|| anyhow::anyhow!("CAS object not found for blake3 hash"))?;
-            create_symlink_or_copy(&cas_path, &blob_path)?;
+            let cas_rel = cas_path
+                .strip_prefix(self.root.parent().context("store root unavailable")?)
+                .context("CAS path is not inside the store")?;
+            let target = format!("../../../../{}", cas_rel.to_string_lossy().replace('\\', "/"));
+            Self::create_relative_symlink(&blob_path, &target)?;
         }
         Ok(blob_path)
     }
@@ -231,6 +418,11 @@ impl HfCache {
     }
 }
 
+/// True when `s` is a 40-character hex git commit SHA.
+fn is_commit_sha(s: &str) -> bool {
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Statistics about the fake HF cache
 #[derive(Debug)]
 pub struct HfCacheStats {
@@ -243,34 +435,6 @@ pub struct HfCacheStats {
 // Platform-specific symlink creation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Create a symlink (absolute) from `target` ← `link`.
-/// Falls back to copy if symlink creation fails.
-fn create_symlink_or_copy(target: &Path, link: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link)?;
-    }
-    #[cfg(windows)]
-    {
-        // Try symlink first (requires Developer Mode or admin)
-        let result = std::os::windows::fs::symlink_file(target, link);
-        if result.is_err() {
-            // Fall back to hard link (same volume) or copy
-            if fs::hard_link(target, link).is_err() {
-                fs::copy(target, link).context("Failed to copy as fallback")?;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Create a symlink using a relative path string (for snapshot → blob links)
-fn create_symlink_or_copy_rel(target: &Path, link: &Path, _relative: &str) -> Result<()> {
-    // On all platforms, use the absolute target for simplicity
-    // The relative path is what HF clients expect but absolute also works
-    create_symlink_or_copy(target, link)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +443,16 @@ fn create_symlink_or_copy_rel(target: &Path, link: &Path, _relative: &str) -> Re
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Detect whether this platform/account can create symlinks at all.
+    /// Windows without Developer Mode / admin returns ERROR_PRIVILEGE_NOT_HELD.
+    #[cfg(windows)]
+    fn symlinks_supported(dir: &TempDir) -> bool {
+        let target = dir.path().join("symlink-target-test");
+        let link = dir.path().join("symlink-link-test");
+        std::fs::write(&target, b"x").unwrap();
+        std::os::windows::fs::symlink_file(&target, &link).is_ok()
+    }
 
     #[test]
     fn test_repo_to_dir_name() {
@@ -348,18 +522,36 @@ mod tests {
 
         // Create fake SHA256 (normally from HF API)
         let sha256 = "a".repeat(64);
+        let commit = "0123456789abcdef0123456789abcdef01234567";
 
-        // Create the cache entry
-        let file_path = cache
-            .create_cache_entry(
-                "stabilityai/sdxl-base",
-                "model.safetensors",
-                "abc123def456",
-                &sha256,
-                &hash,
-                Some("main"),
-            )
-            .unwrap();
+        // B5: symlinks are mandatory.  On Windows without Developer Mode the
+        // call must FAIL (never silently copy) — assert that exact behaviour.
+        let result = cache.create_cache_entry_with_type(
+            "stabilityai/sdxl-base",
+            "model.safetensors",
+            commit,
+            &sha256,
+            &hash,
+            Some("main"),
+            RepoType::Model,
+            Some(commit),
+        );
+
+        #[cfg(windows)]
+        if !symlinks_supported(&tmp) {
+            let err = result.expect_err("symlink creation must fail without Developer Mode");
+            assert!(
+                format!("{:#}", err).contains("symlink")
+                    || format!("{:#}", err).contains("privilege"),
+                "error must explain the symlink requirement: {:#}",
+                err
+            );
+            let blob_path = cache.blob_path("stabilityai/sdxl-base", &sha256);
+            assert!(!blob_path.exists(), "no silent copy may be left behind");
+            return;
+        }
+
+        let file_path = result.unwrap();
 
         // Verify structure
         assert!(file_path.exists(), "Snapshot file should exist");
@@ -367,18 +559,82 @@ mod tests {
         let blob_path = cache.blob_path("stabilityai/sdxl-base", &sha256);
         assert!(blob_path.exists(), "Blob should exist");
 
+        // B5: snapshot and blob links must be relative symlinks.
+        #[cfg(unix)]
+        {
+            let snap_link = std::fs::read_link(&file_path).expect("snapshot must be a symlink");
+            let snap_str = snap_link.to_string_lossy();
+            assert!(!snap_str.starts_with('/'), "snapshot link must be relative: {}", snap_str);
+            assert!(snap_str.contains("blobs/"), "{}", snap_str);
+            let blob_link = std::fs::read_link(&blob_path).expect("blob must be a symlink");
+            assert!(!blob_link.to_string_lossy().starts_with('/'), "blob link must be relative");
+            // The relative snapshot link must resolve to the blob.
+            let resolved = file_path.parent().unwrap().join(&snap_link);
+            assert_eq!(
+                std::fs::canonicalize(resolved).unwrap(),
+                std::fs::canonicalize(&blob_path).unwrap()
+            );
+        }
+
         let refs_file = cache.refs_dir("stabilityai/sdxl-base").join("main");
         assert!(refs_file.exists(), "refs/main should exist");
 
         let rev_in_ref = std::fs::read_to_string(&refs_file).unwrap();
-        assert_eq!(rev_in_ref.trim(), "abc123def456");
+        assert_eq!(rev_in_ref.trim(), commit, "refs/main must be a commit SHA, not a branch name");
 
-        // Verify cache hit
-        assert!(cache.check_cache("stabilityai/sdxl-base", "abc123def456", "model.safetensors"));
+        // Verify cache hit (HF resolves branches to commit SHA first).
+        assert!(cache.check_cache("stabilityai/sdxl-base", commit, "model.safetensors"));
+        assert!(!cache.check_cache("stabilityai/sdxl-base", "main", "model.safetensors"));
 
         // Verify repos list
         let repos = cache.list_repos().unwrap();
         assert!(repos.iter().any(|r| r.contains("stabilityai")));
+    }
+
+    #[test]
+    fn test_refuses_to_write_branch_name_as_commit() {
+        use crate::cas::CasStore;
+        use tempfile::NamedTempFile;
+
+        let tmp = TempDir::new().unwrap();
+        let store_path = tmp.path();
+        let cas = CasStore::new(store_path);
+        cas.init().unwrap();
+        let cache = HfCache::new(store_path);
+        cache.init().unwrap();
+
+        let model_file = NamedTempFile::new().unwrap();
+        std::fs::write(model_file.path(), b"content").unwrap();
+        let hash = crate::hash::hash_file(model_file.path()).unwrap();
+        cas.store(model_file.path(), &hash).unwrap();
+
+        let result = cache.create_cache_entry_with_type(
+            "org/repo",
+            "m.bin",
+            "main",
+            &"b".repeat(64),
+            &hash,
+            Some("main"),
+            RepoType::Model,
+            Some("main"),
+        );
+        assert!(result.is_err(), "branch name must be rejected as commit SHA");
+        assert!(format!("{:#}", result.unwrap_err()).contains("not a 40-hex commit SHA"));
+    }
+
+    #[test]
+    fn test_repo_type_prefixes() {
+        assert_eq!(
+            HfCache::repo_to_dir_name_with_type("org/data", RepoType::Dataset),
+            "datasets--org--data"
+        );
+        assert_eq!(
+            HfCache::repo_to_dir_name_with_type("org/space", RepoType::Space),
+            "spaces--org--space"
+        );
+        assert_eq!(RepoType::parse("dataset").unwrap(), RepoType::Dataset);
+        assert_eq!(RepoType::parse("MODELS").unwrap(), RepoType::Model);
+        assert!(RepoType::parse("unknown").is_err());
     }
 
     #[test]

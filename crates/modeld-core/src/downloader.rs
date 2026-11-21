@@ -84,6 +84,9 @@ pub struct HfFileMetadata {
     pub size_bytes: Option<u64>,
     /// ETag used for `If-Range` and partial-file validation.
     pub etag: Option<String>,
+    /// Resolved 40-hex commit SHA from the final redirect URL, used for
+    /// `refs/{branch}` so huggingface_hub can resolve branches correctly.
+    pub commit_sha: Option<String>,
     pub download_url: String,
 }
 
@@ -99,6 +102,10 @@ pub struct DownloadResult {
     /// True when HEAD metadata (size / ETag / SHA256) was unavailable and the
     /// download could not be fully verified.  Never silently claims verified.
     pub unverified: bool,
+    /// True when the HF cache layout could not be built (e.g. Windows without
+    /// Developer Mode denies symlink creation).  Bytes are still in CAS, but
+    /// HF frameworks will not see a transparent cache hit.  Never silent.
+    pub hf_cache_degraded: bool,
 }
 
 /// Side-car metadata for a resumable `.part` file.
@@ -175,8 +182,9 @@ pub struct Downloader {
     hf_token: Option<String>,
     hf_base_url: String,
     /// True when the token was supplied via `.with_token()` (CLI `--token` flag).
-    /// Used to emit the "use HF_TOKEN env var instead" warning.
     token_from_cli: bool,
+    /// HF repository type — selects the cache directory prefix.
+    repo_type: crate::hf_cache::RepoType,
 }
 
 impl Downloader {
@@ -188,7 +196,14 @@ impl Downloader {
                 .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok()),
             hf_base_url: DEFAULT_HF_BASE.to_string(),
             token_from_cli: false,
+            repo_type: crate::hf_cache::RepoType::Model,
         }
+    }
+
+    /// Select the HF repository type (model / dataset / space).
+    pub fn with_repo_type(mut self, repo_type: crate::hf_cache::RepoType) -> Self {
+        self.repo_type = repo_type;
+        self
     }
 
     /// Supply a HuggingFace access token programmatically (e.g. from `--token` CLI flag).
@@ -219,8 +234,13 @@ impl Downloader {
         revision: &str,
         sha256: Option<&str>,
     ) -> Result<Option<PathBuf>> {
-        if hf_cache.check_cache(repo_id, revision, filename) {
-            return Ok(Some(hf_cache.snapshot_file_path(repo_id, revision, filename)));
+        if hf_cache.check_cache_with_type(repo_id, revision, filename, self.repo_type) {
+            return Ok(Some(hf_cache.snapshot_file_path_with_type(
+                repo_id,
+                revision,
+                filename,
+                self.repo_type,
+            )));
         }
         if let Some(s) = sha256 {
             if let Some(mapping) = db.get_blake3_by_sha256(s)? {
@@ -307,6 +327,7 @@ impl Downloader {
                     sha256: None,
                     size_bytes: None,
                     etag: None,
+                    commit_sha: None,
                     download_url: format!(
                         "{}/{}/resolve/{}/{}",
                         self.hf_base_url, repo_id, rev, filename
@@ -342,6 +363,7 @@ impl Downloader {
                             model_card_url: Some(format!("{}/{}", self.hf_base_url, repo_id)),
                         }),
                         unverified: false,
+                        hf_cache_degraded: false,
                     });
                 }
             }
@@ -387,8 +409,10 @@ impl Downloader {
         // finishes the import when the object exists and rolls it back when it
         // does not.
         let tx_id = uuid::Uuid::new_v4().to_string();
-        let snapshot_path =
-            hf_cache.snapshot_file_path(repo_id, filename, rev).to_string_lossy().to_string();
+        let snapshot_path = hf_cache
+            .snapshot_file_path_with_type(repo_id, filename, rev, self.repo_type)
+            .to_string_lossy()
+            .to_string();
         db.insert_wal_transaction(
             &tx_id,
             "download",
@@ -418,8 +442,10 @@ impl Downloader {
 
         // Step 7–9: all DB state changes in one SQLite transaction.  If any
         // statement fails, the WAL row stays `pending`/`copied` for recovery.
-        let snapshot_str =
-            hf_cache.snapshot_file_path(repo_id, filename, rev).to_string_lossy().to_string();
+        let snapshot_str = hf_cache
+            .snapshot_file_path_with_type(repo_id, filename, rev, self.repo_type)
+            .to_string_lossy()
+            .to_string();
         let sha_for_db = sha256.clone();
         let alias_hash = blake3.clone();
         let snapshot_for_db = snapshot_str.clone();
@@ -446,13 +472,32 @@ impl Downloader {
         })?;
 
         // Step 8: create the HF cache layout on disk after the DB commit.
-        // Its alias row already exists, so GC will protect the model even if
-        // this step is interrupted (recovery rolls forward).
+        // A symlink denial (Windows without Developer Mode) is a real degradation:
+        // report it loudly and expose it on the result, but do not discard an
+        // otherwise successful, CAS-verified download.
+        let mut hf_cache_degraded = false;
         if let Some(ref sha256_str) = sha256 {
             hf_cache.init().ok();
-            hf_cache
-                .create_cache_entry(repo_id, filename, rev, sha256_str, &blake3, Some("main"))
-                .context("Failed to create HF cache entry")?;
+            if let Err(e) = hf_cache.create_cache_entry_with_type(
+                repo_id,
+                filename,
+                rev,
+                sha256_str,
+                &blake3,
+                Some("main"),
+                self.repo_type,
+                metadata.commit_sha.as_deref(),
+            ) {
+                tracing::warn!(
+                    "HF cache layout not created for {}/{} ({}); the model is in CAS but \
+                     huggingface_hub will not see a cache hit. On Windows enable Developer Mode \
+                     or run as administrator to allow symlinks.",
+                    repo_id,
+                    filename,
+                    e
+                );
+                hf_cache_degraded = true;
+            }
         }
 
         db.delete_wal_transaction(&tx_id)?;
@@ -477,6 +522,7 @@ impl Downloader {
             was_cached: false,
             provenance,
             unverified,
+            hf_cache_degraded,
         })
     }
 
@@ -509,6 +555,11 @@ impl Downloader {
             .or_else(|| resp.header("content-length"))
             .and_then(|v| v.parse::<u64>().ok());
 
+        // huggingface_hub resolves refs/{branch} → commit SHA. Extract it from
+        // the final redirect URL: /{repo}/resolve/{commit_sha}/{filename}.
+        let final_url = resp.get_url().to_string();
+        let commit_sha = extract_commit_sha(final_url.as_str());
+
         Ok(HfFileMetadata {
             repo_id: repo_id.to_string(),
             filename: filename.to_string(),
@@ -516,6 +567,7 @@ impl Downloader {
             sha256,
             size_bytes,
             etag,
+            commit_sha,
             download_url: url,
         })
     }
@@ -789,6 +841,23 @@ fn auth_header(token: Option<&str>) -> Option<String> {
     token.map(|t| format!("Bearer {}", t))
 }
 
+/// Extract a 40-hex commit SHA from a HF resolve URL.
+/// Matches `/resolve/{sha}/...` and also bare `{sha}` path segments.
+fn extract_commit_sha(url: &str) -> Option<String> {
+    let segments: Vec<&str> = url.split(&['/', '?', '#'][..]).filter(|s| !s.is_empty()).collect();
+    for (i, seg) in segments.iter().enumerate() {
+        if *seg == "resolve" {
+            if let Some(candidate) = segments.get(i + 1) {
+                if candidate.len() == 40 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(candidate.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    // Some CDN URLs carry the commit in a query string (`?download=true` etc.)
+    None
+}
+
 /// Convert a ureq HTTP error into a user-friendly `anyhow::Error`.
 ///
 /// 403 responses get a special message prompting the user to set a token.
@@ -860,6 +929,23 @@ mod tests {
         f.flush().unwrap();
         let result = verify_sha256(f.path(), &"a".repeat(64));
         assert!(result.is_err(), "wrong hash should return Err");
+    }
+
+    #[test]
+    fn test_extract_commit_sha() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            extract_commit_sha(&format!(
+                "https://huggingface.co/org/repo/resolve/{}/model.safetensors?download=true",
+                sha
+            )),
+            Some(sha.to_string())
+        );
+        assert_eq!(
+            extract_commit_sha("https://huggingface.co/org/repo/resolve/main/model.bin"),
+            None
+        );
+        assert_eq!(extract_commit_sha("https://cdn-lfs.example.com/blob/abc"), None);
     }
 
     #[test]

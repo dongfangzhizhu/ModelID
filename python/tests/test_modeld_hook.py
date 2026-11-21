@@ -57,7 +57,7 @@ class TestActivateDeactivate(unittest.TestCase):
             self.assertIsInstance(result, bool)
 
     def test_activate_with_mock_modeld(self):
-        """Activate should set HF_HOME when modeld is available."""
+        """Activate should set HF_HOME when modeld is available (explicit call only)."""
         mock_version = MagicMock()
         mock_version.returncode = 0
 
@@ -70,10 +70,135 @@ class TestActivateDeactivate(unittest.TestCase):
                 result = self.hook.activate()
                 # If HF_HOME was set, activation partially succeeded
                 if result:
-                    # HF_HOME should have been set
                     hf_home = os.environ.get("HF_HOME")
                     if hf_home:
                         self.assertIn("hf_cache", hf_home)
+
+
+class TestB5Compatibility(unittest.TestCase):
+    """B5: import side effects, full deactivate, wrapper parameters."""
+
+    def setUp(self):
+        with patch.dict(os.environ, {"MODELD_NO_AUTO_HOOK": "1"}):
+            import modeld_hook
+            modeld_hook.deactivate()
+        self.hook = modeld_hook
+
+    def test_import_does_not_patch_hf_home(self):
+        """Importing modeld_hook must never mutate HF_HOME or install patches."""
+        code = (
+            "import os, sys; "
+            "os.environ['HF_HOME']='/original/hf'; "
+            "import modeld_hook; "
+            "print(os.environ.get('HF_HOME'), modeld_hook.is_active())"
+        )
+        env = dict(os.environ)
+        env["MODELD_NO_AUTO_HOOK"] = "1"
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=env
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("/original/hf False", result.stdout)
+
+    def test_mode_b_auto_hook_is_explicit(self):
+        """MODELD_AUTO_HOOK=1 is the only env-driven auto-activation switch."""
+        code = (
+            "import modeld_hook, os; "
+            "print('auto=', modeld_hook.is_active())"
+        )
+        env = dict(os.environ)
+        env["MODELD_AUTO_HOOK"] = "1"
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=env
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Without the modeld CLI installed, activation fails gracefully (False).
+        self.assertIn("auto= False", result.stdout)
+
+    def test_deactivate_restores_both_patch_sites(self):
+        """Both hf_hub_download references must be restored by deactivate()."""
+        # Simulate huggingface_hub with a tiny fake module injected in sys.modules.
+        import types
+
+        def original_top(repo_id, filename, **kwargs):
+            return "top"
+
+        def original_fd(repo_id, filename, **kwargs):
+            return "fd"
+
+        hub = types.ModuleType("huggingface_hub")
+        hub.hf_hub_download = original_top
+        fd = types.ModuleType("huggingface_hub.file_download")
+        fd.hf_hub_download = original_fd
+        hub.file_download = fd
+
+        with patch.dict(sys.modules, {"huggingface_hub": hub, "huggingface_hub.file_download": fd}):
+            # Set internal state as activate() would.
+            self.hook._original_hf_hub_download = original_top
+            self.hook._original_file_download_hf_hub_download = original_fd
+            self.hook._active = True
+            hub.hf_hub_download = lambda *a, **k: "patched-top"
+            fd.hf_hub_download = lambda *a, **k: "patched-fd"
+
+            self.hook.deactivate()
+
+            self.assertIs(hub.hf_hub_download, original_top)
+            self.assertIs(fd.hf_hub_download, original_fd)
+            self.assertFalse(self.hook.is_active())
+
+    def test_wrapper_subfolder_and_repo_type(self):
+        """subfolder is joined; repo_type reaches both CLI calls."""
+        import json
+        from modeld_hook import intercept
+
+        seen = []
+
+        def fake_run(args, **kwargs):
+            seen.append(args)
+            resp = MagicMock()
+            resp.returncode = 0
+            if "hf-check" in args:
+                resp.stdout = json.dumps({"found": True, "path": "/cached/file"})
+            else:
+                resp.stdout = json.dumps({"path": "/downloaded/file"})
+            return resp
+
+        wrapper = intercept.make_hf_hub_download_wrapper(lambda *a, **k: "original")
+        with patch("subprocess.run", side_effect=fake_run):
+            result = wrapper(
+                "org/data", "weights.bin", subfolder="checkpoints",
+                repo_type="dataset", revision="v1",
+            )
+
+        self.assertEqual(result, "/cached/file")
+        self.assertIn("checkpoints/weights.bin", seen[0])
+        self.assertIn("--repo-type", seen[0])
+        self.assertIn("dataset", seen[0])
+
+    def test_wrapper_cache_dir_falls_through(self):
+        """cache_dir/local_dir defer to the original function (explicit, not silent)."""
+        from modeld_hook import intercept
+
+        called = []
+
+        def original(repo_id, filename, **kwargs):
+            called.append((repo_id, filename, kwargs))
+            return "/hf/owned/path"
+
+        wrapper = intercept.make_hf_hub_download_wrapper(original)
+        with patch("subprocess.run") as mock_run:
+            result = wrapper("org/model", "f.bin", cache_dir="/my/cache")
+        mock_run.assert_not_called()
+        self.assertEqual(result, "/hf/owned/path")
+        self.assertEqual(called[0][2]["cache_dir"], "/my/cache")
+
+        called.clear()
+        with patch("subprocess.run") as mock_run:
+            wrapper("org/model", "f.bin", local_dir="/my/local")
+        mock_run.assert_not_called()
+        self.assertEqual(called[0][2]["local_dir"], "/my/local")
 
 
 class TestIntercept(unittest.TestCase):

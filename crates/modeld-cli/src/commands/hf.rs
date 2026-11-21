@@ -94,7 +94,7 @@ fn hf_subcommand_download(
 ) -> Result<()> {
     // Reuse the existing hf_download_command which already handles the
     // progress bar, token warning, and provenance recording.
-    hf_download_command(store, repo_id, filename, revision, token, false)
+    hf_download_command(store, repo_id, filename, revision, "model", token, false)
 }
 
 // ── hf snapshot ──────────────────────────────────────────────────────────────

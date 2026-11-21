@@ -118,10 +118,12 @@ pub(crate) fn hf_download_command(
     repo_id: &str,
     filename: &str,
     revision: &str,
+    repo_type: &str,
     token: Option<String>,
     json_output: bool,
 ) -> Result<()> {
     let mut db = open_db(&store)?;
+    let rtype = modeld_core::RepoType::parse(repo_type)?;
 
     let pb = ProgressBar::new(0);
     pb.set_style(
@@ -141,7 +143,7 @@ pub(crate) fn hf_download_command(
             progress_pb.set_position(done);
         });
 
-    let mut downloader = Downloader::new(&store);
+    let mut downloader = Downloader::new(&store).with_repo_type(rtype);
     if let Some(t) = token {
         downloader = downloader.with_token(t);
     }

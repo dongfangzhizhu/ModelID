@@ -6,15 +6,18 @@ to the modeld Content-Addressable Store.
 
 ## Usage
 
-### Method 1: Environment variable (recommended, zero-code)
+### Method 1: Environment variable (recommended, zero-code, no import side effects)
     export HF_HOME="$(modeld hf-setup --print-path)"
 
-### Method 2: Explicit import
+### Method 2: Explicit activation (no automatic patching on import)
     import modeld_hook
+    modeld_hook.activate()
     from diffusers import DiffusionPipeline
-    # Downloads are now intercepted
 
-### Method 3: sitecustomize.py (system-wide, automatic)
+### Method 3: Opt in via environment (explicit intent, no import side effects)
+    MODELD_AUTO_HOOK=1 python train.py
+
+### Method 4: sitecustomize.py (system-wide, explicit)
     modeld hook install
 """
 
@@ -32,6 +35,11 @@ logger = logging.getLogger(__name__)
 
 _original_hf_hub_download = None
 _original_snapshot_download = None
+# B5: huggingface_hub exposes hf_hub_download in two places. Keep BOTH original
+# references so deactivate() can fully restore the module namespace.
+_original_file_download_hf_hub_download = None
+# B5: remember HF_HOME so deactivate() restores the process environment.
+_previous_hf_home = None
 _active = False
 
 
@@ -101,6 +109,7 @@ def activate(verbose: bool = False) -> bool:
     installed or modeld CLI is not available.
     """
     global _active, _original_hf_hub_download, _original_snapshot_download
+    global _original_file_download_hf_hub_download, _previous_hf_home
 
     if _active:
         logger.debug("modeld-hook already active")
@@ -125,6 +134,9 @@ def activate(verbose: bool = False) -> bool:
     # Set HF_HOME to modeld-managed path (Layer 1 — primary strategy)
     hf_home = get_hf_home()
     if hf_home:
+        # B5: record the previous value so deactivate() can restore it.
+        # This only happens on an explicit activate() call — never on import.
+        _previous_hf_home = os.environ.get("HF_HOME")
         os.environ["HF_HOME"] = hf_home
         if verbose:
             logger.info(f"modeld-hook: HF_HOME set to {hf_home}")
@@ -142,9 +154,11 @@ def activate(verbose: bool = False) -> bool:
             _original_hf_hub_download
         )
 
-        # Also patch the module-level reference used by diffusers/transformers
+        # Also patch the module-level reference used by diffusers/transformers.
+        # B5: save its *own* original — it may differ from the top-level one.
         try:
             import huggingface_hub.file_download as _fd
+            _original_file_download_hf_hub_download = _fd.hf_hub_download
             _fd.hf_hub_download = huggingface_hub.hf_hub_download
         except ImportError:
             pass
@@ -169,8 +183,15 @@ def activate(verbose: bool = False) -> bool:
 
 
 def deactivate():
-    """Restore original huggingface_hub functions."""
+    """Restore huggingface_hub functions and HF_HOME to their pre-activate state.
+
+    B5: both `huggingface_hub.hf_hub_download` and the module-level
+    `huggingface_hub.file_download.hf_hub_download` patch are tracked and
+    restored independently — the previous implementation nulled the saved
+    original before restoring the second site, leaving it permanently patched.
+    """
     global _active, _original_hf_hub_download, _original_snapshot_download
+    global _original_file_download_hf_hub_download, _previous_hf_home
 
     if not _active:
         return
@@ -183,18 +204,26 @@ def deactivate():
 
         try:
             import huggingface_hub.file_download as _fd
-            if _original_hf_hub_download is not None:
-                _fd.hf_hub_download = _original_hf_hub_download
+            if _original_file_download_hf_hub_download is not None:
+                _fd.hf_hub_download = _original_file_download_hf_hub_download
+                _original_file_download_hf_hub_download = None
         except ImportError:
             pass
-
     except ImportError:
         pass
+
+    # Restore the environment we changed on activation.
+    if _previous_hf_home is None:
+        os.environ.pop("HF_HOME", None)
+    else:
+        os.environ["HF_HOME"] = _previous_hf_home
+    _previous_hf_home = None
 
     _active = False
     logger.debug("modeld-hook: Deactivated")
 
 
-# Auto-activate on import (users can opt out with MODELD_NO_AUTO_HOOK=1)
-if not os.environ.get("MODELD_NO_AUTO_HOOK"):
+# B5: importing the hook has NO side effects. Automatic patching is opt-in via
+# MODELD_AUTO_HOOK=1 (an explicit environment signal), never the default.
+if os.environ.get("MODELD_AUTO_HOOK") == "1":
     activate()
