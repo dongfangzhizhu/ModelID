@@ -1,11 +1,11 @@
 //! `modeld gc` — collect unreferenced objects and clean quarantine.
 
 use crate::format_bytes;
-use anyhow::{Context, Result};
+use crate::util::lock_store;
+use anyhow::Result;
 use colored::*;
-use modeld_core::{t, tf, Database, GcEngine, StoreLock};
+use modeld_core::{t, tf, Database, GcEngine};
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[tracing::instrument(skip_all, fields(store = %store.display(), preview))]
 pub fn gc_command(
@@ -13,6 +13,7 @@ pub fn gc_command(
     preview: bool,
     cleanup_quarantine: bool,
     cleanup_tmp: bool,
+    wait_secs: u64,
 ) -> Result<()> {
     let db_path = store.join("modeld.db");
     if !db_path.exists() {
@@ -21,8 +22,7 @@ pub fn gc_command(
 
     // GC deletes objects; it must not run concurrently with another layout
     // mutation (dedup, another gc) in the same store.
-    let _lock = StoreLock::acquire(&store, "gc", Duration::from_secs(30))
-        .with_context(|| tf("lock.busy", &[("path", &store.display().to_string())]))?;
+    let _lock = lock_store(&store, "gc", wait_secs)?;
 
     let mut db = Database::open(&db_path)?;
     let mut gc = GcEngine::new(&mut db, &store);

@@ -27,3 +27,7 @@ serde_json.workspace = true
 ureq.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+# Concurrency tests build a throwaway store per test.
+tempfile.workspace = true

@@ -76,6 +76,15 @@ pub async fn restore_quarantine(
         .find(|e| e.meta.blake3_hash == id)
         .ok_or_else(|| ApiError::not_found(format!("No quarantine entry with id '{}'", id)))?;
 
+    // Restoring writes a file back into the library and touches aliases; do not
+    // race a dedup or gc over the same paths.
+    let _lock = modeld_core::StoreLock::acquire(
+        &state.store_path,
+        "quarantine restore (webui)",
+        std::time::Duration::from_secs(5),
+    )
+    .map_err(|e| ApiError::conflict(e.to_string()))?;
+
     let restored_path =
         qm.restore(&entry.quarantine_path).map_err(|e| ApiError::internal(e.to_string()))?;
 

@@ -80,6 +80,40 @@ pub async fn trigger_scan(
     };
 
     tokio::spawn(async move {
+        // One lock for the whole run: a scan next to a dedup (or a second scan)
+        // would interleave CAS writes with renames. Acquired off the runtime so
+        // the wait does not park an async worker.
+        let _lock = {
+            let store = store_path.clone();
+            let acquired = tokio::task::spawn_blocking(move || {
+                modeld_core::StoreLock::acquire(
+                    &store,
+                    "scan (webui)",
+                    std::time::Duration::from_secs(5),
+                )
+            })
+            .await;
+            match acquired {
+                Ok(Ok(lock)) => lock,
+                Ok(Err(e)) => {
+                    let _ = event_tx.send(WsEvent::OperationComplete {
+                        operation: format!("scan:{}", sid),
+                        success: false,
+                        message: e.to_string(),
+                    });
+                    return;
+                }
+                Err(e) => {
+                    let _ = event_tx.send(WsEvent::OperationComplete {
+                        operation: format!("scan:{}", sid),
+                        success: false,
+                        message: format!("scan task panicked while taking the store lock: {e}"),
+                    });
+                    return;
+                }
+            }
+        };
+
         let mut any_error = false;
 
         for scan_root in scan_paths {

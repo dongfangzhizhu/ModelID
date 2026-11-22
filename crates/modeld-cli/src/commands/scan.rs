@@ -1,6 +1,7 @@
 //! `modeld scan` — walk a directory and ingest the models it finds.
 
 use crate::load_config;
+use crate::util::lock_store;
 use anyhow::{Context, Result};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -12,11 +13,13 @@ use uuid::Uuid;
 pub fn scan_command(
     scan_path: PathBuf,
     store_path: PathBuf,
-    incremental: bool,
-    full: bool,
-    exclude_globs: Vec<String>,
-    follow_symlinks: bool,
+    // The four scan knobs live in `ScanOptions` anyway, so they travel as one
+    // value: `--incremental`, `--full`, `--exclude` and `--follow-symlinks`
+    // are exactly its fields, and passing them separately meant this signature
+    // grew one parameter per new flag until clippy called it out.
+    scan_options: ScanOptions,
     mode: IngestMode,
+    wait_secs: u64,
 ) -> Result<()> {
     println!("{}", tf("scan.scanning", &[("path", &scan_path.display())]).cyan().bold());
 
@@ -27,6 +30,13 @@ pub fn scan_command(
     // Auto-initialize the store so users don't need `modeld init` first.
     std::fs::create_dir_all(&store_path)
         .with_context(|| format!("Failed to create store directory: {}", store_path.display()))?;
+
+    // Ingest writes CAS objects, aliases and path_index rows. Running it next to
+    // a dedup or gc would let one process rename files the other has planned a
+    // move for. Held for the whole scan — `--wait` bounds how long a second
+    // process queues before giving up.
+    let _lock = lock_store(&store_path, "scan", wait_secs)?;
+
     let cas = CasStore::new(&store_path);
     cas.init()?;
     let db_path = store_path.join("modeld.db");
@@ -49,7 +59,7 @@ pub fn scan_command(
         .with_extensions(extensions)
         .with_excluded_dirs(vec![store_canonical])
         .with_preindexed(preindexed)
-        .with_scan_options(ScanOptions { incremental, full, exclude_globs, follow_symlinks });
+        .with_scan_options(scan_options);
 
     // Quick count first
     let (file_count, total_size) = scanner.count_files(&scan_path)?;

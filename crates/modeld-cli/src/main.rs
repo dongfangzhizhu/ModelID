@@ -60,6 +60,7 @@ fn main() -> Result<()> {
             index_only,
             adopt,
             copy,
+            wait,
         } => {
             // Index is the default: a catalogue scan must not duplicate data.
             let mode = if adopt {
@@ -73,11 +74,9 @@ fn main() -> Result<()> {
             scan_command(
                 path,
                 resolve_store(store.clone()),
-                incremental,
-                full,
-                exclude_globs,
-                follow_symlinks,
+                ScanOptions { incremental, full, exclude_globs, follow_symlinks },
                 mode,
+                wait,
             )?
         }
         Commands::Status {} => status_command(resolve_store(store.clone()))?,
@@ -103,6 +102,7 @@ fn main() -> Result<()> {
             pin,
             yes,
             json,
+            wait,
         } => dedup_command(
             resolve_store(store.clone()),
             dry_run,
@@ -116,6 +116,7 @@ fn main() -> Result<()> {
             pin,
             yes,
             json,
+            wait,
         )?,
         Commands::Quarantine { action } => {
             quarantine_command(resolve_store(store.clone()), action)?
@@ -150,11 +151,17 @@ fn main() -> Result<()> {
             workflow_deps_command(resolve_store(store.clone()), file)?
         }
         Commands::RefsOrphans { json } => refs_orphans_command(resolve_store(store.clone()), json)?,
-        Commands::Gc { preview, cleanup_quarantine, cleanup_tmp } => {
-            gc_command(resolve_store(store.clone()), preview, cleanup_quarantine, cleanup_tmp)?
-        }
+        Commands::Gc { preview, cleanup_quarantine, cleanup_tmp, wait } => gc_command(
+            resolve_store(store.clone()),
+            preview,
+            cleanup_quarantine,
+            cleanup_tmp,
+            wait,
+        )?,
         Commands::Verify { json } => verify_command(resolve_store(store.clone()), json)?,
-        Commands::Unlink { path } => unlink_command(resolve_store(store.clone()), path)?,
+        Commands::Unlink { path, wait } => {
+            unlink_command(resolve_store(store.clone()), path, wait)?
+        }
         Commands::Proxy { action } => proxy_command(action, store.clone())?,
         Commands::Doctor { json } => doctor_command(resolve_store(store.clone()), json)?,
         Commands::Store { action } => store_command(action, store.clone())?,

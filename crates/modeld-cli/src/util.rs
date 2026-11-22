@@ -6,7 +6,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 pub(crate) use modeld_core::{
     hash_file, load_config, resolve_store_path, run_doctor, save_config, t, tf, token_remove,
     token_set, token_status, CasStore, CheckStatus, Database, Downloader, IngestMode,
-    QuarantineManager,
+    QuarantineManager, ScanOptions,
 };
 use std::path::{Path, PathBuf};
 
@@ -181,9 +181,6 @@ pub(crate) fn hf_download_command(
     Ok(())
 }
 
-/// Resolve an optional CLI store override to a concrete PathBuf.
-///
-/// Priority: `--store <path>` > `MODELD_STORE` env > `modeld.toml` > platform default.
 /// Install the `tracing` subscriber.
 ///
 /// Everything the library logs goes to **stderr**, so `--json` output on stdout
@@ -205,8 +202,54 @@ pub(crate) fn init_logging(format: crate::output::LogFormat) {
     };
 }
 
+/// Resolve an optional CLI store override to a concrete PathBuf.
+///
+/// Priority: `--store <path>` > `MODELD_STORE` env > `modeld.toml` > platform default.
 pub(crate) fn resolve_store(store: Option<PathBuf>) -> PathBuf {
     resolve_store_path(store.as_deref())
+}
+
+/// Take the cross-process store lock for a layout mutation.
+///
+/// Every command that changes files inside the store (scan, dedup, gc, unlink,
+/// quarantine restore) goes through here so two processes cannot interleave
+/// renames in the same store.
+///
+/// `wait_secs` is the CLI `--wait` value. When the store is already busy we say
+/// so **before** blocking — on stderr, so `--json` output on stdout stays
+/// parseable — and then fail with the holder's identity once the deadline
+/// passes. A holder that crashed does not need to be timed out: the kernel
+/// releases its lock, so the next acquire just succeeds.
+pub(crate) fn lock_store(store: &Path, op: &str, wait_secs: u64) -> Result<modeld_core::StoreLock> {
+    let wait = std::time::Duration::from_secs(wait_secs);
+    if let Some(holder) = modeld_core::StoreLock::current_holder(store) {
+        if wait.is_zero() {
+            anyhow::bail!(
+                "{}",
+                tf("lock.busy", &[("path", &store.display()), ("holder", &holder.to_string())])
+            );
+        }
+        eprintln!(
+            "{}",
+            tf(
+                "lock.waiting",
+                &[
+                    ("path", &store.display()),
+                    ("holder", &holder.to_string()),
+                    ("secs", &wait_secs),
+                ]
+            )
+            .yellow()
+        );
+    }
+
+    modeld_core::StoreLock::acquire(store, op, wait).map_err(|e| match e.holder() {
+        Some(holder) => anyhow::anyhow!(
+            "{}",
+            tf("lock.busy", &[("path", &store.display()), ("holder", &holder.to_string())])
+        ),
+        None => anyhow::anyhow!("{e}"),
+    })
 }
 
 pub(crate) fn require_store_db(store_path: &Path) -> Result<PathBuf> {

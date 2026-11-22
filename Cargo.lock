@@ -1638,6 +1638,7 @@ dependencies = [
  "modeld-webui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

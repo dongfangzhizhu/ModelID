@@ -1,5 +1,6 @@
 //! Repair commands: `quarantine`, `verify`, `unlink`.
 
+use crate::util::lock_store;
 use crate::{format_bytes, require_store_db};
 use anyhow::Result;
 use clap::Subcommand;
@@ -16,11 +17,17 @@ pub enum QuarantineAction {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Seconds to wait for another modeld process to release the store lock
+        #[arg(long, value_name = "SECS", default_value_t = 30)]
+        wait: u64,
     },
     /// Restore a quarantined file to its original location
     Restore {
         /// Full path to the quarantined file (shown by `quarantine list`)
         path: PathBuf,
+        /// Seconds to wait for another modeld process to release the store lock
+        #[arg(long, value_name = "SECS", default_value_t = 30)]
+        wait: u64,
     },
 }
 
@@ -79,7 +86,10 @@ pub fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Resu
             }
         }
 
-        QuarantineAction::Cleanup { yes } => {
+        QuarantineAction::Cleanup { yes, wait } => {
+            // Purging removes files from the store's quarantine area; hold the
+            // lock so a concurrent gc or dedup does not race with it.
+            let _lock = lock_store(&store_path, "quarantine cleanup", wait)?;
             if !yes {
                 print!("This will permanently delete all expired quarantine entries (>30 days). Proceed? [y/N]: ");
                 std::io::Write::flush(&mut std::io::stdout())?;
@@ -106,7 +116,9 @@ pub fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Resu
             }
         }
 
-        QuarantineAction::Restore { path } => {
+        QuarantineAction::Restore { path, wait } => {
+            // Restoring writes a file back into the library and updates aliases.
+            let _lock = lock_store(&store_path, "quarantine restore", wait)?;
             let restored = qm.restore(&path)?;
             println!(
                 "{} {}",
@@ -220,8 +232,13 @@ pub fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
 // Unlink (undo-dedup) command
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn unlink_command(store_path: PathBuf, path: PathBuf) -> Result<()> {
+pub fn unlink_command(store_path: PathBuf, path: PathBuf, wait_secs: u64) -> Result<()> {
     let db_path = require_store_db(&store_path)?;
+
+    // Unlink replaces a link with an independent copy: it must not run while
+    // another process is deduping the same files.
+    let _lock = lock_store(&store_path, "unlink", wait_secs)?;
+
     let mut db = Database::open(&db_path)?;
 
     println!("{}", tf("unlink.start", &[("path", &path.display())]).cyan());

@@ -9,7 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Storage figures now separate logical from physical size** — `modeld stats`
+- **Cross-process store lock** — every layout-mutating command (`scan`, `gc`,
+  `dedup`, `unlink`, `quarantine cleanup/restore`) now takes an exclusive OS
+  lock on `<store>/.modeld.lock`, so two processes can no longer interleave
+  renames in the same store. The WebUI's scan and quarantine-restore endpoints
+  take the same lock. (ROADMAP B7)
+- **`--wait <seconds>` on layout-mutating commands** (default 30) — a second
+  process queues instead of failing, and says who it is queuing behind:
+  `The store at … is busy (pid 4242 on host running 'dedup' since …); waiting up
+  to 30s…`. With `--wait 0` it exits 1 with the same holder description.
+  (ROADMAP B7)
+- **`modeld stats --json`** — the figures are machine-readable, so
+  `physical_bytes` can be diffed against `du -sb <store>/cas` by a script.
+  (ROADMAP B6)
+- **Storage figures separate logical from physical size** — `modeld stats`
   (text and `--json`) and `GET /api/v1/stats` report `logical_bytes` (every
   alias path counted as a full file), `physical_bytes` (one copy per unique
   content, what the store actually owns), bytes already saved by links, and
@@ -17,12 +30,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   meaning (2+ paths) so existing dashboards do not shift; the new
   `waste_groups` / `multi_path_groups` distinguishes "listed by `dupes`" from
   "a dedup would still reclaim bytes". (ROADMAP B6)
-- **`modeld stats --json`** — the figures are machine-readable, so
-  `physical_bytes` can be diffed against `du -sb <store>/cas` by a script.
-  (ROADMAP B6)
 
 ### Changed
 
+- **The store lock is an OS lock, not a marker file** — the previous `O_EXCL`
+  marker relied on a 24 h mtime timeout to decide whether a holder was still
+  alive, which both blocked on a clean `Ctrl-C` and let a stale file masquerade
+  as a live lock. It is now `flock(LOCK_EX)` / `LockFileEx`, released by the
+  kernel when the holder dies. The lock file is deliberately never deleted
+  (unlink would let a waiter lock the old inode while a newcomer locks a fresh
+  path). `current_holder()` probes the lock before reading the recorded holder,
+  so a leftover record is not reported as contention. (ROADMAP B7)
+- **`scan_command` takes one `ScanOptions`** instead of `incremental`, `full`,
+  `exclude_globs` and `follow_symlinks` — those are exactly that struct's
+  fields, and passing them one by one had grown past clippy's argument limit.
+  (ROADMAP B7)
 - **`modeld stats` no longer touches the filesystem** — it used to build a
   `DedupEngine` and stat every alias path. It is now one aggregate query, so
   the summary stays cheap on a large library. `dupes` remains the command that
@@ -34,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every stored object leaked an empty staging directory** —
+  `CasStore::store_crash_safe` created `tmp/cas_staging/{tx_id}/`, renamed the
+  `.part` file into the CAS, and never removed the directory, so each
+  `scan --copy` / copy-to-cas dedup left one more empty UUID directory behind.
+  `verify` never saw them (it only scans for `.part` files) and only `repair`
+  would have collected them. `remove_dir` — not `remove_dir_all`, because
+  `scan` passes the same `tx_id` for every file and deleting a `.part` in
+  flight would reintroduce exactly the corruption the protocol prevents.
+  (ROADMAP B7)
 - **`dedup` silently did nothing when the store path was relative** — `links.rs`
   had its own `is_same_volume` that read the `Prefix` path component, which a
   relative path does not have, so every duplicate was declared cross-volume and

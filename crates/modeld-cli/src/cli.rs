@@ -67,6 +67,10 @@ pub enum Commands {
         /// Copy files into the store (works across volumes, uses extra space)
         #[arg(long, default_value = "false", conflicts_with_all = ["index_only", "adopt"])]
         copy: bool,
+        /// Seconds to wait for another modeld process to release the store lock
+        /// (0 = fail immediately)
+        #[arg(long, value_name = "SECS", default_value_t = 30)]
+        wait: u64,
     },
     /// Show store statistics
     Status {},
@@ -153,6 +157,10 @@ pub enum Commands {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
+        /// Seconds to wait for another modeld process to release the store lock
+        /// (0 = fail immediately)
+        #[arg(long, value_name = "SECS", default_value_t = 30)]
+        wait: u64,
     },
     /// Manage quarantine
     Quarantine {
@@ -229,6 +237,10 @@ pub enum Commands {
         /// Also remove stale .part and .tmp files from the tmp directory
         #[arg(long)]
         cleanup_tmp: bool,
+        /// Seconds to wait for another modeld process to release the store lock
+        /// (0 = fail immediately)
+        #[arg(long, value_name = "SECS", default_value_t = 30)]
+        wait: u64,
     },
     /// Verify store consistency: check CAS, aliases, and DB agree
     Verify {
@@ -240,6 +252,10 @@ pub enum Commands {
     Unlink {
         /// File path to restore (must have a hardlink/symlink alias in the DB)
         path: PathBuf,
+        /// Seconds to wait for another modeld process to release the store lock
+        /// (0 = fail immediately)
+        #[arg(long, value_name = "SECS", default_value_t = 30)]
+        wait: u64,
     },
     /// Local registry & proxy server (Phase 5)
     Proxy {

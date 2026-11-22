@@ -203,6 +203,7 @@ impl CasStore {
         // ── 4. Verify size and hash ───────────────────────────────────────
         if bytes_written != src_size {
             let _ = fs::remove_file(&staging_path);
+            Self::discard_staging_dir(&staging_dir);
             return Err(anyhow!(
                 "Size mismatch during staging: expected {} bytes, wrote {}",
                 src_size,
@@ -214,6 +215,7 @@ impl CasStore {
             .expect("blake3 output is always valid hex");
         if computed.as_hex() != expected_hash.as_hex() {
             let _ = fs::remove_file(&staging_path);
+            Self::discard_staging_dir(&staging_dir);
             return Err(anyhow!(
                 "Hash mismatch during staging: expected {}, computed {}",
                 expected_hash.as_hex(),
@@ -243,7 +245,26 @@ impl CasStore {
         // ── 8. Set read-only permissions ──────────────────────────────────
         Self::make_readonly(&dest)?;
 
+        // ── 9. Drop the per-tx staging dir ────────────────────────────────
+        // The `.part` file was renamed away, so the dir is now empty. Leaving
+        // it behind made every `scan --copy` / `CopyToCas` deposit one more
+        // empty UUID directory in `tmp/cas_staging/` — invisible to `verify`
+        // (which only looks for `.part` files) but real clutter that only
+        // `repair` would ever remove.
+        Self::discard_staging_dir(&staging_dir);
+
         Ok(dest)
+    }
+
+    /// Remove a per-transaction staging directory, ignoring every failure.
+    ///
+    /// `remove_dir` (not `remove_dir_all`) on purpose: a shared `tx_id` — `scan`
+    /// passes the same `scan_id` for every file — means another caller may have
+    /// a `.part` in flight, and deleting that would resurrect the corruption
+    /// this whole protocol exists to prevent. A non-empty directory simply
+    /// stays for `repair` to collect later.
+    fn discard_staging_dir(dir: &Path) {
+        let _ = fs::remove_dir(dir);
     }
 
     /// Adopt an existing file into the CAS **without copying its bytes**.
@@ -479,5 +500,36 @@ mod tests {
         // After rename the .part file should not exist (staging dir may or may not exist)
         let part = staging.join(format!("{}.part", hash.as_hex()));
         assert!(!part.exists(), "Staging .part file should be cleaned up");
+
+        // The per-tx directory must go too: leaving it behind accumulated one
+        // empty UUID dir per stored object, and `verify` never noticed because
+        // it only scans for `.part` files.
+        let root = temp_dir.path().join("tmp").join("cas_staging");
+        let leftover: Vec<_> = fs::read_dir(&root).unwrap().flatten().collect();
+        assert!(
+            leftover.is_empty(),
+            "staging root should be empty after a successful store, found {leftover:?}"
+        );
+    }
+
+    #[test]
+    fn failed_store_removes_its_staging_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = CasStore::new(temp_dir.path());
+        store.init().unwrap();
+
+        let mut test_file = NamedTempFile::new().unwrap();
+        test_file.write_all(b"this will not match the expected hash").unwrap();
+        test_file.flush().unwrap();
+
+        let wrong_hash = Blake3Hash::from_hex(&"1".repeat(64)).unwrap();
+        assert!(store.store_crash_safe(test_file.path(), &wrong_hash, "tx-fail").is_err());
+
+        let root = temp_dir.path().join("tmp").join("cas_staging");
+        let leftover: Vec<_> = fs::read_dir(&root).unwrap().flatten().collect();
+        assert!(
+            leftover.is_empty(),
+            "a failed store must not leave staging residue, found {leftover:?}"
+        );
     }
 }

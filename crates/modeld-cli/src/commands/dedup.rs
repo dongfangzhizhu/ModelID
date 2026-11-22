@@ -1,12 +1,12 @@
 //! `modeld dedup` — plan and apply content-identical replacements.
 
 use crate::parse_size;
+use crate::util::lock_store;
 use anyhow::{Context, Result};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
-use modeld_core::{t, tf, Database, DedupEngine, DedupMode, DedupStrategy, StoreLock};
+use modeld_core::{t, tf, Database, DedupEngine, DedupMode, DedupStrategy};
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(store = %store_path.display()))]
@@ -23,6 +23,7 @@ pub fn dedup_command(
     pin: Vec<PathBuf>,
     yes: bool,
     json: bool,
+    wait_secs: u64,
 ) -> Result<()> {
     let db_path = store_path.join("modeld.db");
 
@@ -66,10 +67,10 @@ pub fn dedup_command(
     }
 
     // Two processes deduping the same store would interleave renames and the
-    // WAL would describe a store that no longer exists.  Wait briefly, then
-    // fail with the holder's identity instead of corrupting anything.
-    let _lock = StoreLock::acquire(&store_path, "dedup", Duration::from_secs(30))
-        .with_context(|| tf("lock.busy", &[("path", &store_path.display().to_string())]))?;
+    // WAL would describe a store that no longer exists. `--wait` decides how
+    // long to queue; a crashed holder never blocks us (the kernel drops its
+    // lock), so the deadline only applies to a live process.
+    let _lock = lock_store(&store_path, "dedup", wait_secs)?;
 
     let db = Database::open(&db_path)?;
     let mut engine = DedupEngine::new(db, store_path.clone());
