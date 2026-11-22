@@ -614,11 +614,21 @@ Refs: docs/ROADMAP.md#A1
 ### B7 · 跨进程锁与并发安全
 
 - **目标**：同一 store 的变更操作串行化。
-- **改动点**：新增 `crates/modeld-core/src/lock.rs`（`fd-lock` 或 `fs2`）；接入 dedup/gc/unlink/scan
+- **改动点**：`crates/modeld-core/src/store_lock.rs`（B1 已有初版，本次重写为内核锁）；接入 dedup/gc/unlink/scan/repair 与 WebUI scan/quarantine
 - **验收标准**：
-  - [ ] `<store>/.modeld.lock` 存在，持有进程崩溃后锁自动释放
-  - [ ] 第二个变更进程得到明确提示（等待 N 秒或 `--wait`）
-  - [ ] 并发测试：10 进程同时 dedup，无数据损坏、无死锁
+  - [x] `<store>/.modeld.lock` 存在，持有进程崩溃后锁自动释放 — 改为 `flock(LOCK_EX)` / `LockFileEx` 内核独占锁，进程消失即由内核释放；锁**文件本身不删除**（unlink 会让「刚创建就被删」的竞态把两个进程同时放进临界区）。`StoreLock::current_holder()` 先试获取再读记录，避免上一轮残留的持有者记录被误报成活锁
+  - [x] 第二个变更进程得到明确提示（等待 N 秒或 `--wait`）— `--wait 0` 打印持有者 pid/host/操作/开始时间并以 1 退出；`--wait N` 打印等待提示后排队，拿到锁继续
+  - [x] 并发测试：10 进程同时 dedup，无数据损坏、无死锁 — `crates/modeld-cli/tests/concurrency.rs`，10 个真实进程 `dedup --auto --wait 120`，全部 exit 0，之后 `verify` clean、`duplicate_waste_bytes=0`、`deduped_saved_bytes=2 MiB`、`physical_bytes=1536 KiB`、文件内容不变、锁已释放、无 staging 残留；超过 180 s 未完成即判死锁失败（不会挂死 CI）
+- **顺带修复**：`CasStore::store_crash_safe` 成功 rename 后从不删 `cas_staging/{tx_id}/`，每次 `scan --copy` 在 `tmp/cas_staging/` 落一个空 UUID 目录；`verify` 只扫 `.part` 文件所以从未发现，只有 `repair` 会收。改为发布后与两条错误路径都 `remove_dir`（不是 `remove_dir_all`：`scan` 全流程共用同一个 `tx_id`，删掉别人在飞的 `.part` 正好会复活这套协议要防的损坏）
+
+> 证据（2026-11-23）：
+> - 测试：`cargo test -p modeld-cli --test concurrency` → 1 passed / 6.42 s；`cargo test -p modeld-core --lib cas::` → 9 passed（新增 `failed_store_removes_its_staging_dir`，并把原「staging 目录存不存在无所谓」的断言收紧为空目录）
+> - 手动（`--wait 0`，4 进程同时 dedup 同一 store）：1 个 exit 0，3 个 exit 1 并输出 `The store at … is busy: pid <pid> on <host> running 'dedup' since <ts>. Retry later, or pass --wait <seconds> to queue behind it.`
+> - 手动（`--wait 60`，4 进程同时）：4 个全部 exit 0，后到的 3 个先输出 `… busy (pid …); waiting up to 60s…`，之后 `verify` → `verify.clean`
+> - 手动（残留持有者记录）：锁文件仍留着上一轮的 `{"pid":…,"op":"dedup",…}`，无人持锁时 `dedup --wait 0` 直接成功 exit 0，未被误判为 busy
+> - 崩溃释放：单测 `store_lock::tests::a_killed_process_releases_the_lock` spawn 真实子进程持锁 → `child.kill()` → 5 s 内必须可获取
+> - 质量门：`cargo fmt --check` / `clippy --workspace --all-targets -D warnings` 干净；`cargo test --workspace` 357 passed；前端 `npm test` 38 passed；Python 17 passed
+> - **未实测**：NFS/SMB 网络卷上的 `flock` 语义（本机无网络卷）；Windows 强制锁下第三方工具读取持有者记录的兼容性（已用 4095 偏移把锁放在 4 KiB 之后规避）
 - **估算**：2 人日 ｜ **依赖**：B1
 
 ### B8 · 测试体系补齐
@@ -764,7 +774,7 @@ Refs: docs/ROADMAP.md#A1
 | B4 | 下载器加固 | done | AI agent | 2026-11-22 | 2026-11-22 | `0655f92` |
 | B5 | HF 缓存兼容性对拍 | done | AI agent | 2026-11-22 | 2026-11-22 | `04a516a` |
 | B6 | 统计语义 | done | AI agent | 2026-11-23 | 2026-11-23 | `b70c7e6` |
-| B7 | 跨进程锁与并发安全 | todo | — | — | — | — |
+| B7 | 跨进程锁与并发安全 | done | AI agent | 2026-11-23 | 2026-11-23 | `c90c21e` |
 | B8 | 测试体系补齐 | todo | — | — | — | — |
 | B9 | 文档重构 | todo | — | — | — | — |
 
@@ -788,6 +798,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-23 | B7 | 跨进程锁：`store_lock.rs` 从 O_EXCL 标记文件（崩溃后靠超时猜、无法区分活锁与残留）改为 `flock`/`LockFileEx` 内核独占锁，进程消失即释放；锁文件保留不删以避开 unlink 竞态；`current_holder()` 先试锁再读记录，残留记录不再误报 busy。CLI `scan/gc/dedup/unlink/repair` 全部接入，新增 `--wait <秒>`（默认 30）与 `util::lock_store()` 统一提示；WebUI scan/quarantine 同步加锁。新增 10 进程真实并发测试；顺带修 `store_crash_safe` 每次落一个空 staging 目录的泄漏 | `c90c21e` | `core/store_lock.rs`、`core/cas.rs`、`core/i18n.rs`、`cli/{cli,main,util}.rs`、`cli/commands/{scan,gc,dedup,repair}.rs`、`cli/tests/concurrency.rs`、`cli/Cargo.toml`、`webui/api/{scan,quarantine}.rs` |
 | 2026-11-23 | B6 | 统计语义：`storage_stats()` 单条聚合区分 logical/physical，`reference_only` 不再算副本；`calculate_savings` 只计 `original`；WebUI 改用 `storage_stats`+`frontend_stats` 消除 N+1；`stats --json`；顺带修 `links::is_same_volume` 对相对路径恒判「不同卷」导致 dedup 静默空转、以及 `--auto` 仍弹确认；新增 9 个测试 | `b70c7e6` | `core/db.rs`、`core/dedup.rs`、`core/platform.rs`、`core/links.rs`、`core/i18n.rs`、`cli/commands/{query,dedup}.rs`、`cli/{cli,main}.rs`、`webui/api/stats.rs`、`webui/ui/*` |
 | 2026-11-22 | B5 | HF 缓存兼容性：commit SHA refs、相对符号链接（失败报错而非静默复制）、`RepoType` 三类型贯通 CLI、Python hook 去除 import 副作用 + `deactivate()` 完整还原 + 四参数 wrapper；新增 8 个测试（Rust 3 + Python 5） | `04a516a` | `core/hf_cache.rs`、`core/downloader.rs`、`cli/*`、`python/modeld_hook/*`、`python/tests/*` |
 | 2026-11-22 | B4 | 下载器加固：`<part>.meta` 防陈旧分片、`If-Range` 续传、BLAKE3+SHA256 流式计算（无二次读盘）、size 强校验、unverified 显式标记、DB 提交包进 `in_transaction`；新增 7 个测试 | `0655f92` | `core/downloader.rs`、`core/db.rs` |
@@ -808,9 +819,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 6 | 67% |
+| B 架构收敛 | 9 | 7 | 78% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **14** | **58%** |
+| **合计** | **24** | **15** | **63%** |
 
 ---
 
@@ -867,7 +878,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | A8 | RUSTSEC 公告库因网络不可达未能本地校验，`cargo deny check` 只在 CI 跑；本地只验证了 bans/licenses/sources | C3 | open |
 | 2026-10-24 | B1 | `downloads` 表与 WAL 是两套状态（`insert_download`/`complete_download` 与 WAL 并存），未来可合并为单一状态机 | C2 | open |
 | 2026-10-24 | B1 | 中断点矩阵只在 Windows 跑过，三平台需 CI | C3 | open |
-| 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | open |
+| 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | done（B7 改用 `flock`/`LockFileEx` 内核锁，进程消失即释放；陈旧超时逻辑已删除） |
 | 2026-11-22 | 审核 | 本机 VS 升级到 18（MSVC 14.52）后，默认 `cargo test` 因 cc-rs 调 `cl.exe` 失败（C1034 stdarg.h）；需 `CC=clang-cl` 才能构建。CI 用固定 toolchain 不受影响 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-23 | B6 | `physical_bytes` 仅在 19.5 MB 合成库上与 `cas/` 实际字节对拍（差值 0）；无 ≥10 GB 真实库，`du -sb` 长期偏差与「SQLite 自身开销占比」未验证 | C6 | open |
 | 2026-11-23 | B6 | `storage_stats()` 是单条聚合，但 10 万模型下 <200 ms 未实测（无该规模库） | C6 | open |
@@ -877,6 +888,11 @@ Refs: docs/ROADMAP.md#A1
 | 2026-11-22 | B4 | 1 GB 下载 RSS 峰值与真实 HF 断点续传黑盒未实测（沙箱网络受限）；代码路径为固定 64 KB 缓冲 | C6 | open |
 | 2026-11-22 | B5 | 20 仓库 `huggingface_hub>=0.24` 对拍（含 dataset/subfolder/gated）未实测：沙箱无外网且未安装该库 | C6 | open |
 | 2026-11-22 | B5 | Windows 无开发者模式无法建符号链接（实测 os error 1314）；HF 缓存布局降级为 `hf_cache_degraded`，需管理员权限或开发者模式才能透明命中 | C6 | open |
+| 2026-11-23 | B7 | 锁粒度是整个 store：`scan` 持锁期间 `gc`/`dedup` 全部排队，10 万模型级大库的扫描窗口会把其他变更操作卡到 `--wait` 超时。只读命令（`stats`/`verify`/`list`）刻意不加锁，但写操作之间可再细分（如按 CAS 分片或读-写锁） | C6 | open |
+| 2026-11-23 | B7 | WebUI 侧没有「排队中」状态：另一个标签页持锁时，前端只看到请求长时间挂起直到超时，而 CLI 已有 `lock.waiting` 提示 | C5 | open |
+| 2026-11-23 | B7 | `flock`/`LockFileEx` 在 NFS/SMB 网络卷上的语义（锁是否跨主机生效、失败是否报错）未实测；本机无网络卷，属 B8 环境矩阵范围 | B8 | open |
+| 2026-11-23 | B7 | `--wait` 默认 30 s 对交互式 CLI 合理，脚本/CI 里更希望快速失败；需在文档里明确「脚本用 `--wait 0`」，并把退出码语义写进 `proxy-api.md` 之外的 CLI 文档 | B9 | open |
+| 2026-11-23 | B7 | `StoreLock` 的持有者记录是「尽力而为」的：`acquire` 里 `let _ = write_holder(...)`，写失败仍算拿到锁（正确，锁的真值在内核）。但此时文件里留的是**上一轮**的记录，后续进程的 busy 提示会把陈旧的 pid/op 当成当前持有者。需要的话改成「写失败则写入最小占位记录」 | C2 | open |
 
 ---
 
