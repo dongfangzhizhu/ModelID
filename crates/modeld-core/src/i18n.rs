@@ -212,9 +212,12 @@ fn en(key: &str) -> Option<&'static str> {
         "stats.store_path" => "  Store path: {path}",
         "stats.models" => "  Models: {count}",
         "stats.aliases" => "  Aliases: {count}",
-        "stats.indexed_size" => "  Indexed size: {gb} GB",
-        "stats.dup_groups" => "  Duplicate groups: {count}",
-        "stats.savings" => "  Potential savings: {gb} GB",
+        "stats.logical_bytes" => "  Logical size: {gb} GB (every alias path)",
+        "stats.physical_bytes" => "  Physical size: {gb} GB (unique content)",
+        "stats.linked_saved" => "  Saved by links: {gb} GB",
+        "stats.wasted" => "  Wasted by copies: {gb} GB (recoverable)",
+        "stats.dup_groups" => "  Duplicate groups: {count} (still wasting space)",
+        "stats.multi_path_groups" => "  Multi-path groups: {count}",
 
         // ── dupes ──
         "dupes.header" => "Duplicate Models",
@@ -490,9 +493,12 @@ fn zh(key: &str) -> Option<&'static str> {
         "stats.store_path" => "  存储路径：{path}",
         "stats.models" => "  模型：{count}",
         "stats.aliases" => "  别名：{count}",
-        "stats.indexed_size" => "  索引大小：{gb} GB",
-        "stats.dup_groups" => "  重复分组：{count}",
-        "stats.savings" => "  预计节省：{gb} GB",
+        "stats.logical_bytes" => "  逻辑大小：{gb} GB（每个路径各算一份）",
+        "stats.physical_bytes" => "  物理大小：{gb} GB（唯一内容）",
+        "stats.linked_saved" => "  链接已节省：{gb} GB",
+        "stats.wasted" => "  副本浪费：{gb} GB（可回收）",
+        "stats.dup_groups" => "  重复分组：{count}（仍在占用空间）",
+        "stats.multi_path_groups" => "  多路径分组：{count}",
 
         // ── dupes ──
         "dupes.header" => "重复模型",

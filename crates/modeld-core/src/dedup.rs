@@ -113,16 +113,24 @@ pub struct FileInfo {
     pub path: PathBuf,
     pub size: u64,
     pub mtime: SystemTime,
+    /// How this path is linked into the store. Links and `reference_only`
+    /// occupy no extra disk space and must never be counted as savings (B6).
+    pub alias_type: crate::db::AliasType,
 }
 
 impl FileInfo {
     pub fn from_path(path: &Path) -> Result<Self> {
+        Self::from_path_with_type(path, crate::db::AliasType::Original)
+    }
+
+    pub fn from_path_with_type(path: &Path, alias_type: crate::db::AliasType) -> Result<Self> {
         let meta = std::fs::metadata(path)
             .with_context(|| format!("Failed to get metadata for {}", path.display()))?;
         Ok(Self {
             path: path.to_path_buf(),
             size: meta.len(),
             mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            alias_type,
         })
     }
 }
@@ -284,7 +292,8 @@ impl DedupEngine {
                 if !self.path_is_included(&p) {
                     continue;
                 }
-                if let Ok(info) = FileInfo::from_path(&p) {
+                if let Ok(mut info) = FileInfo::from_path(&p) {
+                    info.alias_type = alias.alias_type.clone();
                     files.push(info);
                 }
             }
@@ -468,9 +477,25 @@ impl DedupEngine {
         CanonicalSelection { canonical: canonical.path.clone(), duplicates, reason }
     }
 
-    /// Calculate potential space savings (sum of duplicate sizes, one copy kept per group).
+    /// Potential space savings if independent copies were replaced by links.
+    ///
+    /// B6: only `Original` files occupy a full copy. Hard links / symlinks /
+    /// junctions already share an inode and `reference_only` has no file on
+    /// disk at all — counting either as "savings" was the "fake savings" bug.
+    /// Keep one original per group; the rest are recoverable.
     pub fn calculate_savings(&self, groups: &[DuplicateGroup]) -> u64 {
-        groups.iter().map(|g| g.total_size * (g.files.len() as u64 - 1)).sum()
+        use crate::db::AliasType;
+        groups
+            .iter()
+            .map(|g| {
+                let originals =
+                    g.files.iter().filter(|f| f.alias_type == AliasType::Original).count();
+                if originals <= 1 {
+                    return 0;
+                }
+                g.total_size.saturating_mul((originals - 1) as u64)
+            })
+            .sum()
     }
 
     /// Execute two-phase commit dedup for a single group.
@@ -501,7 +526,7 @@ impl DedupEngine {
                 hash: group.hash.clone(),
                 canonical: selection.canonical,
                 links_created: Vec::new(),
-                space_saved: group.total_size * (selection.duplicates.len() as u64),
+                space_saved: self.calculate_savings(std::slice::from_ref(group)),
                 locked_files: Vec::new(),
             });
         }
@@ -665,6 +690,15 @@ impl DedupEngine {
                 DedupStrategy::CopyToCas => {
                     // Duplicate is already redundant — just record it as ReferenceOnly
                     // (the content is safely in CAS; no hard/symlink is created).
+                    //
+                    // Nothing is deleted, so no space is reclaimed either. Say so:
+                    // a silent downgrade here looks like a successful dedup while
+                    // the duplicate still occupies its full size on disk.
+                    tracing::warn!(
+                        "dedup: {} was left in place (copy-to-cas) — content is in CAS \
+                         but no space was reclaimed",
+                        dup_path.display()
+                    );
                     LinkResult::Success(AliasType::ReferenceOnly)
                 }
                 _ => create_link(dup_path, &cas_path, &self.link_capability),
@@ -999,6 +1033,39 @@ mod tests {
     }
 
     #[test]
+    fn test_calculate_savings_ignores_links_and_reference_only() {
+        let tmp = tempdir().unwrap();
+        let (engine, _db) = make_engine(&tmp);
+
+        let group = DuplicateGroup {
+            hash: Blake3Hash::from_hex(&"b".repeat(64)).unwrap(),
+            files: vec![
+                FileInfo {
+                    path: PathBuf::from("a"),
+                    size: 1000,
+                    mtime: SystemTime::UNIX_EPOCH,
+                    alias_type: AliasType::Original,
+                },
+                FileInfo {
+                    path: PathBuf::from("b"),
+                    size: 1000,
+                    mtime: SystemTime::UNIX_EPOCH,
+                    alias_type: AliasType::Hardlink,
+                },
+                FileInfo {
+                    path: PathBuf::from("c"),
+                    size: 1000,
+                    mtime: SystemTime::UNIX_EPOCH,
+                    alias_type: AliasType::ReferenceOnly,
+                },
+            ],
+            total_size: 1000,
+        };
+        // Only one real copy remains → nothing left to save.
+        assert_eq!(engine.calculate_savings(&[group]), 0);
+    }
+
+    #[test]
     fn test_calculate_savings() {
         let tmp = tempdir().unwrap();
         let (engine, _db) = make_engine(&tmp);
@@ -1006,9 +1073,24 @@ mod tests {
         let groups = vec![DuplicateGroup {
             hash: Blake3Hash::from_hex(&"a".repeat(64)).unwrap(),
             files: vec![
-                FileInfo { path: PathBuf::from("a"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
-                FileInfo { path: PathBuf::from("b"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
-                FileInfo { path: PathBuf::from("c"), size: 1000, mtime: SystemTime::UNIX_EPOCH },
+                FileInfo {
+                    path: PathBuf::from("a"),
+                    size: 1000,
+                    mtime: SystemTime::UNIX_EPOCH,
+                    alias_type: AliasType::Original,
+                },
+                FileInfo {
+                    path: PathBuf::from("b"),
+                    size: 1000,
+                    mtime: SystemTime::UNIX_EPOCH,
+                    alias_type: AliasType::Original,
+                },
+                FileInfo {
+                    path: PathBuf::from("c"),
+                    size: 1000,
+                    mtime: SystemTime::UNIX_EPOCH,
+                    alias_type: AliasType::Original,
+                },
             ],
             total_size: 1000,
         }];

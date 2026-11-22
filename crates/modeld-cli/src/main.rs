@@ -81,7 +81,7 @@ fn main() -> Result<()> {
             )?
         }
         Commands::Status {} => status_command(resolve_store(store.clone()))?,
-        Commands::Stats {} => stats_command(resolve_store(store.clone()))?,
+        Commands::Stats { json } => stats_command(resolve_store(store.clone()), json)?,
         Commands::Dupes { min_size, json } => {
             dupes_command(resolve_store(store.clone()), min_size, json)?
         }

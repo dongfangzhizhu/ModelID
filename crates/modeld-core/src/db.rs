@@ -75,7 +75,7 @@ pub struct Model {
 }
 
 /// Alias type for filesystem links
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AliasType {
     Hardlink,
     Symlink,
@@ -736,7 +736,116 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
-    // ── Aggregate statistics (A7) ────────────────────────────────────────
+    // ── Aggregate statistics (A7 / B6) ───────────────────────────────────
+
+    /// One-shot storage statistics in a single SQL statement (B6).
+    ///
+    /// Definitions — the whole point is to stop calling "logical" bytes
+    /// "savings":
+    ///
+    /// - `logical_bytes`: what the library would occupy if **every alias path**
+    ///   were its own full copy (`Σ size × alias_count`).
+    /// - `physical_bytes`: bytes actually owned by the store, i.e. one copy
+    ///   per unique content (`Σ size`). Hard links and symlinks add zero.
+    /// - `deduped_saved_bytes`: `logical − physical`, already realised by links.
+    /// - `duplicate_waste_bytes`: bytes still redundant because **independent
+    ///   copies** (`original`) remain. `reference_only` is a catalogue entry
+    ///   with no second file on disk, so it is never counted as waste.
+    ///
+    /// A single GROUP BY over `aliases` keeps this O(models + aliases) with the
+    /// existing indexes — no per-model round trip from the WebUI dashboard.
+    ///
+    /// The join is `LEFT` on purpose: a model with no alias (content ingested
+    /// but never linked to a path) still occupies CAS space, so it counts in
+    /// `physical_bytes` and `model_count`. An inner join silently dropped it.
+    ///
+    /// Caveat recorded in `docs/ROADMAP.md` §12.3: every production writer
+    /// stores to CAS *before* inserting the model row, so `Σ size_bytes` is a
+    /// faithful stand-in for what the store owns. A model whose only aliases
+    /// are `reference_only` (catalogue entries for files left in place) would
+    /// break that assumption; nothing writes that alias type today.
+    pub fn storage_stats(&self) -> Result<StorageStats> {
+        let mut stmt = self.conn.prepare(
+            "SELECT \
+                 COUNT(*) AS model_count, \
+                 COALESCE(SUM(m.size_bytes), 0) AS physical_bytes, \
+                 COALESCE(SUM(m.size_bytes * COALESCE(c.aliases, 0)), 0) AS logical_bytes, \
+                 COALESCE(SUM(m.size_bytes * CASE \
+                     WHEN COALESCE(c.links, 0) = 0 THEN 0 \
+                     WHEN COALESCE(c.copies, 0) > 0 THEN c.links \
+                     ELSE c.links - 1 END), 0) AS saved_bytes, \
+                 COALESCE(SUM(CASE WHEN COALESCE(c.copies, 0) > 1 \
+                     THEN m.size_bytes * (c.copies - 1) ELSE 0 END), 0) AS waste_bytes, \
+                 COALESCE(SUM(CASE WHEN COALESCE(c.copies, 0) > 1 THEN 1 ELSE 0 END), 0) \
+                     AS dup_groups, \
+                 COALESCE(SUM(CASE WHEN COALESCE(c.aliases, 0) >= 2 THEN 1 ELSE 0 END), 0) \
+                     AS multi_groups, \
+                 COALESCE(SUM(COALESCE(c.aliases, 0)), 0) AS alias_count \
+             FROM models m \
+             LEFT JOIN ( \
+                 SELECT model_hash, \
+                        COUNT(*) AS aliases, \
+                        SUM(CASE WHEN alias_type IN ('hardlink', 'symlink', 'junction') \
+                                 THEN 1 ELSE 0 END) AS links, \
+                        SUM(CASE WHEN alias_type = 'original' THEN 1 ELSE 0 END) AS copies \
+                 FROM aliases GROUP BY model_hash \
+             ) c ON c.model_hash = m.blake3_hash \
+             WHERE m.quarantined_at IS NULL",
+        )?;
+        let row = stmt.query_row([], |r| {
+            Ok(StorageStats {
+                model_count: r.get(0)?,
+                physical_bytes: r.get::<_, i64>(1)?.max(0) as u64,
+                logical_bytes: r.get::<_, i64>(2)?.max(0) as u64,
+                deduped_saved_bytes: r.get::<_, i64>(3)?.max(0) as u64,
+                duplicate_waste_bytes: r.get::<_, i64>(4)?.max(0) as u64,
+                duplicate_groups: r.get::<_, i64>(5)?.max(0) as usize,
+                multi_path_groups: r.get::<_, i64>(6)?.max(0) as usize,
+                alias_count: r.get::<_, i64>(7)?.max(0) as usize,
+            })
+        })?;
+        Ok(row)
+    }
+
+    /// Per-frontend counts in one SQL statement (B6).
+    ///
+    /// The old dashboard looped over every model and queried its aliases —
+    /// O(N+M) round trips. One GROUP BY keeps a 100k-model dashboard cheap.
+    ///
+    /// `size_bytes` sums each model **once per frontend**, so a model reachable
+    /// through two paths in the same frontend is not double counted. That is
+    /// the same meaning the loop had (it kept a per-model `seen_frontends`
+    /// set), only computed in SQL.
+    ///
+    /// `duplicate_bytes` used to be hard-coded to `0` — the field was declared
+    /// and never filled. It now reports the copies *inside this frontend* that
+    /// could be replaced by links: `paths - 1` per model. Waste does not add up
+    /// across frontends, because the copies live in one place each.
+    pub fn frontend_stats(&self) -> Result<Vec<FrontendStatRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.frontend, \
+                    COUNT(*) AS model_count, \
+                    COALESCE(SUM(m.size_bytes), 0) AS bytes, \
+                    COALESCE(SUM(CASE WHEN f.originals > 1 \
+                        THEN m.size_bytes * (f.originals - 1) ELSE 0 END), 0) AS duplicate_bytes \
+             FROM ( \
+                 SELECT frontend, model_hash, COUNT(*) AS paths, \
+                        SUM(CASE WHEN alias_type = 'original' THEN 1 ELSE 0 END) AS originals \
+                 FROM aliases GROUP BY frontend, model_hash \
+             ) f JOIN models m ON m.blake3_hash = f.model_hash \
+             WHERE m.quarantined_at IS NULL \
+             GROUP BY f.frontend ORDER BY f.frontend",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(FrontendStatRow {
+                frontend: r.get(0)?,
+                model_count: r.get::<_, i64>(1)?.max(0) as usize,
+                size_bytes: r.get::<_, i64>(2)?.max(0),
+                duplicate_bytes: r.get::<_, i64>(3)?.max(0),
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
 
     /// Timestamp of the most recent scan that touched `path_index`, if any.
     ///
@@ -749,48 +858,19 @@ impl Database {
 
     /// Bytes that deduplication has saved.
     ///
-    /// A content with `L` link aliases and `P` independent copies occupies `max(P, 1)`
-    /// physical copies, so the saving over "every path is its own file" is
-    /// `(L + P - max(P, 1)) * size`. The `-1` matters: the first link points at the
-    /// inode that already existed, so only the *additional* links save space.
-    /// Getting this wrong double-counts, which is how the dashboard ended up
-    /// claiming twice the space that was actually freed.
+    /// Delegates to `storage_stats()` so the CLI and dashboard can never
+    /// disagree with each other about what "saved" means (B6).
     pub fn deduped_saved_bytes(&self) -> Result<u64> {
-        let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(SUM(m.size_bytes * CASE \
-                 WHEN c.links = 0 THEN 0 \
-                 WHEN c.copies > 0 THEN c.links \
-                 ELSE c.links - 1 \
-             END), 0) FROM ( \
-                 SELECT model_hash, \
-                        SUM(CASE WHEN alias_type IN ('hardlink', 'symlink', 'junction') \
-                                 THEN 1 ELSE 0 END) AS links, \
-                        SUM(CASE WHEN alias_type IN ('original', 'reference_only') \
-                                 THEN 1 ELSE 0 END) AS copies \
-                 FROM aliases GROUP BY model_hash \
-             ) c JOIN models m ON m.blake3_hash = c.model_hash \
-             WHERE m.quarantined_at IS NULL",
-        )?;
-        let bytes: i64 = stmt.query_row([], |row| row.get(0))?;
-        Ok(bytes.max(0) as u64)
+        Ok(self.storage_stats()?.deduped_saved_bytes)
     }
 
     /// Bytes still wasted by independent copies of the same content.
     ///
-    /// Links are free, so only `original`/`reference_only` aliases count: for a
-    /// model with `n` such copies, `(n - 1) * size` bytes are redundant. The metric
-    /// therefore *falls* after dedup instead of rising.
+    /// Only `original` aliases are real copies. `reference_only` is a catalogue
+    /// row with no second file on disk and never counts as waste (B6).
+    /// Delegates to `storage_stats()` for a single source of truth.
     pub fn duplicate_waste_bytes(&self) -> Result<u64> {
-        let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(SUM(m.size_bytes * (c.copies - 1)), 0) FROM ( \
-                 SELECT model_hash, COUNT(*) AS copies FROM aliases \
-                 WHERE alias_type IN ('original', 'reference_only') \
-                 GROUP BY model_hash HAVING COUNT(*) > 1 \
-             ) c JOIN models m ON m.blake3_hash = c.model_hash \
-             WHERE m.quarantined_at IS NULL",
-        )?;
-        let bytes: i64 = stmt.query_row([], |row| row.get(0))?;
-        Ok(bytes.max(0) as u64)
+        Ok(self.storage_stats()?.duplicate_waste_bytes)
     }
 
     /// Get model by hash
@@ -1605,6 +1685,42 @@ impl DownloadStatus {
             _ => None,
         }
     }
+}
+
+/// Aggregated per-frontend row used by the dashboard (B6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontendStatRow {
+    pub frontend: String,
+    pub model_count: usize,
+    pub size_bytes: i64,
+    pub duplicate_bytes: i64,
+}
+
+/// Store-wide storage accounting in one snapshot (B6).
+///
+/// `logical_bytes >= physical_bytes` always: links make the gap, and that gap
+/// *is* the realised dedup saving. Neither figure is a "potential saving" —
+/// use `duplicate_waste_bytes` for bytes still recoverable by deduplicating
+/// independent copies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageStats {
+    pub model_count: i64,
+    pub alias_count: usize,
+    /// Sum over every alias path (each path counted as a full file).
+    pub logical_bytes: u64,
+    /// One copy per unique content — what the CAS actually owns.
+    pub physical_bytes: u64,
+    /// Already saved by hard links / symlinks / junctions.
+    pub deduped_saved_bytes: u64,
+    /// Still wasted by remaining `original` copies.
+    pub duplicate_waste_bytes: u64,
+    /// Content groups with 2+ independent copies — i.e. groups where a dedup
+    /// would still reclaim bytes.
+    pub duplicate_groups: usize,
+    /// Content groups reachable through 2+ paths, regardless of how they are
+    /// linked. This is what `dupes` lists; a group of hard links appears here
+    /// but not in `duplicate_groups`, because the space was already reclaimed.
+    pub multi_path_groups: usize,
 }
 
 /// Download record from the downloads table
@@ -2684,5 +2800,128 @@ mod tests {
         let rows = db.list_downloads(None).unwrap();
         let row2 = rows.iter().find(|d| d.id == id2).unwrap();
         assert_eq!(row2.error_message.as_deref().unwrap_or(""), "");
+    }
+
+    #[test]
+    fn test_storage_stats_logical_vs_physical() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+
+        // One 1000-byte model with: 1 original + 1 hardlink + 1 reference_only.
+        let h = Blake3Hash::from_hex(&"a".repeat(64)).unwrap();
+        db.insert_or_update_model(&h, 1000, None, None, None, None).unwrap();
+        db.insert_alias(&h, "/a/model.bin", Frontend::User, AliasType::Original).unwrap();
+        db.insert_alias(&h, "/b/model.bin", Frontend::User, AliasType::Hardlink).unwrap();
+        db.insert_alias(&h, "/c/model.bin", Frontend::User, AliasType::ReferenceOnly).unwrap();
+
+        let s = db.storage_stats().unwrap();
+        assert_eq!(s.model_count, 1);
+        assert_eq!(s.alias_count, 3);
+        assert_eq!(s.physical_bytes, 1000, "one unique content = one physical copy");
+        assert_eq!(s.logical_bytes, 3000, "three alias paths counted logically");
+        // One real link: the *additional* link saves one copy (1000 bytes).
+        // reference_only has no file on disk — it must NOT add to savings.
+        assert_eq!(s.deduped_saved_bytes, 1000);
+        assert_eq!(s.duplicate_waste_bytes, 0, "only one original copy exists");
+        assert_eq!(s.duplicate_groups, 0, "one copy left to dedup: nothing recoverable");
+        // Three paths, so the group is still listed by `dupes` even though the
+        // link already reclaimed the space. This is the distinction B6 draws.
+        assert_eq!(s.multi_path_groups, 1);
+    }
+
+    #[test]
+    fn test_storage_stats_reference_only_is_not_waste() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+
+        let h = Blake3Hash::from_hex(&"b".repeat(64)).unwrap();
+        db.insert_or_update_model(&h, 500, None, None, None, None).unwrap();
+        db.insert_alias(&h, "/a.bin", Frontend::User, AliasType::ReferenceOnly).unwrap();
+        db.insert_alias(&h, "/b.bin", Frontend::User, AliasType::ReferenceOnly).unwrap();
+        db.insert_alias(&h, "/c.bin", Frontend::User, AliasType::ReferenceOnly).unwrap();
+
+        let s = db.storage_stats().unwrap();
+        assert_eq!(s.physical_bytes, 500);
+        assert_eq!(s.logical_bytes, 1500);
+        assert_eq!(s.deduped_saved_bytes, 0, "reference-only yields no space benefit");
+        assert_eq!(s.duplicate_waste_bytes, 0, "no independent copies on disk");
+        assert_eq!(s.duplicate_groups, 0);
+    }
+
+    #[test]
+    fn test_storage_stats_waste_only_from_original_copies() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+
+        let h = Blake3Hash::from_hex(&"c".repeat(64)).unwrap();
+        db.insert_or_update_model(&h, 800, None, None, None, None).unwrap();
+        db.insert_alias(&h, "/a.bin", Frontend::User, AliasType::Original).unwrap();
+        db.insert_alias(&h, "/b.bin", Frontend::User, AliasType::Original).unwrap();
+        db.insert_alias(&h, "/c.bin", Frontend::User, AliasType::Original).unwrap();
+        // A reference_only alongside the originals must not change waste.
+        db.insert_alias(&h, "/d.bin", Frontend::User, AliasType::ReferenceOnly).unwrap();
+
+        let s = db.storage_stats().unwrap();
+        assert_eq!(s.physical_bytes, 800);
+        assert_eq!(s.logical_bytes, 3200);
+        assert_eq!(s.duplicate_waste_bytes, 1600, "(3 originals - 1) x 800");
+        assert_eq!(s.duplicate_groups, 1);
+        assert_eq!(s.deduped_saved_bytes, 0, "no links yet");
+        // Four paths in total, so `dupes` lists it as one multi-path group.
+        assert_eq!(s.multi_path_groups, 1);
+    }
+
+    /// The aggregate joins `models LEFT JOIN aliases`: content that was ingested
+    /// but never linked to a path still owns bytes in the store. An inner join
+    /// silently dropped it and under-reported `physical_bytes`.
+    #[test]
+    fn test_storage_stats_counts_models_without_aliases() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+
+        let with_alias = Blake3Hash::from_hex(&"d".repeat(64)).unwrap();
+        db.insert_or_update_model(&with_alias, 100, None, None, None, None).unwrap();
+        db.insert_alias(&with_alias, "/a.bin", Frontend::User, AliasType::Original).unwrap();
+
+        let orphan = Blake3Hash::from_hex(&"e".repeat(64)).unwrap();
+        db.insert_or_update_model(&orphan, 900, None, None, None, None).unwrap();
+
+        let s = db.storage_stats().unwrap();
+        assert_eq!(s.model_count, 2);
+        assert_eq!(s.physical_bytes, 1000, "orphan content still occupies the store");
+        assert_eq!(s.logical_bytes, 100, "only the linked model has a path");
+        assert_eq!(s.alias_count, 1);
+        assert_eq!(s.multi_path_groups, 0);
+        assert_eq!(s.duplicate_groups, 0);
+    }
+
+    /// `frontend_stats` must count a model **once per frontend**, no matter how
+    /// many paths it has there — the pre-B6 dashboard loop deduplicated with a
+    /// `seen_frontends` set, and the SQL has to preserve that meaning.
+    #[test]
+    fn test_frontend_stats_counts_each_model_once_per_frontend() {
+        let temp_db = NamedTempFile::new().unwrap();
+        let mut db = Database::open(temp_db.path()).unwrap();
+
+        let h = Blake3Hash::from_hex(&"f".repeat(64)).unwrap();
+        db.insert_or_update_model(&h, 400, None, None, None, None).unwrap();
+        // Two paths in the same frontend: one model, not two.
+        db.insert_alias(&h, "/a.bin", Frontend::User, AliasType::Original).unwrap();
+        db.insert_alias(&h, "/b.bin", Frontend::User, AliasType::Original).unwrap();
+        // A second frontend sees the same model once more.
+        db.insert_alias(&h, "/hf/c.bin", Frontend::HfCache, AliasType::Symlink).unwrap();
+
+        let rows = db.frontend_stats().unwrap();
+        assert_eq!(rows.len(), 2);
+
+        let user = rows.iter().find(|r| r.frontend == "user").expect("user row");
+        assert_eq!(user.model_count, 1, "two paths, one model");
+        assert_eq!(user.size_bytes, 400, "size counted once per frontend");
+        assert_eq!(user.duplicate_bytes, 400, "one of the two originals is replaceable");
+
+        let hf = rows.iter().find(|r| r.frontend == "hf_cache").expect("hf_cache row");
+        assert_eq!(hf.model_count, 1);
+        assert_eq!(hf.size_bytes, 400);
+        assert_eq!(hf.duplicate_bytes, 0, "a symlink is not an independent copy");
     }
 }

@@ -193,9 +193,13 @@ pub fn dedup_command(
 
     // Executing for real: require explicit y/N confirmation to prevent
     // accidental data-modifying runs (audit item 1.6).
-    // Skip prompt when --yes is passed or when --auto --yes is used.
-    // In JSON mode without --yes: require --yes to prevent silent destructive ops.
-    if !yes {
+    //
+    // `--auto` is documented as "execute without confirmation prompts", so it
+    // counts as consent — before this it still prompted and therefore aborted
+    // on any non-interactive stdin, making the flag useless in scripts.
+    // `--apply` keeps the prompt unless `--yes` is also given.
+    let assume_yes = yes || auto;
+    if !assume_yes {
         if json {
             anyhow::bail!("dedup --json --apply requires --yes to confirm destructive operation");
         }

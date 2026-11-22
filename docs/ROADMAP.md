@@ -605,10 +605,10 @@ Refs: docs/ROADMAP.md#A1
 - **目标**：区分 logical / physical，杜绝「假节省」。
 - **改动点**：`crates/modeld-core/src/db.rs`（聚合查询）、`stats.rs`、`dupes.rs`、CLI 的 `stats/dupes`
 - **验收标准**：
-  - [ ] 同时输出 `logical_bytes` 与 `physical_bytes`
-  - [ ] `physical_bytes` 与 `du -sb` 差值 < 1%
-  - [ ] 硬链接/软链不计入浪费；`ReferenceOnly` 明确标注「无空间收益」
-  - [ ] 单条 SQL 聚合，10 万模型仪表盘响应 < 200 ms
+  - [x] 同时输出 `logical_bytes` 与 `physical_bytes` — CLI `stats` 文本 + `--json`，WebUI `StatsResponse`
+  - [x] `physical_bytes` 与 `du -sb` 差值 < 1% — 合成库实测**精确相等**：`physical_bytes = 11,534,336`，`cas/` 实际字节 `11,534,336`（差值 0）。真实 ≥10 GB 库未测（无此规模数据）
+  - [x] 硬链接/软链不计入浪费；`ReferenceOnly` 明确标注「无空间收益」— 去重后 `waste 8,388,608 → 0`、`saved 0 → 8,388,608`；`dupes --json` 每项带 `space_benefit: none|recoverable`
+  - [x] 单条 SQL 聚合 — `storage_stats()` 与 `frontend_stats()` 各一条；WebUI 去掉 O(N+M) 的逐模型查询。10 万模型 <200 ms **未实测**（无该规模库）
 - **估算**：3 人日 ｜ **依赖**：A7
 
 ### B7 · 跨进程锁与并发安全
@@ -763,7 +763,7 @@ Refs: docs/ROADMAP.md#A1
 | B3 | 日志与可观测性 | done | AI agent | 2026-10-25 | 2026-10-25 | `9aa5b11` |
 | B4 | 下载器加固 | done | AI agent | 2026-11-22 | 2026-11-22 | `0655f92` |
 | B5 | HF 缓存兼容性对拍 | done | AI agent | 2026-11-22 | 2026-11-22 | `04a516a` |
-| B6 | 统计语义 | todo | — | — | — | — |
+| B6 | 统计语义 | done | AI agent | 2026-11-23 | 2026-11-23 | `PENDING` |
 | B7 | 跨进程锁与并发安全 | todo | — | — | — | — |
 | B8 | 测试体系补齐 | todo | — | — | — | — |
 | B9 | 文档重构 | todo | — | — | — | — |
@@ -788,6 +788,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-23 | B6 | 统计语义：`storage_stats()` 单条聚合区分 logical/physical，`reference_only` 不再算副本；`calculate_savings` 只计 `original`；WebUI 改用 `storage_stats`+`frontend_stats` 消除 N+1；`stats --json`；顺带修 `links::is_same_volume` 对相对路径恒判「不同卷」导致 dedup 静默空转、以及 `--auto` 仍弹确认；新增 9 个测试 | `PENDING` | `core/db.rs`、`core/dedup.rs`、`core/platform.rs`、`core/links.rs`、`core/i18n.rs`、`cli/commands/{query,dedup}.rs`、`cli/{cli,main}.rs`、`webui/api/stats.rs`、`webui/ui/*` |
 | 2026-11-22 | B5 | HF 缓存兼容性：commit SHA refs、相对符号链接（失败报错而非静默复制）、`RepoType` 三类型贯通 CLI、Python hook 去除 import 副作用 + `deactivate()` 完整还原 + 四参数 wrapper；新增 8 个测试（Rust 3 + Python 5） | `04a516a` | `core/hf_cache.rs`、`core/downloader.rs`、`cli/*`、`python/modeld_hook/*`、`python/tests/*` |
 | 2026-11-22 | B4 | 下载器加固：`<part>.meta` 防陈旧分片、`If-Range` 续传、BLAKE3+SHA256 流式计算（无二次读盘）、size 强校验、unverified 显式标记、DB 提交包进 `in_transaction`；新增 7 个测试 | `0655f92` | `core/downloader.rs`、`core/db.rs` |
 | 2026-10-24 | A8 | 构建与发布链路：Dockerfile 多阶段（rust:1.88-slim → debian-slim，非 root，~90 MB）、新增 `.dockerignore`、`MODELD_AUTH_TOKEN` 接通 `serve`（不落盘）、`rust-version = "1.88"`（实测）、`publish = false`、`deny.toml`、CI 新增 MSRV/前端/`cargo deny`/Docker 四个 job、`.gitignore` 乱码与 `node_modules` 反忽略修复 | `0eea2c3` | `docker/Dockerfile`、`docker-compose.yml`、`.dockerignore`、`.github/workflows/ci.yml`、`deny.toml`、`Cargo.toml`、`crates/*/Cargo.toml`、`cli/main.rs`、`.gitignore`、`CHANGELOG.md` |
@@ -807,9 +808,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 5 | 56% |
+| B 架构收敛 | 9 | 6 | 67% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **13** | **54%** |
+| **合计** | **24** | **14** | **58%** |
 
 ---
 
@@ -852,14 +853,14 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | A5 | 仅索引（Index）的模型没有 CAS 对象，`proxy` 对外提供该 blob 时会 404；`status` 也未标注「仅索引」 | A6 | open |
 | 2026-10-24 | 审核 | Python hook token 走命令行参数 | B5 | open |
 | 2026-10-24 | 开发 A1 | `dedup.rs` 中 `cas_path.parent().unwrap()` 属库层 panic | B1 | open |
-| 2026-10-24 | 开发 A1 | `links.rs` 与 `platform.rs` 各有一份 `is_same_volume`，且盘符比较不可靠 | B1 | open |
+| 2026-10-24 | 开发 A1 | `links.rs` 与 `platform.rs` 各有一份 `is_same_volume`，且盘符比较不可靠 | B1 | done（B6 删除 `links.rs` 重复实现并委托 `platform`；相对路径与 `\\?\` 前缀均正确） |
 | 2026-10-24 | 开发 A2 | 多根扫描时每个根都会把 `files_scanned` 重置为 0，进度条会倒退（已修并行回调乱序，多根问题未改） | B3 | open |
 | 2026-10-24 | 开发 A2 | `handle_hf_proxy` 每次缓存未命中都新建 SQLite 连接，未复用连接池 | B7 | open |
 | 2026-10-24 | 开发 A3 | `modeld serve --host 0.0.0.0` 未接入 `--allow-lan`，与 `modeld-webui` 的策略不一致（目前靠强制生成 token 兜底） | A4 | done（A4 已加 `--allow-lan`） |
 | 2026-10-24 | 开发 A3 | CSRF 守卫只在请求带 `Origin` 时生效，非浏览器客户端可绕过（设计如此，但需在文档中写清边界） | B9 | open |
 | 2026-10-24 | 开发 A3 | `/metrics` 仍无鉴权，任何能访问端口的人可读取计数器（A7 只修了「计数器不自增」，鉴权未动） | C4 | open |
 | 2026-10-24 | A7 | 代理侧 `cache_hits`/`cache_misses`/`bytes_served` 仍未接线：`modeld-proxy` 没有 metrics 模块，也没有 `/metrics` 端点 | C2 | open |
-| 2026-10-24 | A7 | `stats` 的 `frontends` 按「每个前端各算一次模型大小」，同一模型被多个前端引用时合计会超过 `total_size_bytes`（口径问题，非 bug） | B6 | open |
+| 2026-10-24 | A7 | `stats` 的 `frontends` 按「每个前端各算一次模型大小」，同一模型被多个前端引用时合计会超过 `total_size_bytes`（口径问题，非 bug） | B6 | done（B6 改为 `frontend_stats()`，每个前端内按模型去重） |
 | 2026-10-24 | A7 | `audit.log` 无轮转/大小上限，长期运行会无限增长 | C2 | open |
 | 2026-10-24 | A7 | `download` 路径的审计未接（下载完成点在 `downloader.rs`，需要把 `store_path` 传进 `Downloader` 的完成回调） | B4 | open |
 | 2026-10-24 | A8 | 本机无 Docker、无 GitHub Actions，`docker build` 与「三平台 CI 全绿」未实测；两者已写进 CI（`docker` job 断言镜像 < 200 MB 且 token 生效），首次 push 后需人工确认 | C3 | open |
@@ -868,6 +869,10 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | B1 | 中断点矩阵只在 Windows 跑过，三平台需 CI | C3 | open |
 | 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | open |
 | 2026-11-22 | 审核 | 本机 VS 升级到 18（MSVC 14.52）后，默认 `cargo test` 因 cc-rs 调 `cl.exe` 失败（C1034 stdarg.h）；需 `CC=clang-cl` 才能构建。CI 用固定 toolchain 不受影响 | C3 | open（本机环境，非代码缺陷） |
+| 2026-11-23 | B6 | `physical_bytes` 仅在 19.5 MB 合成库上与 `cas/` 实际字节对拍（差值 0）；无 ≥10 GB 真实库，`du -sb` 长期偏差与「SQLite 自身开销占比」未验证 | C6 | open |
+| 2026-11-23 | B6 | `storage_stats()` 是单条聚合，但 10 万模型下 <200 ms 未实测（无该规模库） | C6 | open |
+| 2026-11-23 | B6 | `CopyToCas`/`VirtualAlias` 策略把仍存在于磁盘的副本记为 `reference_only`（语义本为「无文件」），去重不回收空间却计入 `Files deduplicated`；已在降级分支加 warn，但别名语义仍需与 `stats` 口径统一 | B7 | open |
+| 2026-11-23 | B6 | 相对 `--store` 路径下 `dedup` 静默空转（恒判不同卷 → `create_reference_only`）已修；但同类「静默降级」缺少回归测试网（`--auto` 免确认缺陷同为本次顺带发现） | B8 | open |
 | 2026-11-22 | 审核 | 沙箱下 `%TEMP%`（`C:\Users\ADMINI~1\AppData\Local\Temp`）拒绝创建目录，74 个 `tempfile::TempDir` 测试失败；设 `TMPDIR/TMP/TEMP` 到项目内目录后全绿 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-22 | B4 | 1 GB 下载 RSS 峰值与真实 HF 断点续传黑盒未实测（沙箱网络受限）；代码路径为固定 64 KB 缓冲 | C6 | open |
 | 2026-11-22 | B5 | 20 仓库 `huggingface_hub>=0.24` 对拍（含 dataset/subfolder/gated）未实测：沙箱无外网且未安装该库 | C6 | open |

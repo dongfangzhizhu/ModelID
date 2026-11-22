@@ -54,29 +54,56 @@ pub fn status_command(store_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub fn stats_command(store_path: PathBuf) -> Result<()> {
+/// `modeld stats` — pure database accounting, no filesystem walk (B6).
+///
+/// The previous implementation built a `DedupEngine` and called
+/// `find_duplicates()`, which stats every alias path on disk. `stats` is a
+/// read-only summary and must stay cheap on a large library, so every figure
+/// now comes from one aggregate query. `dupes` remains the command that hits
+/// the filesystem.
+///
+/// Reported figures have distinct meanings on purpose:
+/// - logical  = what the library would occupy if every path were its own file
+/// - physical = what the store actually owns (one copy per unique content)
+/// - saved    = logical − physical, already realised by links
+/// - wasted   = bytes still recoverable by deduplicating independent copies
+pub fn stats_command(store_path: PathBuf, json_output: bool) -> Result<()> {
     let db_path = require_store_db(&store_path)?;
     let db = Database::open(&db_path)?;
-    let count = db.count_models()?;
-    let total_size = db.total_size()?;
-    let aliases = db.list_models(None)?.iter().try_fold(0i64, |acc, model| {
-        Ok::<_, anyhow::Error>(acc + db.count_aliases(&model.blake3_hash)?)
-    })?;
+    let storage = db.storage_stats()?;
 
-    let engine = DedupEngine::new(db, store_path.clone());
-    let groups = engine.find_duplicates()?;
-    let duplicate_bytes = engine.calculate_savings(&groups);
+    if json_output {
+        // Machine-readable form so `physical_bytes` can be diffed against
+        // `du -sb <store>/cas` by a script instead of eyeballing a GB figure.
+        println!(
+            "{}",
+            serde_json::json!({
+                "store_path": store_path.display().to_string(),
+                "total_models": storage.model_count,
+                "aliases": storage.alias_count,
+                "logical_bytes": storage.logical_bytes,
+                "physical_bytes": storage.physical_bytes,
+                "deduped_saved_bytes": storage.deduped_saved_bytes,
+                "duplicate_waste_bytes": storage.duplicate_waste_bytes,
+                "duplicate_groups": storage.duplicate_groups,
+                "multi_path_groups": storage.multi_path_groups,
+            })
+        );
+        return Ok(());
+    }
 
     println!("{}", t("stats.header").cyan().bold());
     println!("{}", "─".repeat(40).cyan());
     println!("  {}", tf("stats.store_path", &[("path", &store_path.display())]));
-    println!("  {}", tf("stats.models", &[("count", &count)]).bold());
-    println!("  {}", tf("stats.aliases", &[("count", &aliases)]).bold());
-    let gb = format!("{:.2}", total_size as f64 / 1_073_741_824.0);
-    println!("  {}", tf("stats.indexed_size", &[("gb", &gb)]));
-    println!("  {}", tf("stats.dup_groups", &[("count", &groups.len())]).bold());
-    let gb = format!("{:.2}", duplicate_bytes as f64 / 1_073_741_824.0);
-    println!("  {}", tf("stats.savings", &[("gb", &gb)]));
+    println!("  {}", tf("stats.models", &[("count", &storage.model_count)]).bold());
+    println!("  {}", tf("stats.aliases", &[("count", &storage.alias_count)]).bold());
+    let gb = |v: u64| format!("{:.2}", v as f64 / 1_073_741_824.0);
+    println!("  {}", tf("stats.logical_bytes", &[("gb", &gb(storage.logical_bytes))]));
+    println!("  {}", tf("stats.physical_bytes", &[("gb", &gb(storage.physical_bytes))]));
+    println!("  {}", tf("stats.linked_saved", &[("gb", &gb(storage.deduped_saved_bytes))]));
+    println!("  {}", tf("stats.wasted", &[("gb", &gb(storage.duplicate_waste_bytes))]));
+    println!("  {}", tf("stats.dup_groups", &[("count", &storage.duplicate_groups)]).bold());
+    println!("  {}", tf("stats.multi_path_groups", &[("count", &storage.multi_path_groups)]));
     println!("{}", "─".repeat(40).cyan());
 
     Ok(())
@@ -105,7 +132,12 @@ pub fn dupes_command(
                     "size_bytes": group.total_size,
                     "duplicate_count": group.files.len(),
                     "potential_savings_bytes": group.total_size.saturating_mul(group.files.len().saturating_sub(1) as u64),
-                    "files": group.files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>(),
+                    "files": group.files.iter().map(|f| serde_json::json!({
+                        "path": f.path.display().to_string(),
+                        "alias_type": f.alias_type.as_str(),
+                        // B6: links and reference-only entries never free bytes.
+                        "space_benefit": if matches!(f.alias_type, modeld_core::db::AliasType::Hardlink | modeld_core::db::AliasType::Symlink | modeld_core::db::AliasType::Junction | modeld_core::db::AliasType::ReferenceOnly) { "none" } else { "recoverable" },
+                    })).collect::<Vec<_>>(),
                 })
             })
             .collect();

@@ -356,27 +356,54 @@ fn is_same_volume_impl(p1: &Path, p2: &Path) -> bool {
 
 #[cfg(windows)]
 fn get_volume_root(path: &Path) -> Option<String> {
-    // For drive-letter paths: "C:\..." → "C:\"
-    // For UNC paths: "\\server\share\..." → "\\server\share\"
-    let s = path.to_string_lossy();
-    if s.len() >= 3 && s.chars().nth(1) == Some(':') {
-        // Drive-letter path
-        return Some(s[..3].to_string());
+    // Drive-letter and UNC paths resolve directly, without touching the disk.
+    if let Some(root) = volume_root_of(&path.to_string_lossy()) {
+        return Some(root);
     }
-    if s.starts_with(r"\\") {
-        // UNC path — take first two components
-        let parts: Vec<&str> = s.strip_prefix(r"\\").unwrap_or(&s).splitn(3, '\\').collect();
-        if parts.len() >= 2 {
-            return Some(format!(r"\\{}\{}\", parts[0], parts[1]));
+    // Relative paths (e.g. `--store target\store`) only become absolute after
+    // canonicalisation. `Path::canonicalize` on Windows returns a *verbatim*
+    // path (`\\?\D:\...`), which is why `volume_root_of` strips that prefix —
+    // without the strip the drive letter sits at index 4 and every relative
+    // store path looked like a different volume. That silently downgraded
+    // `dedup` to "record a reference_only alias and reclaim nothing".
+    let canonical = path.canonicalize().ok()?;
+    volume_root_of(&canonical.to_string_lossy())
+}
+
+/// Parse a volume root out of a Windows path string.
+///
+/// `C:\dir` → `C:\`, `\\server\share\x` → `\\server\share`,
+/// `\\?\D:\dir` → `D:\` (the verbatim prefix is stripped first).
+#[cfg(windows)]
+fn volume_root_of(raw: &str) -> Option<String> {
+    let s = normalize_for_compare(raw);
+    if s.len() >= 3 && s.as_bytes()[1] == b':' {
+        return Some(s[..3].to_ascii_uppercase());
+    }
+    if let Some(rest) = s.strip_prefix(r"\\") {
+        let parts: Vec<&str> = rest.splitn(3, '\\').collect();
+        if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
+            return Some(format!(r"\\{}\{}", parts[0], parts[1]).to_ascii_uppercase());
         }
     }
-    // Try canonicalize as fallback
-    let canonical = path.canonicalize().ok()?;
-    let c = canonical.to_string_lossy();
-    if c.len() >= 3 && c.chars().nth(1) == Some(':') {
-        return Some(c[..3].to_string());
-    }
     None
+}
+
+/// Remove the `\\?\` / `\\?\UNC\` prefix that `canonicalize` adds on Windows.
+#[cfg(windows)]
+fn normalize_for_compare(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_for_compare(s: &str) -> String {
+    s.to_string()
 }
 
 #[cfg(windows)]
@@ -455,20 +482,24 @@ fn get_last_error() -> u32 {
 // Portable fallback helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fallback same-volume check: compare first 3 characters of canonicalised paths
-/// (works for single-letter drive paths on Windows and root on Unix).
+/// Fallback same-volume check: compare the leading path component of both
+/// paths (drive letter on Windows, `/` on Unix).
+///
+/// The verbatim prefix from `canonicalize` is stripped first: `\\?\C:\` and
+/// `\\?\D:\` both start with `\\?\`, so the raw strings compared equal and two
+/// *different* drives were reported as the same volume — the opposite failure
+/// of the relative-path bug above, and just as damaging.
 fn same_volume_by_path_prefix(p1: &Path, p2: &Path) -> bool {
     let c1 = p1.canonicalize().ok().unwrap_or_else(|| p1.to_path_buf());
     let c2 = p2.canonicalize().ok().unwrap_or_else(|| p2.to_path_buf());
 
-    let s1 = c1.to_string_lossy();
-    let s2 = c2.to_string_lossy();
+    let s1 = normalize_for_compare(&c1.to_string_lossy());
+    let s2 = normalize_for_compare(&c2.to_string_lossy());
 
-    // For drive paths ("C:\...") compare first 2 chars; for UNC compare first
-    // two path components; for Unix both paths start with "/" so this returns
-    // true (which is the correct assumption on most Unix systems).
-    let prefix_len = 3.min(s1.len()).min(s2.len());
-    s1[..prefix_len].eq_ignore_ascii_case(&s2[..prefix_len])
+    // Compare the first three *chars*, not bytes: slicing a UTF-8 string at
+    // byte 3 would panic when a path component starts with a multi-byte char.
+    let head = |s: &str| s.chars().take(3).collect::<String>().to_ascii_uppercase();
+    head(&s1) == head(&s2)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -515,5 +546,45 @@ mod tests {
         let p1 = std::path::Path::new(".");
         let p2 = std::path::Path::new(".");
         let _ = is_same_volume(p1, p2);
+    }
+
+    /// Regression (B6): a *relative* store path made `dedup` believe the CAS and
+    /// the library were on different volumes, so it silently recorded a
+    /// `reference_only` alias and reclaimed nothing. Relative paths must
+    /// resolve to the same volume as their absolute counterparts.
+    #[cfg(windows)]
+    #[test]
+    fn relative_paths_on_the_same_drive_are_same_volume() {
+        // Work inside the current directory so a relative path genuinely points
+        // at the files we create; `TempDir` would be outside the CWD.
+        let base = std::path::Path::new("target").join("volume-rel-test");
+        let lib = base.join("lib");
+        let cas = base.join("store").join("cas");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&cas).unwrap();
+        let dup = lib.join("model.bin");
+        let blob = cas.join("blob.bin");
+        std::fs::write(&dup, b"same").unwrap();
+        std::fs::write(&blob, b"same").unwrap();
+
+        assert!(is_same_volume(&dup, &blob), "relative paths under one drive must share a volume");
+        // Control: the absolute form agrees with the relative one.
+        assert!(is_same_volume(&dup.canonicalize().unwrap(), &blob.canonicalize().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `canonicalize` yields `\\?\D:\...`; the verbatim prefix must be stripped
+    /// before the drive letter is read, and two different drives must not be
+    /// conflated just because both strings begin with `\\?\`.
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefix_is_stripped_before_volume_compare() {
+        assert_eq!(volume_root_of(r"\\?\D:\AI\store\cas\ab"), Some(r"D:\".to_string()));
+        assert_eq!(volume_root_of(r"D:\AI\store"), Some(r"D:\".to_string()));
+        assert_eq!(volume_root_of(r"d:\lower"), Some(r"D:\".to_string()));
+        assert_eq!(volume_root_of(r"\\?\UNC\srv\share\x"), Some(r"\\SRV\SHARE".to_string()));
+        assert_eq!(volume_root_of("relative/path"), None);
+        assert_ne!(volume_root_of(r"\\?\C:\a"), volume_root_of(r"\\?\D:\b"));
     }
 }

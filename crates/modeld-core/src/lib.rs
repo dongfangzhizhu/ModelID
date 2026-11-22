@@ -44,8 +44,8 @@ pub use config::{
     StoreConfig,
 };
 pub use db::{
-    Database, Download, DownloadStatus, FileIndexEntry, HfMapping, Model, ScanStatus,
-    TransactionStatus, WalTransaction, WorkflowRecord, WorkflowRef,
+    Database, Download, DownloadStatus, FileIndexEntry, FrontendStatRow, HfMapping, Model,
+    ScanStatus, StorageStats, TransactionStatus, WalTransaction, WorkflowRecord, WorkflowRef,
 };
 pub use dedup::{
     compute_risk_level, DedupEngine, DedupGroupPlan, DedupMode, DedupPlan, DedupStats,

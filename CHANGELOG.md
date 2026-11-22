@@ -7,8 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Storage figures now separate logical from physical size** — `modeld stats`
+  (text and `--json`) and `GET /api/v1/stats` report `logical_bytes` (every
+  alias path counted as a full file), `physical_bytes` (one copy per unique
+  content, what the store actually owns), bytes already saved by links, and
+  bytes still wasted by independent copies. `duplicate_groups` keeps its old
+  meaning (2+ paths) so existing dashboards do not shift; the new
+  `waste_groups` / `multi_path_groups` distinguishes "listed by `dupes`" from
+  "a dedup would still reclaim bytes". (ROADMAP B6)
+- **`modeld stats --json`** — the figures are machine-readable, so
+  `physical_bytes` can be diffed against `du -sb <store>/cas` by a script.
+  (ROADMAP B6)
+
+### Changed
+
+- **`modeld stats` no longer touches the filesystem** — it used to build a
+  `DedupEngine` and stat every alias path. It is now one aggregate query, so
+  the summary stays cheap on a large library. `dupes` remains the command that
+  inspects files. (ROADMAP B6)
+- **The dashboard is two queries instead of N+1** — `get_stats` previously
+  looped over every model and queried its aliases; it now uses `storage_stats()`
+  and `frontend_stats()`. A failed aggregate returns 500 instead of rendering
+  "0 bytes". (ROADMAP B6)
+
 ### Fixed
 
+- **`dedup` silently did nothing when the store path was relative** — `links.rs`
+  had its own `is_same_volume` that read the `Prefix` path component, which a
+  relative path does not have, so every duplicate was declared cross-volume and
+  recorded as `reference_only` while the file stayed on disk at full size.
+  The duplicate implementation is gone and the check delegates to
+  `platform::is_same_volume`, which also strips the `\\?\` verbatim prefix that
+  `canonicalize` adds on Windows. (ROADMAP B6)
+- **`dedup --auto` still prompted** — the flag is documented as "execute
+  without confirmation prompts" but only `--yes` skipped the prompt, so a
+  scripted run aborted on non-interactive stdin. (ROADMAP B6)
+- **Copy-to-cas dedup now says it reclaimed nothing** — the fallback records a
+  `reference_only` alias and leaves the file in place; it logged nothing, so a
+  run that freed no space looked identical to one that did. (ROADMAP B6)
 - **Downloader no longer trusts stale partial files** — a `.part` file is only
   resumed when its `<part>.meta` side-car still matches the URL, ETag and
   expected size. A changed object or a missing side-car discards the partial.

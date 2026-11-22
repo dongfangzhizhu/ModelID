@@ -116,32 +116,16 @@ fn detect_primary_filesystem() -> String {
 
 /// Returns `true` when both paths reside on the same filesystem volume.
 /// Hard links require same-volume; symlinks work across volumes.
+///
+/// Delegates to [`crate::platform::is_same_volume`]. This function used to be a
+/// second, independent implementation that compared `Path::components()`
+/// prefixes — but a *relative* path has no `Prefix` component, so every
+/// relative store path (`--store target\store`, the shape used by the tests and
+/// by `scan` with a relative argument) was reported as a different volume.
+/// `dedup` then fell back to `create_reference_only`, which records an alias and
+/// reclaims nothing — a silent no-op that still printed "Deduplication Complete".
 pub fn is_same_volume(path1: &Path, path2: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        use std::path::Component;
-        let drive = |p: &Path| -> Option<String> {
-            p.components().next().and_then(|c| {
-                if let Component::Prefix(px) = c {
-                    Some(px.as_os_str().to_string_lossy().to_uppercase())
-                } else {
-                    None
-                }
-            })
-        };
-        match (drive(path1), drive(path2)) {
-            (Some(d1), Some(d2)) => d1 == d2,
-            _ => false,
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match (path1.metadata(), path2.metadata()) {
-            (Ok(m1), Ok(m2)) => m1.dev() == m2.dev(),
-            _ => false,
-        }
-    }
+    crate::platform::is_same_volume(path1, path2)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

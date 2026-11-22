@@ -71,7 +71,11 @@ pub enum Commands {
     /// Show store statistics
     Status {},
     /// Show store statistics and duplicate-space summary
-    Stats {},
+    Stats {
+        /// Output result as JSON (B6: scriptable logical/physical comparison)
+        #[arg(long)]
+        json: bool,
+    },
     /// Report duplicate model files
     Dupes {
         /// Minimum duplicate file size to include, e.g. 100MB, 2GB

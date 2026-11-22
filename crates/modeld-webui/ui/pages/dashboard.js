@@ -29,7 +29,7 @@ export function render(container) {
         <div class="stat-card success">
           <div class="stat-label">${t('dash.stat.size')}</div>
           <div class="stat-value" id="stat-size">…</div>
-          <div class="stat-sub">${t('dash.stat.size.sub')}</div>
+          <div class="stat-sub" id="stat-size-sub">${t('dash.stat.size.sub')}</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">${t('dash.stat.scan')}</div>
@@ -84,7 +84,13 @@ export function render(container) {
       const s = await api.stats();
       document.getElementById('stat-models').textContent = s.total_models.toLocaleString();
       document.getElementById('stat-waste').textContent  = fmtBytes(s.duplicate_waste_bytes);
-      document.getElementById('stat-size').textContent   = fmtBytes(s.total_size_bytes);
+      document.getElementById('stat-size').textContent   = fmtBytes(s.physical_bytes);
+      // B6: physical size alone hides how much the library really holds.
+      document.getElementById('stat-size-sub').textContent =
+        t('dash.stat.size.breakdown', {
+          logical: fmtBytes(s.logical_bytes),
+          saved: fmtBytes(s.deduped_saved_bytes),
+        });
       document.getElementById('stat-scan').textContent   = s.last_scan_at ? fmtRelTime(s.last_scan_at) : t('dash.stat.scan.never');
       document.getElementById('frontend-count').textContent = t('dash.storage.count', { n: s.frontends.length });
 
