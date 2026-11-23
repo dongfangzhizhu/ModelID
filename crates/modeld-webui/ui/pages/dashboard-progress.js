@@ -26,7 +26,15 @@ export const PHASE_KEYS = {
  * @returns {string}
  */
 export function resolvePhaseKey(phase) {
-  return PHASE_KEYS[phase] || 'dash.scan.scanning';
+  // `PHASE_KEYS[phase] || fallback` looked like it covered unknown phases, but
+  // a plain object inherits from Object.prototype: phase "toString" returned
+  // the inherited function (and "constructor" the Object constructor), which
+  // was then handed to `t()` as an i18n key. A phase comes off the websocket,
+  // i.e. from another process, so treat it as untrusted input and only accept
+  // keys this map actually owns.
+  return Object.prototype.hasOwnProperty.call(PHASE_KEYS, phase)
+    ? PHASE_KEYS[phase]
+    : 'dash.scan.scanning';
 }
 
 /**

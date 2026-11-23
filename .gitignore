@@ -97,3 +97,6 @@ RELEASE_WORKFLOW_COMPLETE.md
 BUILD_RELEASE_GUIDE.md
 .gitignore.publish
 EXAMPLES.md
+
+# B8: generated benchmark results (baseline is committed)
+bench/latest.json

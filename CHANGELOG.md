@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HTTP-level e2e tests for every API route** — `tests/api_e2e.rs` drives the
+  real router (with auth/CSRF/CORS/middleware in the path) for all 18 route
+  declarations, covering a 4xx from each handler that validates input and a
+  401 sweep over every route when a token is configured. The route table is
+  read from `src/api/mod.rs` at compile time, so adding a route without a test
+  breaks the suite. (ROADMAP B8)
+- **A five-point interruption matrix** — `interruption_matrix.rs` crashes a
+  dedup at each write point (`begin`, staging copy, CAS publish, partial link,
+  before commit) and checks the same invariants everywhere: `verify` clean, no
+  transaction in flight, both library paths readable with original content.
+  (ROADMAP B8)
+- **Environment-class tests** — `tests/environment.rs` covers cross-volume
+  adoption, a junction loop in the scanner, an unwritable store layout, and
+  lock contention from another process; unavailable classes skip with a
+  printed reason instead of pretending to pass. (ROADMAP B8)
+- **Scan/dedup benchmarks with a CI regression gate** — `cargo bench -p
+  modeld-core` writes `bench/latest.json`; `scripts/bench_gate.py` fails the
+  build on a >20% slowdown, refuses to compare across platforms, and has a new
+  CI job. (ROADMAP B8)
+- **A modeld-core coverage report** — `scripts/coverage.py` uses the LLVM
+  tools from `llvm-tools-preview` (no crates.io dependency), commits the
+  summary under `coverage/`, and enforces a 75% line-coverage gate in CI.
+  (ROADMAP B8)
 - **Cross-process store lock** — every layout-mutating command (`scan`, `gc`,
   `dedup`, `unlink`, `quarantine cleanup/restore`) now takes an exclusive OS
   lock on `<store>/.modeld.lock`, so two processes can no longer interleave
@@ -56,6 +79,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `toString` phase could break the dashboard** — `resolvePhaseKey` looked up
+  phases in a plain object with `PHASE_KEYS[phase] || fallback`, so the
+  inherited `Object.prototype.toString` (and `constructor`) came back as a
+  function and was passed to `t()` as an i18n key. It now only accepts keys the
+  map actually owns. Found by the property test with `"toString"` as a
+  counterexample. (ROADMAP B8)
+- **`scan` could report success after failing every file** — a cross-volume
+  `--adopt` printed `adopt failed: cross-volume …` for each file, then exited 0,
+  so an automated ingest said "success" with an empty store. `scan_command`
+  now exits non-zero when any file failed to ingest, while still printing the
+  per-path reason. (ROADMAP B8)
 - **Every stored object leaked an empty staging directory** —
   `CasStore::store_crash_safe` created `tmp/cas_staging/{tx_id}/`, renamed the
   `.part` file into the CAS, and never removed the directory, so each

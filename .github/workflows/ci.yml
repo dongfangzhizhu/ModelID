@@ -187,3 +187,61 @@ jobs:
       - name: Run pytest
         working-directory: python
         run: python -m pytest tests/ -v
+
+  # ---------------------------------------------------------------------------
+  # Benchmarks — fail when a hot path regresses by more than 20% (ROADMAP B8)
+  # ---------------------------------------------------------------------------
+  bench:
+    name: Benchmark regression gate
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run scan/dedup benchmarks
+        run: cargo bench -p modeld-core --locked
+
+      # Wall-clock baselines are runner-specific. The committed baseline was
+      # recorded on windows-x86_64, so the first ubuntu run prints SKIP with the
+      # exact command to record a runner-specific baseline; once that file is
+      # updated, the 20% gate is live on CI too. This is deliberate: comparing
+      # two different machines would report a permanent fake regression.
+      - name: Fail on regressions > 20%
+        run: python3 scripts/bench_gate.py --threshold 20
+
+      - name: Upload the raw result for the record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-latest
+          path: bench/latest.json
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Coverage — modeld-core line coverage must stay at or above 75% (B8)
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: Core coverage >= 75%
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Measure modeld-core coverage
+        run: python3 scripts/coverage.py
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-coverage
+          path: coverage/
+          if-no-files-found: ignore

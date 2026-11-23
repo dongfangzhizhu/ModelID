@@ -436,12 +436,17 @@ mod tests {
     fn waiting_acquire_succeeds_once_the_holder_finishes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_path_buf();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
-            let _lock = StoreLock::try_acquire(&path, "dedup").unwrap();
+            let lock = StoreLock::try_acquire(&path, "dedup").unwrap();
+            // A sleep is not synchronisation: under an instrumented build the
+            // thread may not even have started before the main thread tries to
+            // acquire, and the "waiter" wins the lock. Announce it instead.
+            ready_tx.send(()).unwrap();
             std::thread::sleep(Duration::from_millis(400));
+            drop(lock);
         });
-        // Give the thread time to take the lock.
-        std::thread::sleep(Duration::from_millis(100));
+        ready_rx.recv_timeout(Duration::from_secs(5)).expect("holder never took the lock");
         let lock = StoreLock::acquire(dir.path(), "gc", Duration::from_secs(5)).unwrap();
         assert_eq!(lock.holder().op, "gc");
         holder.join().unwrap();

@@ -122,6 +122,17 @@ pub fn scan_command(
                 tf("scan.error_line", &[("path", &err.path), ("reason", &err.reason)]).red()
             );
         }
+
+        // A script must be able to tell a partial scan from a complete one.
+        // Before this, a cross-volume `--adopt` printed "adopt failed" for
+        // every file yet still exited 0, so an automated ingest reported
+        // success while the store stayed empty. Keep the per-file lines above
+        // (they name the offending path and the reason) and fail the command.
+        anyhow::bail!(
+            "{} of {} files could not be ingested; the store is incomplete",
+            ingest_result.errors.len(),
+            results.len(),
+        );
     }
 
     Ok(())

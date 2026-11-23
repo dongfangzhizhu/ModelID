@@ -30,3 +30,7 @@ toml_edit.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 proptest = "1.5"
+
+[[bench]]
+name = "scan_dedup"
+harness = false

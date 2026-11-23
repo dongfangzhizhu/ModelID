@@ -1,0 +1,35 @@
+modeld-core line coverage (unit tests, `crates/modeld-core/src` only)
+
+file                           lines  covered       %
+------------------------------------------------------
+audit.rs                         103       97   94.2%
+cas.rs                           309      253   81.9%
+config.rs                        339      255   75.2%
+db.rs                           2068     1593   77.0%
+dedup.rs                         654      419   64.1%
+doctor.rs                        270      229   84.8%
+downloader.rs                    716      346   48.3%
+fsck.rs                          328      294   89.6%
+gc.rs                            301      224   74.4%
+governance.rs                    230      227   98.7%
+hash.rs                           96       88   91.7%
+hf_cache.rs                      382      260   68.1%
+i18n.rs                          599      574   95.8%
+ingest.rs                        286      243   85.0%
+links.rs                         273      244   89.4%
+platform.rs                      204      181   88.7%
+quarantine.rs                    271      225   83.0%
+recover.rs                       354      273   77.1%
+refs.rs                          161      159   98.8%
+scanner.rs                       482      443   91.9%
+store_lock.rs                    231      190   82.3%
+store_path.rs                     97       75   77.3%
+tx.rs                            320      271   84.7%
+unlink.rs                        148      122   82.4%
+workflow.rs                      352      320   90.9%
+------------------------------------------------------
+TOTAL (modeld-core only)        9574     7605   79.4%
+
+Dependencies and std are excluded: including them made the same data
+look like 15% coverage on Windows because llvm-cov's -ignore regex
+did not match backslash paths.
