@@ -634,13 +634,22 @@ Refs: docs/ROADMAP.md#A1
 ### B8 · 测试体系补齐
 
 - **目标**：核心覆盖率不低于 75%，WebUI 不低于 60%，端到端可用。
-- **产物**：`tests/e2e/`（HTTP 全链路）、`benches/`（scan/dedup 基准）、CI 覆盖率报告
+- **产物**：`crates/modeld-webui/tests/api_e2e.rs`（HTTP 全链路）、`crates/modeld-core/tests/interruption_matrix.rs`（5 中断点）、`crates/modeld-cli/tests/environment.rs`（4 类环境）、`crates/modeld-core/benches/scan_dedup.rs`、`coverage/`（报告）、`scripts/{coverage,bench_gate}.py`
 - **验收标准**：
-  - [ ] 每个 API 路由至少 1 个集成测试（含 4xx）
-  - [ ] 故障注入覆盖 5 个中断点
-  - [ ] 跨卷/挂载点/只读目录/文件锁 4 类环境测试
-  - [ ] `cargo llvm-cov` 报告入库，core 不低于 75%
-  - [ ] 基准回归阈值写入 CI（超过 20% 失败）
+  - [x] 每个 API 路由至少 1 个集成测试（含 4xx）— 28 个 e2e 测试驱动真实 `build_router`（含鉴权/CSRF/CORS/指标中间件），覆盖 18 条路由声明。每条各自有 400/404/409 断言；另有一条对每个路由断言「配置 token 后无 token → 401」，一条断言「没被挂载的路由会落到 SPA 的 `text/html` fallback」（这才是「未挂载」的可靠判据，404 本身可能是 handler 的正常回答）。路由表用 `include_str!("../src/api/mod.rs")` 在编译期读出，新增路由但没补测试会让 `route_inventory` 测试失败
+  - [x] 故障注入覆盖 5 个中断点 — `interruption_matrix.rs`：`begin` 后、staging 复制后、CAS 发布后、部分链接后、`commit` 前。每个点都收口到同一组不变量：`verify` clean、无 in-flight WAL、两条库路径字节未变；第 4/5 点再断言 `logical_bytes=512 KiB / physical_bytes=256 KiB / waste=0`，证明「共享」而不只是「还能读」
+  - [x] 跨卷/挂载点/只读目录/文件锁 4 类环境测试 — C:→D: 跨卷 `--adopt` 必须拒绝且不能把字节复制进 CAS（**抓出真缺陷**，见下）；junction 自环不得让扫描器死循环且只计 2 个真实模型；`cas` 槽位被文件占位时扫描失败且源文件不变；另一进程持锁时本进程 `scan --wait 0` 被拒并打印持有者 pid，且未写入任何模型。无第二卷/无 junction 权限时打印 SKIP 原因，不伪装通过
+  - [x] `cargo llvm-cov` 报告入库，core 不低于 75% — crates.io 在本机返回 403，`cargo-llvm-cov` 装不上；改用 `rustup component add llvm-tools-preview` 提供的 `llvm-profdata`/`llvm-cov`，`scripts/coverage.py` 走 `-C instrument-coverage → profraw → profdata → export` 全链路。**core 行覆盖率 79.43%（9574 行 / 7605 覆盖）**，报告在 `coverage/core-summary.{txt,json}`；CI 用 `components: llvm-tools-preview` 跑同一脚本
+  - [x] 基准回归阈值写入 CI（超过 20% 失败）— `cargo bench -p modeld-core` 写 `bench/latest.json`；`scripts/bench_gate.py --threshold 20` 实测三种行为：无回归 exit 0、人为 +25% exit 1、跨平台基线 SKIP 并提示 `--record`。基线按 `platform` 隔离（本机 `windows-x86_64`：scan 13.587 ms / dedup plan 57.784 ms），避免拿 Windows 数字卡 ubuntu CI。CI 新增 `bench` job 上传原始结果
+
+> 证据（2026-11-24）：
+> - `cargo test --workspace --locked` → **394 passed / 0 failed**（B7 的 357 + e2e 28 + 中断点 5 + 环境 4）
+> - `cargo test -p modeld-webui --test api_e2e` → 28 passed；`-p modeld-core --test interruption_matrix` → 5 passed；`-p modeld-cli --test environment` → 4 passed
+> - `cargo bench -p modeld-core` → scan_64x1MiB_full_hash 13.587 ms、dedup_plan_100_groups 57.784 ms；门禁三态实测见上
+> - `python scripts/coverage.py` → 214 passed / 0 failed（instrumented），core 行覆盖率 79.43%，报告已入库
+> - `cargo fmt --check` / `clippy --workspace --all-targets -D warnings` 干净；前端 `npm test` 38 passed；Python 17 passed
+> - **本轮由测试抓出并修复的两个真缺陷**：① 跨卷 `--adopt` 每个文件都打印 `adopt failed: cross-volume`，CLI 仍 exit 0 → `scan_command` 现在只要有 per-file 失败就非零退出；② 前端 `resolvePhaseKey("toString")` 命中 `Object.prototype`，把函数当 i18n key → 改为只接受自有属性
+> - **未实测**：WebUI 覆盖率（只定了 e2e 路由覆盖，尚无 JS 行覆盖率工具）；NFS/SMB 网络卷（沿用 B7 未测项）；`llvm-cov` 在 ubuntu CI 上的实测要等首次 CI 运行
 - **估算**：6 人日 ｜ **依赖**：B1–B7（持续进行）
 
 ### B9 · 文档重构
@@ -775,7 +784,7 @@ Refs: docs/ROADMAP.md#A1
 | B5 | HF 缓存兼容性对拍 | done | AI agent | 2026-11-22 | 2026-11-22 | `04a516a` |
 | B6 | 统计语义 | done | AI agent | 2026-11-23 | 2026-11-23 | `b70c7e6` |
 | B7 | 跨进程锁与并发安全 | done | AI agent | 2026-11-23 | 2026-11-23 | `c90c21e` |
-| B8 | 测试体系补齐 | todo | — | — | — | — |
+| B8 | 测试体系补齐 | done | AI agent | 2026-11-24 | 2026-11-24 | `cc93f1f` |
 | B9 | 文档重构 | todo | — | — | — | — |
 
 ### 阶段 C
@@ -798,6 +807,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-24 | B8 | 测试体系：28 个 HTTP e2e 覆盖全部路由（含 4xx 与 401 遍历、路由表编译期防漏）、5 中断点矩阵、4 类环境测试；core 覆盖率 79.43% 入库（llvm-tools 直连，绕开 403 的 crates.io）；scan/dedup 基准 + 20% 回归门禁 + CI job；顺带修跨卷 adopt 仍 exit 0 与前端 `toString` phase 命中原型链两个真缺陷 | `cc93f1f` | `webui/tests/api_e2e.rs`、`core/tests/interruption_matrix.rs`、`cli/tests/environment.rs`、`core/benches/scan_dedup.rs`、`scripts/{coverage,bench_gate}.py`、`coverage/*`、`bench/*`、`.github/workflows/ci.yml`、`cli/commands/scan.rs`、`ui/pages/dashboard-progress.js` |
 | 2026-11-23 | B7 | 跨进程锁：`store_lock.rs` 从 O_EXCL 标记文件（崩溃后靠超时猜、无法区分活锁与残留）改为 `flock`/`LockFileEx` 内核独占锁，进程消失即释放；锁文件保留不删以避开 unlink 竞态；`current_holder()` 先试锁再读记录，残留记录不再误报 busy。CLI `scan/gc/dedup/unlink/repair` 全部接入，新增 `--wait <秒>`（默认 30）与 `util::lock_store()` 统一提示；WebUI scan/quarantine 同步加锁。新增 10 进程真实并发测试；顺带修 `store_crash_safe` 每次落一个空 staging 目录的泄漏 | `c90c21e` | `core/store_lock.rs`、`core/cas.rs`、`core/i18n.rs`、`cli/{cli,main,util}.rs`、`cli/commands/{scan,gc,dedup,repair}.rs`、`cli/tests/concurrency.rs`、`cli/Cargo.toml`、`webui/api/{scan,quarantine}.rs` |
 | 2026-11-23 | B6 | 统计语义：`storage_stats()` 单条聚合区分 logical/physical，`reference_only` 不再算副本；`calculate_savings` 只计 `original`；WebUI 改用 `storage_stats`+`frontend_stats` 消除 N+1；`stats --json`；顺带修 `links::is_same_volume` 对相对路径恒判「不同卷」导致 dedup 静默空转、以及 `--auto` 仍弹确认；新增 9 个测试 | `b70c7e6` | `core/db.rs`、`core/dedup.rs`、`core/platform.rs`、`core/links.rs`、`core/i18n.rs`、`cli/commands/{query,dedup}.rs`、`cli/{cli,main}.rs`、`webui/api/stats.rs`、`webui/ui/*` |
 | 2026-11-22 | B5 | HF 缓存兼容性：commit SHA refs、相对符号链接（失败报错而非静默复制）、`RepoType` 三类型贯通 CLI、Python hook 去除 import 副作用 + `deactivate()` 完整还原 + 四参数 wrapper；新增 8 个测试（Rust 3 + Python 5） | `04a516a` | `core/hf_cache.rs`、`core/downloader.rs`、`cli/*`、`python/modeld_hook/*`、`python/tests/*` |
@@ -819,9 +829,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 7 | 78% |
+| B 架构收敛 | 9 | 8 | 89% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **15** | **63%** |
+| **合计** | **24** | **16** | **67%** |
 
 ---
 
@@ -860,7 +870,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 审核 | mDNS 仅发现无广播 | C7 | open |
 | 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | open |
 | 2026-10-24 | A6 | `proxy token-rotate --reload`（SIGHUP 热重载）未实现，轮换后仍需重启进程 | C1 | open |
-| 2026-10-24 | A5 | `scan` 的退出码不反映 per-file 错误（跨卷 `--adopt` 会打印错误但仍 exit 0），脚本无法据此判断 | B2 | open |
+| 2026-10-24 | A5 | `scan` 的退出码不反映 per-file 错误（跨卷 `--adopt` 会打印错误但仍 exit 0），脚本无法据此判断 | B2 | done（B8 环境测试复现后修复：`scan_command` 有 per-file 失败即非零退出） |
 | 2026-10-24 | A5 | 仅索引（Index）的模型没有 CAS 对象，`proxy` 对外提供该 blob 时会 404；`status` 也未标注「仅索引」 | A6 | open |
 | 2026-10-24 | 审核 | Python hook token 走命令行参数 | B5 | open |
 | 2026-10-24 | 开发 A1 | `dedup.rs` 中 `cas_path.parent().unwrap()` 属库层 panic | B1 | open |
@@ -893,6 +903,10 @@ Refs: docs/ROADMAP.md#A1
 | 2026-11-23 | B7 | `flock`/`LockFileEx` 在 NFS/SMB 网络卷上的语义（锁是否跨主机生效、失败是否报错）未实测；本机无网络卷，属 B8 环境矩阵范围 | B8 | open |
 | 2026-11-23 | B7 | `--wait` 默认 30 s 对交互式 CLI 合理，脚本/CI 里更希望快速失败；需在文档里明确「脚本用 `--wait 0`」，并把退出码语义写进 `proxy-api.md` 之外的 CLI 文档 | B9 | open |
 | 2026-11-23 | B7 | `StoreLock` 的持有者记录是「尽力而为」的：`acquire` 里 `let _ = write_holder(...)`，写失败仍算拿到锁（正确，锁的真值在内核）。但此时文件里留的是**上一轮**的记录，后续进程的 busy 提示会把陈旧的 pid/op 当成当前持有者。需要的话改成「写失败则写入最小占位记录」 | C2 | open |
+| 2026-11-24 | B8 | 目标写的是「WebUI 不低于 60%」，本轮只做到「每个路由有 e2e 覆盖」，尚无 JS 行覆盖率工具与数字 | C5 | open |
+| 2026-11-24 | B8 | 基准基线按平台隔离；`bench/baseline.json` 当前只有 `windows-x86_64`，CI 的 ubuntu runner 首次运行会 SKIP 并提示 `--record`，之后门禁才真正生效 | C3 | open |
+| 2026-11-24 | B8 | 本机 instrumented 编译（`RUSTFLAGS=-C instrument-coverage`）首次会卡在 rustc 低 CPU 空转，终止重试即过；`cargo test` 偶发 LNK1104（杀软占用 exe）重跑即过。CI 用固定环境不受影响 | C3 | open（本机环境，非代码缺陷） |
+| 2026-11-24 | B8 | 中断点矩阵、环境矩阵均只在本机 Windows 跑过；三平台 CI 与 NFS/SMB 网络卷仍未覆盖 | C3 | open |
 
 ---
 
