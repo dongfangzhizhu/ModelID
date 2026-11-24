@@ -40,7 +40,7 @@ use crate::db::{
     TransactionStatus, {AliasType, Database, DownloadStatus, Frontend},
 };
 use crate::hash::Blake3Hash;
-use crate::hf_cache::HfCache;
+use crate::hf_cache::{HfCache, RepoType};
 use anyhow::{anyhow, Context, Result};
 use blake3::Hasher as Blake3Hasher;
 use sha2::{Digest, Sha256};
@@ -51,6 +51,22 @@ use std::time::Duration;
 
 /// Progress callback: (bytes_done, bytes_total, filename)
 pub type ProgressCallback = Box<dyn Fn(u64, u64, &str) + Send + Sync>;
+
+/// Build the snapshot path used in WAL/alias records for a downloaded file.
+///
+/// `HfCache::snapshot_file_path_with_type` takes `(repo_id, revision,
+/// filename, repo_type)` — revision first. Keeping this wrapper next to the
+/// downloader makes the argument order explicit: `create_cache_entry_with_type`
+/// below uses the opposite `(repo_id, filename, revision, …)` order.
+fn snapshot_path_for_download(
+    hf_cache: &HfCache,
+    repo_id: &str,
+    revision: &str,
+    filename: &str,
+    repo_type: RepoType,
+) -> PathBuf {
+    hf_cache.snapshot_file_path_with_type(repo_id, revision, filename, repo_type)
+}
 
 /// Provenance records the origin of a downloaded model file.
 ///
@@ -409,10 +425,10 @@ impl Downloader {
         // finishes the import when the object exists and rolls it back when it
         // does not.
         let tx_id = uuid::Uuid::new_v4().to_string();
-        let snapshot_path = hf_cache
-            .snapshot_file_path_with_type(repo_id, filename, rev, self.repo_type)
-            .to_string_lossy()
-            .to_string();
+        let snapshot_path =
+            snapshot_path_for_download(&hf_cache, repo_id, rev, filename, self.repo_type)
+                .to_string_lossy()
+                .to_string();
         db.insert_wal_transaction(
             &tx_id,
             "download",
@@ -442,10 +458,10 @@ impl Downloader {
 
         // Step 7–9: all DB state changes in one SQLite transaction.  If any
         // statement fails, the WAL row stays `pending`/`copied` for recovery.
-        let snapshot_str = hf_cache
-            .snapshot_file_path_with_type(repo_id, filename, rev, self.repo_type)
-            .to_string_lossy()
-            .to_string();
+        let snapshot_str =
+            snapshot_path_for_download(&hf_cache, repo_id, rev, filename, self.repo_type)
+                .to_string_lossy()
+                .to_string();
         let sha_for_db = sha256.clone();
         let alias_hash = blake3.clone();
         let snapshot_for_db = snapshot_str.clone();
@@ -900,6 +916,23 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dl = Downloader::new(tmp.path()).with_token("secret");
         assert_eq!(dl.hf_token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn snapshot_path_for_download_keeps_revision_before_filename() {
+        let tmp = TempDir::new().unwrap();
+        let cache = HfCache::new(tmp.path());
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let filename = "model.safetensors";
+
+        let path =
+            snapshot_path_for_download(&cache, "org/repo", revision, filename, RepoType::Model);
+        let relative = path.strip_prefix(tmp.path()).unwrap().to_string_lossy().replace('\\', "/");
+
+        assert_eq!(
+            relative,
+            format!("hf_cache/hub/models--org--repo/snapshots/{revision}/{filename}")
+        );
     }
 
     #[test]

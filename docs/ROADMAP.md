@@ -667,8 +667,8 @@ Refs: docs/ROADMAP.md#A1
   - 根目录：4 个 Markdown（CHANGELOG / CONTRIBUTING / README / SECURITY）；`docs/ROADMAP.md` 保持唯一权威计划、不复制到根目录形成双源；17 篇旧规划稿移入 `docs/history/`，`.gitignore` 不再隐藏归档文件；README、python/README 中「hook import 自动激活」「cas 路径选择最旧 mtime」「refs 表」等旧口径均已更正
   - 链接检查：22 个活动 Markdown（根目录 + `docs/` 非 history + `python/README.md`）相对链接 0 broken；`SECURITY.md` 的 ADR 相对路径已修正
   - proxy-api：逐项对照 `core/config.rs`、`proxy/{config,auth,server}.rs` — 默认 `127.0.0.1:8234`、token 五级来源与双写、IP gate 先于 token、64 MiB range、`MODELD_HF_BASE`、错误码 400/401/403/404/405/206/200/502；修正 `HF_ENDPOINT` 必须带 `/v1/hf-proxy` 且默认需要 Bearer token、SDK 不自动循环下一窗口、proxy 无 `/metrics`、client 不校验 BLAKE3
-  - 质量门：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo test --workspace --locked` → **394 passed / 0 failed**；前端 `npm test` → 38 passed；Python `unittest discover` → 17 passed（本机无 pytest 模块，改跑等价的 unittest 套件）
-  - **本轮由全量测试抓出并修复的真缺陷**：Windows 下 HF 假缓存用 `/` 作相对符号链接目标会生成悬空链接（`test_create_cache_entry` 的 `file_path.exists()` 失败）→ `hf_cache.rs` 按主机改用 Windows 反斜杠 / Unix 正斜杠，并新增 Windows `canonicalize` 断言
+  - 质量门：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo test --workspace --locked` → **395 passed / 0 failed**；前端 `npm test` → 38 passed；Python `unittest discover` → 17 passed（本机无 pytest 模块，改跑等价的 unittest 套件）
+  - **本轮由质量门抓出并修复的两个真缺陷**：① Windows 下 HF 假缓存用 `/` 作相对符号链接目标会生成悬空链接（`test_create_cache_entry` 的 `file_path.exists()` 失败）→ `hf_cache.rs` 按主机改用 Windows 反斜杠 / Unix 正斜杠，并新增 Windows `canonicalize` 断言；② `downloader.rs` 写 WAL/alias 时把 `filename` 与 `revision` 传反，导致 DB 记录的 snapshot 路径为 `snapshots/<filename>/<revision>` → 新增显式参数包装函数 `snapshot_path_for_download` 并加路径断言测试
   - **未实测**：三平台 CI、ubuntu 首次 bench 基线、`cargo deny` RUSTSEC 公告库、NFS/SMB 网络卷（同 B8）
 - **估算**：4 人日 ｜ **依赖**：A3/A6/A7
 
@@ -918,7 +918,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-11-24 | B8 | 本机 instrumented 编译（`RUSTFLAGS=-C instrument-coverage`）首次会卡在 rustc 低 CPU 空转，终止重试即过；`cargo test` 偶发 LNK1104（杀软占用 exe）重跑即过。CI 用固定环境不受影响 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-24 | B8 | 中断点矩阵、环境矩阵均只在本机 Windows 跑过；三平台 CI 与 NFS/SMB 网络卷仍未覆盖 | C3 | open |
 | 2026-11-24 | B9 | Windows 下 HF 假缓存用 `/` 作相对符号链接目标会创建悬空链接（`test_create_cache_entry` 失败），`huggingface_hub` 无法解析 blob/snapshot | B9 | done（B9 质量门抓出；`hf_cache.rs` 按主机切换分隔符，新增 Windows canonicalize 断言） |
-| 2026-11-24 | B9 | `downloader.rs:413/446` 调 `snapshot_file_path_with_type(repo_id, filename, rev, …)`，而签名是 `(repo_id, revision, filename, …)`；写入 WAL/alias 的 snapshot 路径可能错位，运行时后果未实测 | C2 | open |
+| 2026-11-24 | B9 | `downloader.rs:413/446` 调 `snapshot_file_path_with_type(repo_id, filename, rev, …)`，而签名是 `(repo_id, revision, filename, …)`；写入 WAL/alias 的 snapshot 路径错位 | B9 | done（B9 新增 `snapshot_path_for_download(repo_id, revision, filename, …)` 包装并加路径断言测试） |
 | 2026-11-24 | B9 | `modeld-client` 只校验传输长度，不重算 BLAKE3；端到端完整性需要调用方自行对拍 | C4 | open |
 | 2026-11-24 | B9 | `[proxy.network]` 的 IPv6 / hostname 退化为 `starts_with` 子串匹配，不能作为精确安全边界 | C4 | open |
 | 2026-11-24 | B9 | Python hook 的 `snapshot_download` 包装函数已定义但未启用；`modeld hook install` / `MODELD_NO_AUTO_HOOK` 只在旧文档中出现 | C7 | open |

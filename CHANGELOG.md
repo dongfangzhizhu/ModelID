@@ -96,6 +96,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Targets now use the host separator (`\` on Windows, `/` on Unix), with a
   Windows `canonicalize` assertion in `test_create_cache_entry`. Found by the
   full regression run during B9. (ROADMAP B9)
+- **HF download aliases pointed at the wrong snapshot path** — the WAL and
+  `aliases` rows were built with `filename` and `revision` swapped, producing
+  `snapshots/<filename>/<revision>` while the cache creates
+  `snapshots/<revision>/<filename>`. A dedicated wrapper now fixes the argument
+  order and a unit test asserts the resulting relative path. (ROADMAP B9)
 - **A `toString` phase could break the dashboard** — `resolvePhaseKey` looked up
   phases in a plain object with `PHASE_KEYS[phase] || fallback`, so the
   inherited `Object.prototype.toString` (and `constructor`) came back as a

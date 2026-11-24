@@ -26,7 +26,8 @@ AI 框架通过 `HF_HOME` / `HF_ENDPOINT` 与 HuggingFace Hub 交互。要复用
    - 源码：`crates/modeld-core/src/db.rs::{upsert_hf_mapping,get_blake3_by_sha256}`、`crates/modeld-core/src/downloader.rs::{fetch_hf_metadata,download_hf_file}`。
 
 3. **下载可续传且流式校验**：`.part.meta` 记录 URL / ETag / size；续传带 `Range: bytes=N-` 与 `If-Range`；服务端返回 200 则从头开始。固定 64 KB 缓冲同时算 BLAKE3 与 SHA256，已知 size 必须精确匹配。DB 写入包在 `Database::in_transaction`。
-   - 源码：`crates/modeld-core/src/downloader.rs::{Downloader,PartMeta}`。
+   - WAL 与 alias 中的 snapshot 路径由 `snapshot_path_for_download(repo_id, revision, filename, …)` 构造，与 `create_cache_entry_with_type(repo_id, filename, revision, …)` 的相反参数顺序明确区分，避免路径写成 `snapshots/<filename>/<revision>`。
+   - 源码：`crates/modeld-core/src/downloader.rs::{Downloader,PartMeta,snapshot_path_for_download}`。
 
 4. **代理兼容路径是 `/v1/hf-proxy/{org}/{repo}/resolve/{revision}/{file}`**：客户端设置 `HF_ENDPOINT=<base>/v1/hf-proxy`（不是 `<base>`）；服务端回源地址由 `MODELD_HF_BASE` 控制，默认 `https://huggingface.co`。除 `/health` 外代理要求 Bearer token，所以“零客户端改动”只成立于 token 已正确配置/回环匿名模式。
    - 源码：`crates/modeld-proxy/src/server.rs::{handle_hf_proxy,match_hf_proxy_url}`、`crates/modeld-core/src/downloader.rs::DEFAULT_HF_BASE`。
@@ -41,7 +42,6 @@ AI 框架通过 `HF_HOME` / `HF_ENDPOINT` 与 HuggingFace Hub 交互。要复用
   - `cache_dir` / `local_dir` / `force_download` 显式参数会绕过 modeld，交回原 HF 函数。
   - `snapshot_download` 的包装函数存在但未启用；`_original_snapshot_download` 未赋值。
   - Windows 无开发者模式时符号链接失败，HF 缓存命中降级，但 CAS 下载本身仍可成功。
-  - `downloader.rs` 中 `snapshot_file_path_with_type` 的 filename / revision 实参顺序疑似传反（写入 WAL/alias 的路径与真实 cache 路径不一致），已记入 ROADMAP §12.3，未在本 ADR 中修复。
   - 20 仓库 `huggingface_hub>=0.24` 对拍未实测（沙箱无外网）。
 
 ## 验证
