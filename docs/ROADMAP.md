@@ -657,10 +657,19 @@ Refs: docs/ROADMAP.md#A1
 - **目标**：文档反映 as-built，不再有「计划态」主文档。
 - **改动点**：`docs/architecture.md` 重写、新增 `docs/adr/`、`SECURITY.md`、`CONTRIBUTING.md`；根目录规划稿归档至 `docs/history/`
 - **验收标准**：
-  - [ ] `architecture.md` 的每个模块描述可在代码中找到对应实现
-  - [ ] ADR 不少于 5 篇（存储布局、事务模型、鉴权、统计语义、HF 兼容）
-  - [ ] 根目录 Markdown 不超过 5 个（README/CHANGELOG/LICENSE/ROADMAP/CONTRIBUTING）
-  - [ ] `docs/proxy-api.md` 与代码默认值一致（含安全默认）
+  - [x] `architecture.md` 的每个模块描述可在代码中找到对应实现
+  - [x] ADR 不少于 5 篇（存储布局、事务模型、鉴权、统计语义、HF 兼容）
+  - [x] 根目录 Markdown 不超过 5 个（README/CHANGELOG/LICENSE/ROADMAP/CONTRIBUTING）
+  - [x] `docs/proxy-api.md` 与代码默认值一致（含安全默认）
+- **证据（2026-11-24）**：
+  - 源码锚点：自动检查 `docs/architecture.md` 中的 17 个 `crates/**/*.rs` 路径全部存在；§3 表格逐项列出 core 的 25 个真实模块（含 `store_lock` / `ingest` / `fsck` 等 B 阶段新增项），旧 Phase 0 规划稿归档为 `docs/history/ARCHITECTURE_PHASE0.md`
+  - ADR：`docs/adr/` 共 5 篇 — `0001-storage-layout.md`、`0002-transaction-and-recovery.md`、`0003-authentication-defaults.md`、`0004-statistics-semantics.md`、`0005-huggingface-compatibility.md`，每篇含背景、决策、后果、源码锚点与验证
+  - 根目录：4 个 Markdown（CHANGELOG / CONTRIBUTING / README / SECURITY）；`docs/ROADMAP.md` 保持唯一权威计划、不复制到根目录形成双源；17 篇旧规划稿移入 `docs/history/`，`.gitignore` 不再隐藏归档文件；README、python/README 中「hook import 自动激活」「cas 路径选择最旧 mtime」「refs 表」等旧口径均已更正
+  - 链接检查：22 个活动 Markdown（根目录 + `docs/` 非 history + `python/README.md`）相对链接 0 broken；`SECURITY.md` 的 ADR 相对路径已修正
+  - proxy-api：逐项对照 `core/config.rs`、`proxy/{config,auth,server}.rs` — 默认 `127.0.0.1:8234`、token 五级来源与双写、IP gate 先于 token、64 MiB range、`MODELD_HF_BASE`、错误码 400/401/403/404/405/206/200/502；修正 `HF_ENDPOINT` 必须带 `/v1/hf-proxy` 且默认需要 Bearer token、SDK 不自动循环下一窗口、proxy 无 `/metrics`、client 不校验 BLAKE3
+  - 质量门：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo test --workspace --locked` → **394 passed / 0 failed**；前端 `npm test` → 38 passed；Python `unittest discover` → 17 passed（本机无 pytest 模块，改跑等价的 unittest 套件）
+  - **本轮由全量测试抓出并修复的真缺陷**：Windows 下 HF 假缓存用 `/` 作相对符号链接目标会生成悬空链接（`test_create_cache_entry` 的 `file_path.exists()` 失败）→ `hf_cache.rs` 按主机改用 Windows 反斜杠 / Unix 正斜杠，并新增 Windows `canonicalize` 断言
+  - **未实测**：三平台 CI、ubuntu 首次 bench 基线、`cargo deny` RUSTSEC 公告库、NFS/SMB 网络卷（同 B8）
 - **估算**：4 人日 ｜ **依赖**：A3/A6/A7
 
 ### 阶段 B 出口 Gate
@@ -785,7 +794,7 @@ Refs: docs/ROADMAP.md#A1
 | B6 | 统计语义 | done | AI agent | 2026-11-23 | 2026-11-23 | `b70c7e6` |
 | B7 | 跨进程锁与并发安全 | done | AI agent | 2026-11-23 | 2026-11-23 | `c90c21e` |
 | B8 | 测试体系补齐 | done | AI agent | 2026-11-24 | 2026-11-24 | `cc93f1f` |
-| B9 | 文档重构 | todo | — | — | — | — |
+| B9 | 文档重构 | done | AI agent | 2026-11-24 | 2026-11-24 | `PENDING` |
 
 ### 阶段 C
 
@@ -807,6 +816,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-24 | B9 | 文档 as-built 重构：重写 `architecture.md` 并逐模块给出源码锚点；新增 5 篇 ADR、`SECURITY.md`、`CONTRIBUTING.md`；17 篇旧规划稿归档 `docs/history/`，根目录仅剩 4 个 Markdown；逐项对齐 proxy API 默认值；修正 Windows 相对符号链接分隔符导致的 HF 缓存悬空链接 | `PENDING` | `docs/architecture.md`、`docs/adr/*`、`SECURITY.md`、`CONTRIBUTING.md`、`docs/history/*`、`docs/proxy-api.md`、`docs/proxy-setup.md`、`README.md`、`python/README.md`、`.gitignore`、`core/hf_cache.rs` |
 | 2026-11-24 | B8 | 测试体系：28 个 HTTP e2e 覆盖全部路由（含 4xx 与 401 遍历、路由表编译期防漏）、5 中断点矩阵、4 类环境测试；core 覆盖率 79.43% 入库（llvm-tools 直连，绕开 403 的 crates.io）；scan/dedup 基准 + 20% 回归门禁 + CI job；顺带修跨卷 adopt 仍 exit 0 与前端 `toString` phase 命中原型链两个真缺陷 | `cc93f1f` | `webui/tests/api_e2e.rs`、`core/tests/interruption_matrix.rs`、`cli/tests/environment.rs`、`core/benches/scan_dedup.rs`、`scripts/{coverage,bench_gate}.py`、`coverage/*`、`bench/*`、`.github/workflows/ci.yml`、`cli/commands/scan.rs`、`ui/pages/dashboard-progress.js` |
 | 2026-11-23 | B7 | 跨进程锁：`store_lock.rs` 从 O_EXCL 标记文件（崩溃后靠超时猜、无法区分活锁与残留）改为 `flock`/`LockFileEx` 内核独占锁，进程消失即释放；锁文件保留不删以避开 unlink 竞态；`current_holder()` 先试锁再读记录，残留记录不再误报 busy。CLI `scan/gc/dedup/unlink/repair` 全部接入，新增 `--wait <秒>`（默认 30）与 `util::lock_store()` 统一提示；WebUI scan/quarantine 同步加锁。新增 10 进程真实并发测试；顺带修 `store_crash_safe` 每次落一个空 staging 目录的泄漏 | `c90c21e` | `core/store_lock.rs`、`core/cas.rs`、`core/i18n.rs`、`cli/{cli,main,util}.rs`、`cli/commands/{scan,gc,dedup,repair}.rs`、`cli/tests/concurrency.rs`、`cli/Cargo.toml`、`webui/api/{scan,quarantine}.rs` |
 | 2026-11-23 | B6 | 统计语义：`storage_stats()` 单条聚合区分 logical/physical，`reference_only` 不再算副本；`calculate_savings` 只计 `original`；WebUI 改用 `storage_stats`+`frontend_stats` 消除 N+1；`stats --json`；顺带修 `links::is_same_volume` 对相对路径恒判「不同卷」导致 dedup 静默空转、以及 `--auto` 仍弹确认；新增 9 个测试 | `b70c7e6` | `core/db.rs`、`core/dedup.rs`、`core/platform.rs`、`core/links.rs`、`core/i18n.rs`、`cli/commands/{query,dedup}.rs`、`cli/{cli,main}.rs`、`webui/api/stats.rs`、`webui/ui/*` |
@@ -829,9 +839,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 8 | 89% |
+| B 架构收敛 | 9 | 9 | 100% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **16** | **67%** |
+| **合计** | **24** | **17** | **71%** |
 
 ---
 
@@ -868,7 +878,7 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|---|
 | 2026-10-24 | 审核 | `.gitignore` 双重编码乱码 + `node_modules` 反忽略 | A8 | done（A8 已重写 `.gitignore` 并 `git rm --cached`） |
 | 2026-10-24 | 审核 | mDNS 仅发现无广播 | C7 | open |
-| 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | open |
+| 2026-10-24 | 审核 | 根目录 20+ 篇规划稿未归档 | B9 | done（B9 将 17 篇移入 `docs/history/`，根目录仅剩 4 个 Markdown；旧 architecture 归档为 `ARCHITECTURE_PHASE0.md`） |
 | 2026-10-24 | A6 | `proxy token-rotate --reload`（SIGHUP 热重载）未实现，轮换后仍需重启进程 | C1 | open |
 | 2026-10-24 | A5 | `scan` 的退出码不反映 per-file 错误（跨卷 `--adopt` 会打印错误但仍 exit 0），脚本无法据此判断 | B2 | done（B8 环境测试复现后修复：`scan_command` 有 per-file 失败即非零退出） |
 | 2026-10-24 | A5 | 仅索引（Index）的模型没有 CAS 对象，`proxy` 对外提供该 blob 时会 404；`status` 也未标注「仅索引」 | A6 | open |
@@ -878,7 +888,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | 开发 A2 | 多根扫描时每个根都会把 `files_scanned` 重置为 0，进度条会倒退（已修并行回调乱序，多根问题未改） | B3 | open |
 | 2026-10-24 | 开发 A2 | `handle_hf_proxy` 每次缓存未命中都新建 SQLite 连接，未复用连接池 | B7 | open |
 | 2026-10-24 | 开发 A3 | `modeld serve --host 0.0.0.0` 未接入 `--allow-lan`，与 `modeld-webui` 的策略不一致（目前靠强制生成 token 兜底） | A4 | done（A4 已加 `--allow-lan`） |
-| 2026-10-24 | 开发 A3 | CSRF 守卫只在请求带 `Origin` 时生效，非浏览器客户端可绕过（设计如此，但需在文档中写清边界） | B9 | open |
+| 2026-10-24 | 开发 A3 | CSRF 守卫只在请求带 `Origin` 时生效，非浏览器客户端可绕过（设计如此，但需在文档中写清边界） | B9 | done（B9 在 `SECURITY.md`、`README.md`、`docs/proxy-api.md` 中明确「无 Origin 的 curl/CLI 不在 CSRF 守卫范围」） |
 | 2026-10-24 | 开发 A3 | `/metrics` 仍无鉴权，任何能访问端口的人可读取计数器（A7 只修了「计数器不自增」，鉴权未动） | C4 | open |
 | 2026-10-24 | A7 | 代理侧 `cache_hits`/`cache_misses`/`bytes_served` 仍未接线：`modeld-proxy` 没有 metrics 模块，也没有 `/metrics` 端点 | C2 | open |
 | 2026-10-24 | A7 | `stats` 的 `frontends` 按「每个前端各算一次模型大小」，同一模型被多个前端引用时合计会超过 `total_size_bytes`（口径问题，非 bug） | B6 | done（B6 改为 `frontend_stats()`，每个前端内按模型去重） |
@@ -901,12 +911,18 @@ Refs: docs/ROADMAP.md#A1
 | 2026-11-23 | B7 | 锁粒度是整个 store：`scan` 持锁期间 `gc`/`dedup` 全部排队，10 万模型级大库的扫描窗口会把其他变更操作卡到 `--wait` 超时。只读命令（`stats`/`verify`/`list`）刻意不加锁，但写操作之间可再细分（如按 CAS 分片或读-写锁） | C6 | open |
 | 2026-11-23 | B7 | WebUI 侧没有「排队中」状态：另一个标签页持锁时，前端只看到请求长时间挂起直到超时，而 CLI 已有 `lock.waiting` 提示 | C5 | open |
 | 2026-11-23 | B7 | `flock`/`LockFileEx` 在 NFS/SMB 网络卷上的语义（锁是否跨主机生效、失败是否报错）未实测；本机无网络卷，属 B8 环境矩阵范围 | B8 | open |
-| 2026-11-23 | B7 | `--wait` 默认 30 s 对交互式 CLI 合理，脚本/CI 里更希望快速失败；需在文档里明确「脚本用 `--wait 0`」，并把退出码语义写进 `proxy-api.md` 之外的 CLI 文档 | B9 | open |
+| 2026-11-23 | B7 | `--wait` 默认 30 s 对交互式 CLI 合理，脚本/CI 里更希望快速失败；需在文档里明确「脚本用 `--wait 0`」，并把退出码语义写进 `proxy-api.md` 之外的 CLI 文档 | B9 | done（B9 在 `docs/architecture.md` §4 写明 `--wait 0` 与 0/1/2/3 退出码现状，并明确 3 已文档化但未接线） |
 | 2026-11-23 | B7 | `StoreLock` 的持有者记录是「尽力而为」的：`acquire` 里 `let _ = write_holder(...)`，写失败仍算拿到锁（正确，锁的真值在内核）。但此时文件里留的是**上一轮**的记录，后续进程的 busy 提示会把陈旧的 pid/op 当成当前持有者。需要的话改成「写失败则写入最小占位记录」 | C2 | open |
 | 2026-11-24 | B8 | 目标写的是「WebUI 不低于 60%」，本轮只做到「每个路由有 e2e 覆盖」，尚无 JS 行覆盖率工具与数字 | C5 | open |
 | 2026-11-24 | B8 | 基准基线按平台隔离；`bench/baseline.json` 当前只有 `windows-x86_64`，CI 的 ubuntu runner 首次运行会 SKIP 并提示 `--record`，之后门禁才真正生效 | C3 | open |
 | 2026-11-24 | B8 | 本机 instrumented 编译（`RUSTFLAGS=-C instrument-coverage`）首次会卡在 rustc 低 CPU 空转，终止重试即过；`cargo test` 偶发 LNK1104（杀软占用 exe）重跑即过。CI 用固定环境不受影响 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-24 | B8 | 中断点矩阵、环境矩阵均只在本机 Windows 跑过；三平台 CI 与 NFS/SMB 网络卷仍未覆盖 | C3 | open |
+| 2026-11-24 | B9 | Windows 下 HF 假缓存用 `/` 作相对符号链接目标会创建悬空链接（`test_create_cache_entry` 失败），`huggingface_hub` 无法解析 blob/snapshot | B9 | done（B9 质量门抓出；`hf_cache.rs` 按主机切换分隔符，新增 Windows canonicalize 断言） |
+| 2026-11-24 | B9 | `downloader.rs:413/446` 调 `snapshot_file_path_with_type(repo_id, filename, rev, …)`，而签名是 `(repo_id, revision, filename, …)`；写入 WAL/alias 的 snapshot 路径可能错位，运行时后果未实测 | C2 | open |
+| 2026-11-24 | B9 | `modeld-client` 只校验传输长度，不重算 BLAKE3；端到端完整性需要调用方自行对拍 | C4 | open |
+| 2026-11-24 | B9 | `[proxy.network]` 的 IPv6 / hostname 退化为 `starts_with` 子串匹配，不能作为精确安全边界 | C4 | open |
+| 2026-11-24 | B9 | Python hook 的 `snapshot_download` 包装函数已定义但未启用；`modeld hook install` / `MODELD_NO_AUTO_HOOK` 只在旧文档中出现 | C7 | open |
+| 2026-11-24 | B9 | `AppState.rate_limit_per_min` 字段存在但 WebUI 路由未挂限流中间件 | C5 | open |
 
 ---
 

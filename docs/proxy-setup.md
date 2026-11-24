@@ -48,6 +48,8 @@ denied_ips = []
 
 > `bind_address = "0.0.0.0"` in a config file is subject to the same rule as the
 > CLI flag: start with `--allow-lan`, otherwise the server refuses to start.
+> Also note that `--bind` has a CLI default of `127.0.0.1` and overrides the
+> config value; pass `--bind 0.0.0.0` explicitly when using that config.
 
 ### Editing the config
 
@@ -73,10 +75,13 @@ picks up the new token and rejects the old one.
 
 See [proxy-api.md](./proxy-api.md) for the full HTTP API.
 
-## 2. Use it as a HuggingFace mirror (zero client changes)
+## 2. Use it as a HuggingFace mirror
 
-On each client machine, point `HF_ENDPOINT` at the proxy so that
-diffusers / transformers / ComfyUI / Forge / A1111 all download through it:
+On each client machine, point `HF_ENDPOINT` at the proxy's `/v1/hf-proxy` route
+so that diffusers / transformers / ComfyUI / Forge / A1111 all download through
+it. No client code changes are needed, but the proxy requires a Bearer token on
+every route except `/health`, so the client must send the modeld token (or use
+`--allow-anonymous` on a loopback bind):
 
 ```bash
 # Linux/macOS

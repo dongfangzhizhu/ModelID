@@ -76,25 +76,10 @@ pypirc
 *.key
 
 # ============================================================
-# Local development planning docs (internal, not for publishing)
-# These live in the repo root during development but should not
-# clutter the public-facing repository. Move them under docs/dev/
-# before the first public release.
+# Historical planning docs were archived to docs/history/ in B9.
+# Keep the repository root limited to README/CHANGELOG/LICENSE/
+# ROADMAP/CONTRIBUTING/SECURITY; do not re-add phase plans here.
 # ============================================================
-DEVELOPMENT_PLAN.md
-PHASE1_PLAN.md
-PHASE1_SUMMARY.md
-PHASE2_PLAN.md
-PHASE3_PLAN.md
-PHASE4_PLAN.md
-PHASE5_PLAN.md
-PHASE6_PLAN.md
-WebUIPlan.md
-modeld-project-plan.md
-PUBLISH_SUMMARY.md
-QUICK_PUBLISH.md
-RELEASE_WORKFLOW_COMPLETE.md
-BUILD_RELEASE_GUIDE.md
 .gitignore.publish
 EXAMPLES.md
 

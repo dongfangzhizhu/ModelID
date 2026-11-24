@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **As-built documentation set** — `docs/architecture.md` was rewritten from
+  the implemented code: every module table row points to a real source file,
+  and the Phase 0 planning draft is archived at
+  `docs/history/ARCHITECTURE_PHASE0.md`. Five ADRs now record storage layout,
+  transaction/recovery, authentication defaults, statistics semantics and HF
+  compatibility; `SECURITY.md` and `CONTRIBUTING.md` define the support and
+  contribution contract. Seventeen root planning drafts moved to
+  `docs/history/`, leaving four root Markdown files. (ROADMAP B9)
 - **HTTP-level e2e tests for every API route** — `tests/api_e2e.rs` drives the
   real router (with auth/CSRF/CORS/middleware in the path) for all 18 route
   declarations, covering a 4xx from each handler that validates input and a
@@ -51,8 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   content, what the store actually owns), bytes already saved by links, and
   bytes still wasted by independent copies. `duplicate_groups` keeps its old
   meaning (2+ paths) so existing dashboards do not shift; the new
-  `waste_groups` / `multi_path_groups` distinguishes "listed by `dupes`" from
-  "a dedup would still reclaim bytes". (ROADMAP B6)
+  `multi_path_groups` counts groups reachable through 2+ alias paths (what
+  `dupes` lists); `duplicate_groups` counts groups with 2+ independent `original`
+  copies (what a dedup can still reclaim). There is no `waste_groups` field.
+  Wording corrected in B9 to match `StorageStats`. (ROADMAP B6)
 
 ### Changed
 
@@ -79,6 +89,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Windows HF cache symlinks were dangling** — the fake HF cache wrote
+  relative symlink targets with `/` separators. Windows creates those links
+  successfully but cannot resolve them, so `snapshots/<sha>/<file>` and
+  `blobs/<sha>` were dead links and `huggingface_hub` could not hit the cache.
+  Targets now use the host separator (`\` on Windows, `/` on Unix), with a
+  Windows `canonicalize` assertion in `test_create_cache_entry`. Found by the
+  full regression run during B9. (ROADMAP B9)
 - **A `toString` phase could break the dashboard** — `resolvePhaseKey` looked up
   phases in a plain object with `PHASE_KEYS[phase] || fallback`, so the
   inherited `Object.prototype.toString` (and `constructor`) came back as a

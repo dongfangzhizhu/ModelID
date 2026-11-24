@@ -208,6 +208,22 @@ impl HfCache {
     /// B5: symlink failure is a hard error.  Falling back to a copy silently
     /// would break `huggingface_hub`'s cache identity (it resolves blobs by
     /// inode/link, and a copy would never be deduplicated).
+    /// Normalise a relative symlink target to the host separator.
+    ///
+    /// Windows `CreateSymbolicLinkW` does not resolve forward-slash relative
+    /// targets when the link is dereferenced; they create dangling links even
+    /// though `read_link()` returns the expected text. Unix accepts only `/`.
+    fn relative_target_for_host(target: &str) -> String {
+        #[cfg(windows)]
+        {
+            target.replace('/', "\\")
+        }
+        #[cfg(not(windows))]
+        {
+            target.to_string()
+        }
+    }
+
     fn create_relative_symlink(link: &Path, relative_target: &str) -> Result<()> {
         #[cfg(unix)]
         std::os::unix::fs::symlink(relative_target, link).with_context(|| {
@@ -314,7 +330,11 @@ impl HfCache {
                 .strip_prefix(self.root.parent().context("store root unavailable")?)
                 .context("CAS path is not inside the store")?;
             let up = "../../../../"; // blobs → model-dir → hub → hf_cache → store
-            let target = format!("{}{}", up, cas_rel.to_string_lossy().replace('\\', "/"));
+            let target = Self::relative_target_for_host(&format!(
+                "{}{}",
+                up,
+                cas_rel.to_string_lossy().replace('\\', "/")
+            ));
             if blob_path.exists() {
                 fs::remove_file(&blob_path)?;
             }
@@ -332,7 +352,8 @@ impl HfCache {
         {
             let depth = 2 + filename.matches('/').count(); // rev + snapshots, plus subdirs
             let relative_prefix = "../".repeat(depth);
-            let relative_blob = format!("{}blobs/{}", relative_prefix, sha256);
+            let relative_blob =
+                Self::relative_target_for_host(&format!("{}blobs/{}", relative_prefix, sha256));
             if file_path_in_snapshot.exists() {
                 fs::remove_file(&file_path_in_snapshot)?;
             }
@@ -373,7 +394,10 @@ impl HfCache {
             let cas_rel = cas_path
                 .strip_prefix(self.root.parent().context("store root unavailable")?)
                 .context("CAS path is not inside the store")?;
-            let target = format!("../../../../{}", cas_rel.to_string_lossy().replace('\\', "/"));
+            let target = Self::relative_target_for_host(&format!(
+                "../../../../{}",
+                cas_rel.to_string_lossy().replace('\\', "/")
+            ));
             Self::create_relative_symlink(&blob_path, &target)?;
         }
         Ok(blob_path)
@@ -558,6 +582,17 @@ mod tests {
 
         let blob_path = cache.blob_path("stabilityai/sdxl-base", &sha256);
         assert!(blob_path.exists(), "Blob should exist");
+
+        // B9 regression: on Windows a forward-slash relative symlink target
+        // is created but dangles. Both links must resolve to the CAS object.
+        #[cfg(windows)]
+        {
+            let snap_canon = std::fs::canonicalize(&file_path)
+                .expect("snapshot symlink must resolve on Windows");
+            let cas_canon =
+                std::fs::canonicalize(cas.path_for_hash(&hash)).expect("CAS object must exist");
+            assert_eq!(snap_canon, cas_canon, "snapshot must resolve to CAS object");
+        }
 
         // B5: snapshot and blob links must be relative symlinks.
         #[cfg(unix)]

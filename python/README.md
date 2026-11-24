@@ -35,10 +35,11 @@ pip install modeld-hook
 export HF_HOME="$(modeld hf-setup --print-path)"
 ```
 
-### Method 2 — Explicit import
+### Method 2 — Explicit activation
 
 ```python
-import modeld_hook          # auto-activates on import
+import modeld_hook
+modeld_hook.activate()      # import itself has no side effect
 from diffusers import DiffusionPipeline
 # Downloads are now routed through modeld CAS
 ```
@@ -54,7 +55,9 @@ if modeld_hook.activate(verbose=True):
 modeld_hook.deactivate()
 ```
 
-To opt out of auto-activation on import, set `MODELD_NO_AUTO_HOOK=1`.
+Importing `modeld_hook` never activates it implicitly. To opt in from the
+environment, set `MODELD_AUTO_HOOK=1` (there is no `MODELD_NO_AUTO_HOOK`
+switch).
 
 ## API
 
@@ -64,6 +67,16 @@ To opt out of auto-activation on import, set `MODELD_NO_AUTO_HOOK=1`.
 | `deactivate()` | Restore original `huggingface_hub` functions |
 | `is_active()` | Whether the hook is currently active |
 | `get_hf_home()` | The HF cache path modeld manages, or `None` |
+
+## Limitations
+
+- The `modeld` binary must be available on `PATH`; otherwise the hook falls
+  back to the original `huggingface_hub` functions.
+- Calls that pass `cache_dir`, `local_dir`, or `force_download` are delegated
+  directly to the original library.
+- `snapshot_download` is not intercepted; only `hf_hub_download` is patched.
+- On Windows, creating the fake cache symlinks needs Developer Mode or admin
+  privileges; without it the CAS download still works but HF cache hits do not.
 
 ## License
 

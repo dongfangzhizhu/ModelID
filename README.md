@@ -10,11 +10,11 @@ modeld is the "containerd + git-lfs + nix store" for AI models. It provides:
 
 - **Deduplication**: Automatic space savings via BLAKE3-based CAS — one copy of each unique model, regardless of how many frontends reference it
 - **Content Addressing**: BLAKE3-addressed immutable storage with crash-safe two-phase commit
-- **Transparent Integration**: Works with ComfyUI, Forge, A1111, HuggingFace ecosystem (`diffusers`, `transformers`) — no config changes required
+- **Transparent Integration**: Works with ComfyUI, Forge, A1111 and HuggingFace frameworks (`diffusers`, `transformers`); frontends need no config change, HF mirroring requires `HF_HOME` or `HF_ENDPOINT`
 - **Resumable Downloads**: HTTP Range-based download resumption with WAL-backed crash recovery
 - **Workflow Awareness**: Parse ComfyUI workflow JSON to build a model reference graph and enable safe GC
 - **Local Proxy**: LAN-wide HuggingFace mirror — download once, serve at full LAN bandwidth
-- **Cross-Platform**: Windows, Linux, macOS support (with Windows hardlink/junction fallback strategy)
+- **Cross-Platform**: Windows, Linux, macOS support (hardlink → symlink → reference-only fallback)
 
 ## Quick Start
 
@@ -66,8 +66,9 @@ modeld dedup --auto
 ```
 
 Dedup uses a crash-safe two-phase commit (WAL-backed) and chooses a canonical
-path per content group (CAS > oldest mtime > shortest path). Replaced files go
-to a 30-day quarantine that can be inspected and restored.
+path per content group (pinned → already in CAS → protected directory → newest
+mtime → shortest path → lexicographic). Replaced files go to a 30-day quarantine
+that can be inspected and restored.
 
 ## Scan modes
 
@@ -124,9 +125,10 @@ modeld hf-status
 ```
 
 For automatic interception from `diffusers` / `transformers` / ComfyUI Manager,
-install the Python hook (`pip install modeld-hook`) and `import modeld_hook`.
-The hook auto-activates on import and silently falls back to the original HF
-download if `modeld` CLI is unavailable.
+either point `HF_HOME` at the modeld cache or install the Python hook
+(`pip install modeld-hook`). Importing the hook has no side effect: call
+`modeld_hook.activate()`, or set `MODELD_AUTO_HOOK=1`. It falls back to the
+original HF download if the `modeld` CLI is unavailable.
 
 See [python/README.md](python/README.md) for details.
 
@@ -151,7 +153,7 @@ modeld gc --cleanup-quarantine   # also permanently delete expired entries
 
 GC protection layers:
 1. **Hard protected** — any workflow reference → never GC'd
-2. **Soft protected** — alias exists (frontend virtual directory link) → warn only
+2. **Soft protected** — alias exists (hardlink / symlink / reference-only) → warn only
 3. **Quarantined** — ref count = 0, alias = 0 → 30-day grace period
 4. **Deleted** — quarantine TTL expired
 
@@ -184,9 +186,10 @@ modeld proxy status --url http://192.168.1.5:8234
 modeld proxy status --url http://192.168.1.5:8234 --token <secret>
 ```
 
-Use as a transparent HuggingFace mirror — point `HF_ENDPOINT` at the proxy
-and every HF-based framework (diffusers / transformers / ComfyUI / Forge / A1111)
-downloads through modeld with no code changes:
+Use as a HuggingFace mirror — point `HF_ENDPOINT` at the proxy's `/v1/hf-proxy`
+route. HF frameworks need no code changes, but the proxy requires a Bearer token
+on every route except `/health`, so the client must send the modeld token (or
+use `--allow-anonymous` on a loopback bind):
 
 ```bash
 export HF_ENDPOINT="http://192.168.1.5:8234/v1/hf-proxy"
@@ -213,8 +216,9 @@ modeld-webui --store .modeld --host 0.0.0.0 --port 9000 --allow-lan \
 
 The UI prompts for the token on the first `401` and stores it in
 `localStorage`; set `MODELD_AUTH_TOKEN` instead of `--token` if you prefer the
-environment. State-changing requests send `X-Modeld-CSRF: 1` and are rejected
-unless they come from an allowed origin. The WebSocket passes the same token as
+environment. Browser-originated state-changing requests send `X-Modeld-CSRF: 1`
+and are rejected unless they come from an allowed origin; requests without an
+`Origin` header (curl, CLI) are outside the CSRF guard by design. The WebSocket passes the same token as
 `/ws?token=…` (browsers cannot set handshake headers) and reconnects with
 exponential backoff. The Web UI reads `<store>/modeld.db` — the same database
 `modeld scan` writes.
@@ -255,7 +259,10 @@ $MODELD_STORE/          (default: .modeld/)
 │   ├── downloads/       (in-progress .part files, resumable)
 │   └── cas_staging/     (two-phase commit staging)
 ├── quarantine/          (deferred deletion, 30-day TTL)
-└── modeld.db            (SQLite: models, aliases, refs, downloads)
+├── audit.log            (append-only NDJSON)
+├── backups/             (pre-migration VACUUM INTO copies)
+├── modeld.toml          (configuration and tokens)
+└── modeld.db            (SQLite: models, aliases, workflow_refs, hf_mappings, …)
 ```
 
 ## Building
@@ -281,9 +288,12 @@ cd python && python -m pytest tests/ -v
 
 - [Proxy setup guide](docs/proxy-setup.md)
 - [Proxy HTTP API reference](docs/proxy-api.md)
-- [Architecture overview](docs/architecture.md)
+- [Architecture overview (as-built)](docs/architecture.md)
+- [Architecture decision records](docs/adr/)
 - [Development roadmap](docs/ROADMAP.md) — 开发阶段、验收标准与提交规范（后续开发的唯一权威计划）
-- [RFCs](docs/rfcs/) — storage layout, hash strategy, ref model, dedup, Windows compat, virtual FS, HF interception
+- [Security policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [RFCs](docs/rfcs/) — historical design documents; virtual FS and other unimplemented ideas are described in [docs/history/](docs/history/)
 - [Python hook](python/README.md)
 
 ## License
