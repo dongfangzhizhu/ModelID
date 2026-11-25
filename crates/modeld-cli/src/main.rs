@@ -14,6 +14,7 @@ pub(crate) use util::*;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
+use commands::audit::audit_command;
 use commands::config::config_command;
 use commands::daemon::daemon_command;
 use commands::db::db_command;
@@ -90,6 +91,21 @@ fn main() -> Result<()> {
                     mode: ingest_mode,
                     debounce_ms,
                     wait_secs: wait,
+                },
+            )?
+        }
+        Commands::Audit { since, until, op, actor, outcome, resource_contains, limit, json } => {
+            audit_command(
+                &resolve_store(store.clone()),
+                commands::audit::AuditOptions {
+                    since,
+                    until,
+                    op,
+                    actor,
+                    outcome,
+                    resource_contains,
+                    limit,
+                    json,
                 },
             )?
         }

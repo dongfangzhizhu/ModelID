@@ -114,6 +114,11 @@ pub enum TagAction {
     },
 }
 
+/// C2: 本地元数据变更统一记一条审计记录，确保「所有变更路径」可追溯。
+fn audit_meta(store_path: &std::path::Path, op: &str, resource: &str) {
+    modeld_core::audit::record(store_path, modeld_core::AuditEntry::success(op, resource));
+}
+
 pub fn tag_command(action: TagAction, store: Option<PathBuf>) -> Result<()> {
     match action {
         TagAction::Add { hash, tag } => {
@@ -122,6 +127,7 @@ pub fn tag_command(action: TagAction, store: Option<PathBuf>) -> Result<()> {
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             add_tag(&mut db, &h, &tag)?;
+            audit_meta(&store_path, "tag_add", &format!("{hash}:{tag}"));
             println!("✓ Added tag '{}' to {}", tag, &hash[..16]);
         }
         TagAction::Remove { hash, tag } => {
@@ -130,6 +136,7 @@ pub fn tag_command(action: TagAction, store: Option<PathBuf>) -> Result<()> {
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             remove_tag(&mut db, &h, &tag)?;
+            audit_meta(&store_path, "tag_remove", &format!("{hash}:{tag}"));
             println!("✓ Removed tag '{}' from {}", tag, &hash[..16]);
         }
         TagAction::List { json } => {
@@ -161,6 +168,7 @@ pub fn note_command(action: NoteAction, store: Option<PathBuf>) -> Result<()> {
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             set_note(&mut db, &h, &text)?;
+            audit_meta(&store_path, "note_set", &hash);
             println!("✓ Note set for {}", &hash[..16]);
         }
     }
@@ -177,6 +185,7 @@ pub fn pin_command(action: PinAction, store: Option<PathBuf>) -> Result<()> {
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             pin_model(&mut db, &h)?;
+            audit_meta(&store_path, "pin_add", &hash);
             println!("✓ Pinned {}", &hash[..16]);
         }
         PinAction::Remove { hash } => {
@@ -185,6 +194,7 @@ pub fn pin_command(action: PinAction, store: Option<PathBuf>) -> Result<()> {
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             unpin_model(&mut db, &h)?;
+            audit_meta(&store_path, "pin_remove", &hash);
             println!("✓ Unpinned {}", &hash[..16]);
         }
         PinAction::List { json } => {
@@ -215,6 +225,7 @@ pub fn favorite_command(action: FavoriteAction, store: Option<PathBuf>) -> Resul
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             favorite_model(&mut db, &h)?;
+            audit_meta(&store_path, "favorite_add", &hash);
             println!("✓ Favorited {}", &hash[..16]);
         }
         FavoriteAction::Remove { hash } => {
@@ -223,6 +234,7 @@ pub fn favorite_command(action: FavoriteAction, store: Option<PathBuf>) -> Resul
             let mut db = Database::open(&db_path)?;
             let h = Blake3Hash::from_hex(&hash)?;
             unfavorite_model(&mut db, &h)?;
+            audit_meta(&store_path, "favorite_remove", &hash);
             println!("✓ Unfavorited {}", &hash[..16]);
         }
     }

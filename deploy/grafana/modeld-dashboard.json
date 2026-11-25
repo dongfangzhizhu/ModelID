@@ -1,0 +1,84 @@
+{
+  "uid": "modeld-overview",
+  "title": "modeld — 可观测性总览 (C2)",
+  "tags": ["modeld", "storage"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "op",
+        "type": "custom",
+        "label": "变更操作",
+        "includeAll": true,
+        "options": [
+          { "text": "unlink", "value": "unlink" },
+          { "text": "dedup", "value": "dedup" },
+          { "text": "gc", "value": "gc" },
+          { "text": "config_change", "value": "config_change" },
+          { "text": "quarantine_restore", "value": "quarantine_restore" },
+          { "text": "quarantine_delete", "value": "quarantine_delete" }
+        ],
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "HTTP 请求速率",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "rate(modeld_requests_total[5m])", "legendFormat": "requests/s", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "缓存命中率",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "rate(modeld_cache_hits_total[5m])", "legendFormat": "hits/s", "refId": "A" },
+        { "expr": "rate(modeld_cache_misses_total[5m])", "legendFormat": "misses/s", "refId": "B" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "错误（按状态码）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        { "expr": "sum by (status) (rate(modeld_errors_total[5m]))", "legendFormat": "{{status}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "下载吞吐与在途数",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "rate(modeld_bytes_served_total[5m])", "legendFormat": "bytes/s", "refId": "A" },
+        { "expr": "modeld_active_downloads", "legendFormat": "active", "refId": "B" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "变更操作计数（按 op / outcome）",
+      "description": "数据来自 /metrics 中由 audit.log 派生的 modeld_audit_entries_total。要回答「上周谁删了什么」，用 CLI: modeld audit --since 7d --op unlink --json（每条含 actor_ip 与资源）。",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "sum by (op, outcome) (increase(modeld_audit_entries_total{op=~\"$op\"}[1h]))",
+          "legendFormat": "{{op}} / {{outcome}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

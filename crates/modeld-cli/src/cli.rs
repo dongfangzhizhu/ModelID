@@ -87,6 +87,33 @@ pub enum Commands {
         #[arg(long, value_name = "SECS", default_value_t = 30)]
         wait: u64,
     },
+    /// Query the audit log (C2) — e.g. `audit --since 7d --op unlink --json`
+    Audit {
+        /// Start of range: ISO 8601 or relative (7d / 2h / 30m)
+        #[arg(long)]
+        since: Option<String>,
+        /// End of range (exclusive), same formats as --since
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter by operation name (case-insensitive)
+        #[arg(long)]
+        op: Option<String>,
+        /// Filter by actor IP (or "local")
+        #[arg(long)]
+        actor: Option<String>,
+        /// Filter by outcome: success | failure
+        #[arg(long)]
+        outcome: Option<String>,
+        /// Filter by substring in the resource field
+        #[arg(long)]
+        resource_contains: Option<String>,
+        /// Keep only the newest N matches
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show store statistics
     Status {},
     /// Show store statistics and duplicate-space summary

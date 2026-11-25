@@ -526,12 +526,12 @@ fn concrete(path: &str) -> String {
 #[tokio::test]
 async fn route_inventory_is_not_empty_and_matches_the_router() {
     let routes = registered_routes();
-    // 18 `.route(…)` declarations today (19 including `/settings` twice, once
-    // per method). The floor exists so a broken parser cannot make the sweep
-    // below pass by finding nothing at all.
+    // 19 `.route(…)` declarations today (20 including `/settings` twice, once
+    // per method); C2 added `/audit`. The floor exists so a broken parser
+    // cannot make the sweep below pass by finding nothing at all.
     assert!(
-        routes.len() >= 18,
-        "expected at least 18 route declarations, parsed {}: {routes:?}",
+        routes.len() >= 19,
+        "expected at least 19 route declarations, parsed {}: {routes:?}",
         routes.len()
     );
     assert_eq!(
@@ -614,4 +614,63 @@ async fn a_valid_token_opens_the_api() {
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+}
+
+// ── C2: audit query + audit-derived metrics ────────────────────────────────
+
+/// 审计查询返回写入的删除记录；`--op`/`since` 过滤生效。
+#[tokio::test]
+async fn audit_query_returns_deletion_records_with_filters() {
+    let h = Harness::new();
+    let store = h.dir.path();
+    modeld_core::audit::record(
+        store,
+        modeld_core::AuditEntry {
+            timestamp: chrono::Utc::now() - chrono::Duration::days(2),
+            actor_ip: "192.168.1.5".to_string(),
+            ..modeld_core::AuditEntry::success("unlink", "/models/recent.safetensors")
+        },
+    );
+    modeld_core::audit::record(
+        store,
+        modeld_core::AuditEntry {
+            timestamp: chrono::Utc::now() - chrono::Duration::days(9),
+            ..modeld_core::AuditEntry::success("unlink", "/models/old.safetensors")
+        },
+    );
+    modeld_core::audit::record(store, modeld_core::AuditEntry::success("dedup", "hash_abc"));
+
+    let (status, body) = h.get("/api/v1/audit?op=unlink&since=7d").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["count"], 1, "{body}");
+    assert_eq!(v["entries"][0]["actor_ip"], "192.168.1.5", "{body}");
+    assert_eq!(v["entries"][0]["resource"], "/models/recent.safetensors", "{body}");
+
+    // actor 过滤
+    let (status, body) = h.get("/api/v1/audit?actor=192.168.1.5").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["count"], 1, "{body}");
+
+    // 非法时间参数 → 400
+    let (status, _) = h.get("/api/v1/audit?since=yesterday").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// /metrics 暴露由审计日志派生的操作计数器。
+#[tokio::test]
+async fn metrics_expose_audit_derived_counters() {
+    let h = Harness::new();
+    modeld_core::audit::record(
+        h.dir.path(),
+        modeld_core::AuditEntry::success("unlink", "/models/a.safetensors"),
+    );
+    let (status, body) = h.get("/metrics").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("modeld_requests_total"), "{body}");
+    assert!(
+        body.contains("modeld_audit_entries_total{op=\"unlink\",outcome=\"success\"} 1"),
+        "{body}"
+    );
 }

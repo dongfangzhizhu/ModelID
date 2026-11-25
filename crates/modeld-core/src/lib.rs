@@ -37,7 +37,7 @@ pub mod tx;
 pub mod unlink;
 pub mod workflow;
 
-pub use audit::{AuditEntry, AuditLogger};
+pub use audit::{AuditEntry, AuditLogger, AuditQuery};
 pub use cas::CasStore;
 pub use config::{
     load_config, save_config, AuthConfig, DedupConfig, GcConfig, ModeldConfig, ServeConfig,

@@ -46,7 +46,8 @@ fn help_lists_every_command() {
     let text = stdout(&out);
     for command in [
         "scan", "dedup", "gc", "status", "stats", "list", "info", "verify", "serve", "doctor",
-        "store", "config", "hf", "tx", "db", "tag", "note", "pin", "favorite", "refs",
+        "store", "config", "hf", "tx", "db", "tag", "note", "pin", "favorite", "refs", "daemon",
+        "audit",
     ] {
         assert!(text.contains(command), "help is missing `{command}`:\n{text}");
     }

@@ -729,6 +729,22 @@ Refs: docs/ROADMAP.md#A1
 
 - **产物**：Prometheus 指标全覆盖、Grafana 面板 JSON、审计日志查询命令
 - **验收**：所有变更路径均产生审计记录；面板可回答「上周谁删了什么」
+- **状态**：done
+- **实现**：
+  - `crates/modeld-core/src/audit.rs`：`AuditQuery`（since/until/op/actor/outcome/resource_contains/limit）过滤查询、`counts_by_op()` 按 (op,outcome) 计数；`lib.rs` 导出 `AuditQuery`。
+  - `crates/modeld-cli/src/commands/audit.rs`：`modeld audit --since 7d --op unlink --json`，`7d/2h/30m` 相对时间与 ISO 8601 均支持。
+  - `crates/modeld-webui/src/api/audit.rs` + `api/mod.rs`：`GET /api/v1/audit` 同款过滤，带鉴权（被 B8 的全路由 401 遍历自动覆盖）。
+  - `crates/modeld-webui/src/metrics.rs::render_audit_metrics` + `server.rs::metrics_handler`：`/metrics` 派生 `modeld_audit_entries_total{op,outcome}`，指标与审计日志同源、不会漂移；审计读失败降级为 HTTP-only 指标。
+  - `deploy/grafana/modeld-dashboard.json`：请求速率/缓存命中/错误/下载吞吐/变更操作五面板，时间窗默认 7 天。
+  - 变更路径审计：`config_change`（CLI+WebUI）、`dedup`/`gc`/`unlink`/`quarantine_restore`/`quarantine_delete`（core）、`scan_ingest`（core 批次级）、tag/note/pin/favorite（CLI 元数据变更）。
+- **证据（2026-11-26）**：
+  - 核心测试 7 项：op/actor/outcome 组合过滤、时间范围 + 资源子串、`limit` 取最近 N 条、`counts_by_op`。
+  - CLI 黑盒 `cargo test -p modeld-cli --test audit`：3 项通过，真实二进制执行 `modeld audit --since 7d --op unlink --json` → 仅返回 2 天前的删除记录，`actor_ip=192.168.1.5`、资源为 `/models/recent.safetensors`，9 天前的旧记录被正确排除；非法时间退出码 1。
+  - WebUI e2e `cargo test -p modeld-webui --test api_e2e`：30 项通过，其中 2 项为 C2 新增（`/api/v1/audit` 过滤 + 400、`/metrics` 含 `modeld_audit_entries_total{op="unlink",outcome="success"} 1`）；路由数断言更新为 ≥19（新增 `/audit`）。
+  - 质量门：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo test --workspace --locked` → **412 passed / 0 failed**（较 C1 的 402 增加 10 项）。
+- **待办/边界**：
+  - 审计日志为 NDJSON 文件，无远程集中存储；多机部署需另行采集 `<store>/audit.log`。
+  - Grafana 面板展示操作计数；逐条「谁删了什么」的明细通过 `modeld audit` / `/api/v1/audit` 查询，Grafana 不直接连 SQLite/NDJSON。
 
 ### C3 · 发布工程
 
@@ -838,6 +854,7 @@ Refs: docs/ROADMAP.md#A1
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
 | C1 | 常驻守护进程 | done | AI agent | 2026-11-26 | 2026-11-26 | `419f9bf` |
+| C2 | 真实可观测性 | done | AI agent | 2026-11-26 | 2026-11-26 | `PENDING` |
 | C2 | 真实可观测性 | todo | — | — | — | — |
 | C3 | 发布工程 | todo | — | — | — | — |
 | C4 | 安全增强 | todo | — | — | — | — |
@@ -853,6 +870,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-26 | C2 | 真实可观测性：新增 `AuditQuery` 过滤查询（时间范围/op/actor/outcome/资源子串）、`modeld audit` CLI 与 `GET /api/v1/audit`；`/metrics` 派生 `modeld_audit_entries_total{op,outcome}` 与审计日志同源；新增 Grafana 面板 JSON；补齐 quarantine/tag/note/pin/favorite/scan_ingest 变更路径的审计写入。黑盒验证「上周谁删了什么」：7d+unlink 仅返回近 2 天删除记录、actor=192.168.1.5；全量 412/412 | `PENDING` | `core/audit.rs`、`core/ingest.rs`、`core/quarantine.rs`、`core/lib.rs`、`cli/commands/audit.rs`、`cli/commands/meta.rs`、`cli/tests/audit.rs`、`webui/api/audit.rs`、`webui/api/mod.rs`、`webui/metrics.rs`、`webui/server.rs`、`webui/tests/api_e2e.rs`、`deploy/grafana/modeld-dashboard.json`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C1 | 常驻守护进程：新增 `modeld daemon`（notify v8 递归监听 + mpsc 事件队列 + `DebounceQueue` 去抖），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`；监督循环对 watcher 死亡 / worker panic 分别按预算重启并退避，panic 批次重新入队；写 `daemon-status.json` 暴露实测数字；新增 systemd `Restart=on-failure` 单元。黑盒验收：5 秒内入库（files_ingested=1）、空闲 RSS 15.9 MB（< 100 MB）、0 次非预期重启；全量 402/402 | `419f9bf` | `cli/commands/daemon.rs`、`cli/cli.rs`、`cli/main.rs`、`cli/tests/daemon.rs`、`core/scanner.rs`、`deploy/systemd/modeld-daemon.service`、`Cargo.toml`、`Cargo.lock`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-25 | B10 | 阶段 B 出口 Gate 收口：新增 10 万文件全量扫描与 1 TiB 逻辑规模去重规划基准、平台隔离基线、静态自检脚本；故障注入 15/15、全量 395/395、core 覆盖率 79.4%、main.rs 183 行、库层零 print 宏，五项出口条件全部勾选 | `89e1f82` | `core/benches/scan_dedup.rs`、`bench/baseline.json`、`scripts/stage_b_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-24 | B9 | 文档 as-built 重构：重写 `architecture.md` 并逐模块给出源码锚点；新增 5 篇 ADR、`SECURITY.md`、`CONTRIBUTING.md`；17 篇旧规划稿归档 `docs/history/`，根目录仅剩 4 个 Markdown；逐项对齐 proxy API 默认值；修正 Windows 相对符号链接分隔符导致的 HF 缓存悬空链接 | `987ad35` | `docs/architecture.md`、`docs/adr/*`、`SECURITY.md`、`CONTRIBUTING.md`、`docs/history/*`、`docs/proxy-api.md`、`docs/proxy-setup.md`、`README.md`、`python/README.md`、`.gitignore`、`core/hf_cache.rs` |
@@ -879,8 +897,8 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
 | B 架构收敛 | 10 | 10 | 100% |
-| C 产品化 | 7 | 1 | 14% |
-| **合计** | **25** | **19** | **76%** |
+| C 产品化 | 7 | 2 | 29% |
+| **合计** | **25** | **20** | **80%** |
 
 ---
 

@@ -199,6 +199,22 @@ pub fn ingest_scan_results(
         result.bytes_processed += file.size;
     }
 
+    // C2: 一个批次写一条审计记录（而非每文件一条，避免日志爆炸），
+    // 记录模式与数量；逐文件失败已在 IngestResult::errors 中保留。
+    crate::audit::record(
+        store_path,
+        crate::AuditEntry {
+            details: Some(format!(
+                "mode={} files={} bytes={} errors={}",
+                mode.as_str(),
+                result.processed_count,
+                result.bytes_processed,
+                result.errors.len()
+            )),
+            ..crate::AuditEntry::success("scan_ingest", scan_id)
+        },
+    );
+
     Ok(result)
 }
 

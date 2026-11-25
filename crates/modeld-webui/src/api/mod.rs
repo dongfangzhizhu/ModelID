@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod downloads;
 pub mod dupes;
 pub mod gc;
@@ -20,6 +21,8 @@ pub fn routes() -> Router<AppState> {
         // ── Status & Stats ────────────────────────────────────────────────
         .route("/status", get(status::get_status))
         .route("/stats", get(stats::get_stats))
+        // ── Audit log (C2) ───────────────────────────────────────────────
+        .route("/audit", get(audit::query_audit))
         // ── Models ────────────────────────────────────────────────────────
         .route("/models", get(models::list_models))
         .route("/models/:hash", get(models::get_model))

@@ -96,6 +96,26 @@ impl Metrics {
         out
     }
 
+    /// Append `# HELP/# TYPE` + counters derived from the audit log so every
+    /// audited change path (unlink/dedup/gc/config/settings/quarantine) is
+    /// visible in Prometheus without a second write path that could drift.
+    ///
+    /// `counts` is `(op, outcome, n)` from `AuditLogger::counts_by_op()`.
+    pub fn render_audit_metrics(&self, counts: &[(String, String, u64)]) -> String {
+        let mut out = String::with_capacity(256);
+        out.push_str(
+            "\n# HELP modeld_audit_entries_total Audited change operations by op and outcome\n",
+        );
+        out.push_str("# TYPE modeld_audit_entries_total counter\n");
+        for (op, outcome, n) in counts {
+            out.push_str(&format!(
+                "modeld_audit_entries_total{{op=\"{}\",outcome=\"{}\"}} {}\n",
+                op, outcome, n
+            ));
+        }
+        out
+    }
+
     /// Increment the total request counter by 1.
     pub fn inc_requests(&self) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);

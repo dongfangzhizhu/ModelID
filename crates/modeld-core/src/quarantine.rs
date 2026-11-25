@@ -210,6 +210,13 @@ impl QuarantineManager {
         // Remove metadata
         let _ = std::fs::remove_file(&meta_path);
 
+        // C2: 记录「谁在什么时候恢复了什么」，与删除记录一起可供事后追溯。
+        let store_root = self.quarantine_dir.parent().unwrap_or(&self.quarantine_dir);
+        crate::audit::record(
+            store_root,
+            crate::AuditEntry::success("quarantine_restore", original_path.display().to_string()),
+        );
+
         Ok(original_path)
     }
 
@@ -240,6 +247,13 @@ impl QuarantineManager {
         if meta_path.exists() {
             let _ = std::fs::remove_file(&meta_path);
         }
+
+        // C2: 永久删除是最敏感的变更路径，必须可事后追溯到资源与时间。
+        let store_root = self.quarantine_dir.parent().unwrap_or(&self.quarantine_dir);
+        crate::audit::record(
+            store_root,
+            crate::AuditEntry::success("quarantine_delete", quarantine_path.display().to_string()),
+        );
 
         Ok(())
     }

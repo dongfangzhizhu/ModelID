@@ -35,7 +35,12 @@ impl Default for WebUiConfig {
 /// so scraping tools like prometheus-server don't need bearer tokens; restrict
 /// via firewall if needed in production).
 async fn metrics_handler(State(state): State<AppState>) -> Response {
-    let body = state.metrics.render_prometheus();
+    let mut body = state.metrics.render_prometheus();
+    // C2: audit-derived counters make every change path observable. A failed
+    // read degrades to HTTP-only metrics rather than breaking scraping.
+    if let Ok(counts) = modeld_core::AuditLogger::new(&state.store_path).counts_by_op() {
+        body.push_str(&state.metrics.render_audit_metrics(&counts));
+    }
     ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], body)
         .into_response()
 }

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Audit query + Prometheus/Grafana observability [C2]** — `modeld audit` CLI and
+  `GET /api/v1/audit` filter the NDJSON audit log by time range (`7d`/`2h`/ISO 8601),
+  operation, actor IP, outcome and resource substring, so "who deleted what last
+  week" is answerable from the binary or the API. `/metrics` now derives
+  `modeld_audit_entries_total{op,outcome}` from the same log (no second write path),
+  and `deploy/grafana/modeld-dashboard.json` ships five panels. Audit records were
+  added to quarantine restore/delete, scan ingest and tag/note/pin/favorite so all
+  mutation paths are traceable. (ROADMAP C2)
 - **`modeld daemon` — resident file watcher with debounced auto-ingest [C1]** — recursive
   `notify` v8 watch over one or more `--watch` paths, an `mpsc` event queue and a
   debounce window (default 800 ms) so half-written files are never ingested. Each
