@@ -876,7 +876,7 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|---|---|---|
 | C1 | 常驻守护进程 | done | AI agent | 2026-11-26 | 2026-11-26 | `419f9bf` |
 | C2 | 真实可观测性 | done | AI agent | 2026-11-26 | 2026-11-26 | `a97041b` |
-| C3 | 发布工程 | done | AI agent | 2026-11-26 | 2026-11-26 | `PENDING` |
+| C3 | 发布工程 | done | AI agent | 2026-11-26 | 2026-11-26 | `aad1f6d` |
 | C2 | 真实可观测性 | todo | — | — | — | — |
 | C3 | 发布工程 | todo | — | — | — | — |
 | C4 | 安全增强 | todo | — | — | — | — |
@@ -892,7 +892,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
-| 2026-11-26 | C3 | 发布工程：版本统一 0.2.0、crate 改为可发布（path 依赖带版本号）、release.yml 新增 SBOM/签名/拓扑顺序 crates.io/PyPI 发布 job；`scripts/sbom.py` 从真实 metadata 生成 372 组件 CycloneDX、`scripts/sign_release.py` 无凭据时诚实失败；Homebrew/winget/scoop 清单带 SHA256 占位符；`docs/release-checklist.md` 区分实测与未验证。本地实测 `modeld --version`=0.2.0、`cargo install --path` 可用、core 可打包；真实 publish/签名/三平台安装需外部凭据与平台，未执行并已登记；cargo-deny 公告归入 C4 | `PENDING` | `Cargo.toml`、`Cargo.lock`、`crates/*/Cargo.toml`、`python/pyproject.toml`、`python/modeld_hook/__init__.py`、`.github/workflows/release.yml`、`scripts/{sbom,sign_release}.py`、`sbom/modeld-0.2.0.json`、`deploy/{homebrew,scoop,winget}/*`、`docs/release-checklist.md`、`docs/ROADMAP.md`、`CHANGELOG.md` |
+| 2026-11-26 | C3 | 发布工程：版本统一 0.2.0、crate 改为可发布（path 依赖带版本号）、release.yml 新增 SBOM/签名/拓扑顺序 crates.io/PyPI 发布 job；`scripts/sbom.py` 从真实 metadata 生成 372 组件 CycloneDX、`scripts/sign_release.py` 无凭据时诚实失败；Homebrew/winget/scoop 清单带 SHA256 占位符；`docs/release-checklist.md` 区分实测与未验证。本地实测 `modeld --version`=0.2.0、`cargo install --path` 可用、core 可打包；真实 publish/签名/三平台安装需外部凭据与平台，未执行并已登记；cargo-deny 公告归入 C4 | `aad1f6d` | `Cargo.toml`、`Cargo.lock`、`crates/*/Cargo.toml`、`python/pyproject.toml`、`python/modeld_hook/__init__.py`、`.github/workflows/release.yml`、`scripts/{sbom,sign_release}.py`、`sbom/modeld-0.2.0.json`、`deploy/{homebrew,scoop,winget}/*`、`docs/release-checklist.md`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C2 | 真实可观测性：新增 `AuditQuery` 过滤查询（时间范围/op/actor/outcome/资源子串）、`modeld audit` CLI 与 `GET /api/v1/audit`；`/metrics` 派生 `modeld_audit_entries_total{op,outcome}` 与审计日志同源；新增 Grafana 面板 JSON；补齐 quarantine/tag/note/pin/favorite/scan_ingest 变更路径的审计写入。黑盒验证「上周谁删了什么」：7d+unlink 仅返回近 2 天删除记录、actor=192.168.1.5；全量 412/412 | `a97041b` | `core/audit.rs`、`core/ingest.rs`、`core/quarantine.rs`、`core/lib.rs`、`cli/commands/audit.rs`、`cli/commands/meta.rs`、`cli/tests/audit.rs`、`webui/api/audit.rs`、`webui/api/mod.rs`、`webui/metrics.rs`、`webui/server.rs`、`webui/tests/api_e2e.rs`、`deploy/grafana/modeld-dashboard.json`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C1 | 常驻守护进程：新增 `modeld daemon`（notify v8 递归监听 + mpsc 事件队列 + `DebounceQueue` 去抖），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`；监督循环对 watcher 死亡 / worker panic 分别按预算重启并退避，panic 批次重新入队；写 `daemon-status.json` 暴露实测数字；新增 systemd `Restart=on-failure` 单元。黑盒验收：5 秒内入库（files_ingested=1）、空闲 RSS 15.9 MB（< 100 MB）、0 次非预期重启；全量 402/402 | `419f9bf` | `cli/commands/daemon.rs`、`cli/cli.rs`、`cli/main.rs`、`cli/tests/daemon.rs`、`core/scanner.rs`、`deploy/systemd/modeld-daemon.service`、`Cargo.toml`、`Cargo.lock`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-25 | B10 | 阶段 B 出口 Gate 收口：新增 10 万文件全量扫描与 1 TiB 逻辑规模去重规划基准、平台隔离基线、静态自检脚本；故障注入 15/15、全量 395/395、core 覆盖率 79.4%、main.rs 183 行、库层零 print 宏，五项出口条件全部勾选 | `89e1f82` | `core/benches/scan_dedup.rs`、`bench/baseline.json`、`scripts/stage_b_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
