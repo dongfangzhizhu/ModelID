@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Frontend hardening and session unification [C5]** — all server-derived values
+  rendered through `innerHTML` now pass through `escapeHtml()`/`safeHtml`, and
+  hash-bearing click handlers were replaced with `data-*` plus event delegation.
+  HTTP and WebSocket callers share one token source (`session.js`) with a single
+  storage key and one 401 prompt path. Form controls and dialogs received
+  explicit accessible names, and `scripts/ui_static_check.py` enforces the token
+  singleton, unescaped-field detection and accessibility basics in `npm test`.
+  Frontend suite is 51 passed / 0 failed. (ROADMAP C5)
 - **Security hardening: keyring tokens, manifest verification, clean advisories [C4]** —
   CAS manifest generation/verification (`modeld verify --manifest`,
   `--generate-manifest`) re-hashes objects and detects tampered, truncated and

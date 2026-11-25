@@ -1,6 +1,7 @@
 // pages/dashboard.js
 import { api } from '../api.js';
 import { fmtBytes, fmtRelTime, toast, confirm, events, t } from '../main.js';
+import { escapeHtml, safeHtml } from '../security.js';
 import {
   resolvePhaseKey,
   computeScanProgressPercent,
@@ -9,7 +10,7 @@ import {
 import { decideButtonToRestore } from './dashboard-operation-complete.js';
 
 export function render(container) {
-  container.innerHTML = `
+  container.innerHTML = safeHtml`
     <div class="page-header">
       <h1 class="page-title">${t('dash.title')}</h1>
       <p class="page-subtitle">${t('dash.subtitle')}</p>
@@ -96,7 +97,7 @@ export function render(container) {
 
       const wrap = document.getElementById('frontend-table-wrap');
       if (s.frontends.length === 0) {
-        wrap.innerHTML = `<div class="empty-state">
+        wrap.innerHTML = safeHtml`<div class="empty-state">
           <div class="empty-icon">◫</div>
           <p class="empty-title">${t('dash.storage.empty')}</p>
           <p class="empty-sub">${t('dash.storage.empty.sub')}</p>
@@ -107,18 +108,18 @@ export function render(container) {
       wrap.innerHTML = `
         <table class="data-table">
           <thead><tr>
-            <th>${t('dash.storage.col.frontend')}</th>
-            <th>${t('dash.storage.col.models')}</th>
-            <th>${t('dash.storage.col.size')}</th>
-            <th>${t('dash.storage.col.waste')}</th>
+            <th>${escapeHtml(t('dash.storage.col.frontend'))}</th>
+            <th>${escapeHtml(t('dash.storage.col.models'))}</th>
+            <th>${escapeHtml(t('dash.storage.col.size'))}</th>
+            <th>${escapeHtml(t('dash.storage.col.waste'))}</th>
           </tr></thead>
           <tbody>
             ${s.frontends.map(f => `
               <tr>
-                <td><span class="badge badge-blue">${f.name}</span></td>
-                <td>${f.model_count.toLocaleString()}</td>
-                <td>${fmtBytes(f.size_bytes)}</td>
-                <td style="color:var(--danger)">${fmtBytes(f.duplicate_bytes)}</td>
+                <td><span class="badge badge-blue">${escapeHtml(f.name)}</span></td>
+                <td>${escapeHtml(f.model_count.toLocaleString())}</td>
+                <td>${escapeHtml(fmtBytes(f.size_bytes))}</td>
+                <td style="color:var(--danger)">${escapeHtml(fmtBytes(f.duplicate_bytes))}</td>
               </tr>
             `).join('')}
           </tbody>

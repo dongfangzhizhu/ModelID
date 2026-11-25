@@ -2,9 +2,10 @@
 import { api } from '../api.js';
 import { toast, t } from '../main.js';
 import { getLang, setLang } from '../i18n.js';
+import { safeHtml } from '../security.js';
 
 export function render(container) {
-  container.innerHTML = `
+  container.innerHTML = safeHtml`
     <div class="page-header">
       <h1 class="page-title">${t('set.title')}</h1>
       <p class="page-subtitle">${t('set.subtitle')}</p>
@@ -23,15 +24,15 @@ export function render(container) {
       cfg = await api.settings();
       renderForm();
     } catch (e) {
-      document.getElementById('settings-form').innerHTML =
-        `<div class="empty-state"><div class="empty-icon">⚠</div><p>${e.message}</p></div>`;
+      document.getElementById('settings-form').innerHTML = safeHtml`
+        <div class="empty-state"><div class="empty-icon">⚠</div><p>${e.message}</p></div>`;
     }
   }
 
   function renderForm() {
     const currentLang = getLang();
 
-    document.getElementById('settings-form').innerHTML = `
+    document.getElementById('settings-form').innerHTML = safeHtml`
 
       <!-- Storage -->
       <div class="settings-section">
@@ -43,7 +44,7 @@ export function render(container) {
             <div class="settings-desc">${t('set.store.root.desc')}</div>
           </div>
           <div class="settings-control">
-            <input class="input" id="s-root" value="${escHtml(cfg.store.root)}" style="width:260px" readonly title="${t('set.store.root.ro')}">
+            <input class="input" id="s-root" aria-label="${t('set.store.root')}" value="${cfg.store.root}" style="width:260px" readonly title="${t('set.store.root.ro')}">
           </div>
         </div>
 
@@ -54,7 +55,7 @@ export function render(container) {
           </div>
           <div class="settings-control">
             <label class="toggle">
-              <input type="checkbox" id="s-incremental" ${cfg.store.incremental_scan ? 'checked' : ''}>
+              <input type="checkbox" id="s-incremental" aria-label="${t('set.store.incremental')}" ${cfg.store.incremental_scan ? 'checked' : ''}>
               <span class="toggle-track"></span>
             </label>
           </div>
@@ -71,7 +72,7 @@ export function render(container) {
             <div class="settings-desc">${t('set.gc.days.desc')}</div>
           </div>
           <div class="settings-control">
-            <input class="input" type="number" id="s-gc-days"
+            <input class="input" type="number" id="s-gc-days" aria-label="${t('set.gc.days')}"
               value="${cfg.gc.quarantine_days}" style="width:80px" min="1" max="365">
           </div>
         </div>
@@ -88,7 +89,7 @@ export function render(container) {
             <div class="settings-desc">${t('set.ui.port.desc')}</div>
           </div>
           <div class="settings-control">
-            <input class="input" type="number" id="s-port"
+            <input class="input" type="number" id="s-port" aria-label="${t('set.ui.port')}"
               value="${cfg.ui.port}" style="width:100px" min="1024" max="65535">
           </div>
         </div>
@@ -99,7 +100,7 @@ export function render(container) {
             <div class="settings-desc">${t('set.ui.host.desc')}</div>
           </div>
           <div class="settings-control">
-            <select class="select" id="s-host" style="width:160px">
+            <select class="select" id="s-host" aria-label="${t('set.ui.host')}" style="width:160px">
               <option ${cfg.ui.host === '127.0.0.1' ? 'selected' : ''}>127.0.0.1</option>
               <option ${cfg.ui.host === '0.0.0.0'   ? 'selected' : ''}>0.0.0.0</option>
             </select>
@@ -112,7 +113,7 @@ export function render(container) {
           </div>
           <div class="settings-control">
             <label class="toggle">
-              <input type="checkbox" id="s-open-browser" ${cfg.ui.open_browser ? 'checked' : ''}>
+              <input type="checkbox" id="s-open-browser" aria-label="${t('set.ui.browser')}" ${cfg.ui.open_browser ? 'checked' : ''}>
               <span class="toggle-track"></span>
             </label>
           </div>
@@ -125,7 +126,7 @@ export function render(container) {
             <div class="settings-desc">${t('set.ui.lang.desc')}</div>
           </div>
           <div class="settings-control">
-            <select class="select" id="s-lang" style="width:160px">
+            <select class="select" id="s-lang" aria-label="${t('set.ui.lang')}" style="width:160px">
               <option value="en" ${currentLang === 'en' ? 'selected' : ''}>English</option>
               <option value="zh" ${currentLang === 'zh' ? 'selected' : ''}>中文</option>
             </select>
@@ -194,6 +195,3 @@ export function render(container) {
   loadSettings();
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}

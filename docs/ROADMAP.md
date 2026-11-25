@@ -799,6 +799,19 @@ Refs: docs/ROADMAP.md#A1
 
 - **产物**：鉴权与会话管理、XSS 全量消除、状态管理规范化、可访问性
 - **验收**：静态扫描无 `innerHTML` 拼接不可信数据；Lighthouse 可访问性不低于 90
+- **状态**：done
+- **实现**：
+  - `crates/modeld-webui/ui/security.js`：新增 `escapeHtml()`（五字符转义）与 `safeHtml` tagged template；8 个一方页面/入口文件内的 `innerHTML` 模板全部改为 `safeHtml` 或逐字段 `escapeHtml`。`library.js` / `dupes.js` 把带 hash 的内联 `onclick` 改为 `data-*` + `addEventListener`，入口先用 `/^[0-9a-f]+$/i` 校验。
+  - `crates/modeld-webui/ui/session.js`：token 键、读写、清理、401 提示、HTTP `Authorization` 与 WS 握手 token 统一到一个模块；`api.js` / `main.js` / `ws.js` 不再各自保存 `modeld_token`；`promptForToken()` 可注入 prompt 函数以便测试。
+  - 可访问性：所有生成的 `input` / `select` 增加 `aria-label`（含搜索、排序、类型、GC/port/host/language 等控件），`confirm-dialog` 增加 `aria-labelledby`，`library`/`proxy` 的跳级 `h3` 改为 `h2`，关闭按钮补 `aria-label`，i18n 英文/中文同步新增 5 个标签键。
+  - `scripts/ui_static_check.py`（并入 `npm test`）：检查 token 键只在 `session.js` 定义、未加标签模板不得直接插值服务端字段、内联事件不得含插值、生成表单控件必须有可访问名、`index.html` 具备 lang/viewport/单 main/dialog 标注/无正 tabindex/img alt。
+- **证据（2026-11-26）**：
+  - `npm test` → **51 passed / 0 failed**（前端单测 + 属性测试；比 C4 的 45 增加 6 个 session 用例）；`python3 scripts/ui_static_check.py` → `15 JS files, 1 token declaration, 60 templates, 16 form controls checked`，0 违规。
+  - Lighthouse 12.8.2 + 本机 Chrome：`modeld-webui --store target/c5-lighthouse/store --port 18255` 启动后审计 `/`，**accessibility score = 0.91（91 分）**，加权审计项 0 失败；原始报告 `target/c5-lighthouse/lighthouse.json`（target 不入库）。
+  - 质量门：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo test --workspace --locked` → **418 passed / 0 failed**（与 C4 持平，本任务只改前端与静态检查）。
+- **待办/边界**：
+  - Lighthouse 分数是 Windows/Chrome 下 `/` 路由的一次快照；其他路由、真实屏幕阅读器与多浏览器组合未做人工验证。
+  - 静态检查是针对已知风险源的定向扫描，不等于完整污点分析；新增渲染路径仍需代码评审。
 
 ### C6 · 性能优化
 
@@ -896,10 +909,7 @@ Refs: docs/ROADMAP.md#A1
 | C2 | 真实可观测性 | done | AI agent | 2026-11-26 | 2026-11-26 | `a97041b` |
 | C3 | 发布工程 | done | AI agent | 2026-11-26 | 2026-11-26 | `aad1f6d` |
 | C4 | 安全增强 | done | AI agent | 2026-11-26 | 2026-11-26 | `8e110cf` |
-| C2 | 真实可观测性 | todo | — | — | — | — |
-| C3 | 发布工程 | todo | — | — | — | — |
-| C4 | 安全增强 | todo | — | — | — | — |
-| C5 | 前端重构 | todo | — | — | — | — |
+| C5 | 前端重构 | done | AI agent | 2026-11-26 | 2026-11-26 | — |
 | C6 | 性能优化 | todo | — | — | — | — |
 | C7 | 生态集成 | todo | — | — | — | — |
 
@@ -911,6 +921,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-26 | C5 | 前端重构：新增 `escapeHtml`/`safeHtml` 并改造 8 个一方模板，hash 点击事件改 `data-*` 事件委托；`session.js` 统一 HTTP/WS token 与 401 提示；表单控件/对话框补可访问名；`scripts/ui_static_check.py` 纳入 `npm test`（15 JS 文件、60 模板、16 控件零违规）。实测前端 51/51、Lighthouse 可访问性 91 分、Rust 418/418 | `—` | `ui/{security,session,api,main,ws,i18n,index}.js/html`、`ui/pages/*`、`ui/tests/security.test.js`、`ui/tests/session.test.js`、`ui/package.json`、`scripts/ui_static_check.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C4 | 安全增强：清理 16 条 cargo-deny 公告（升级 rustls/tokio/zstd/rusqlite 0.41 修 SQLite CVE，MSRV→1.89，仅 2 条无升级路径的维护公告带理由豁免）→ advisories/bans/licenses/sources 全 ok；新增 CAS 内容清单（生成/校验/篡改检出）与 `modeld verify --manifest/--generate-manifest`；token 改存 OS keyring，`config token-set/status/migrate` 与 proxy/token-rotate 不再明文落盘且失败显式化。实测：篡改/截断/缺失对象全部检出、keyring 不可用不改磁盘配置、418/418 | `8e110cf` | `Cargo.toml`、`Cargo.lock`、`deny.toml`、`docker/Dockerfile`、`CONTRIBUTING.md`、`docs/architecture.md`、`core/{manifest,secret_store,lib}.rs`、`core/tests/manifest_test.rs`、`cli/commands/{repair,config,proxy,store}.rs`、`cli/cli.rs`、`cli/main.rs`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C3 | 发布工程：版本统一 0.2.0、crate 改为可发布（path 依赖带版本号）、release.yml 新增 SBOM/签名/拓扑顺序 crates.io/PyPI 发布 job；`scripts/sbom.py` 从真实 metadata 生成 372 组件 CycloneDX、`scripts/sign_release.py` 无凭据时诚实失败；Homebrew/winget/scoop 清单带 SHA256 占位符；`docs/release-checklist.md` 区分实测与未验证。本地实测 `modeld --version`=0.2.0、`cargo install --path` 可用、core 可打包；真实 publish/签名/三平台安装需外部凭据与平台，未执行并已登记；cargo-deny 公告归入 C4 | `aad1f6d` | `Cargo.toml`、`Cargo.lock`、`crates/*/Cargo.toml`、`python/pyproject.toml`、`python/modeld_hook/__init__.py`、`.github/workflows/release.yml`、`scripts/{sbom,sign_release}.py`、`sbom/modeld-0.2.0.json`、`deploy/{homebrew,scoop,winget}/*`、`docs/release-checklist.md`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C2 | 真实可观测性：新增 `AuditQuery` 过滤查询（时间范围/op/actor/outcome/资源子串）、`modeld audit` CLI 与 `GET /api/v1/audit`；`/metrics` 派生 `modeld_audit_entries_total{op,outcome}` 与审计日志同源；新增 Grafana 面板 JSON；补齐 quarantine/tag/note/pin/favorite/scan_ingest 变更路径的审计写入。黑盒验证「上周谁删了什么」：7d+unlink 仅返回近 2 天删除记录、actor=192.168.1.5；全量 412/412 | `a97041b` | `core/audit.rs`、`core/ingest.rs`、`core/quarantine.rs`、`core/lib.rs`、`cli/commands/audit.rs`、`cli/commands/meta.rs`、`cli/tests/audit.rs`、`webui/api/audit.rs`、`webui/api/mod.rs`、`webui/metrics.rs`、`webui/server.rs`、`webui/tests/api_e2e.rs`、`deploy/grafana/modeld-dashboard.json`、`docs/ROADMAP.md`、`CHANGELOG.md` |
@@ -940,8 +951,8 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
 | B 架构收敛 | 10 | 10 | 100% |
-| C 产品化 | 7 | 4 | 57% |
-| **合计** | **25** | **22** | **88%** |
+| C 产品化 | 7 | 5 | 71% |
+| **合计** | **25** | **23** | **92%** |
 
 ---
 

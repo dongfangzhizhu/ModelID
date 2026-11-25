@@ -1,6 +1,7 @@
 // pages/downloads.js
 import { api } from '../api.js';
 import { fmtBytes, fmtRelTime, events, t } from '../main.js';
+import { escapeHtml, safeHtml } from '../security.js';
 
 const STATUS_COLORS = {
   completed:   'green',
@@ -11,14 +12,14 @@ const STATUS_COLORS = {
 };
 
 export function render(container) {
-  container.innerHTML = `
+  container.innerHTML = safeHtml`
     <div class="page-header">
       <h1 class="page-title">${t('dl.title')}</h1>
       <p class="page-subtitle">${t('dl.subtitle')}</p>
     </div>
     <div class="page-body">
       <div class="toolbar">
-        <select class="select" id="dl-filter" style="width:auto">
+        <select class="select" id="dl-filter" aria-label="${t('common.filter')}" style="width:auto">
           <option value="">${t('dl.filter.all')}</option>
           <option value="downloading">${t('dl.filter.active')}</option>
           <option value="completed">${t('dl.filter.done')}</option>
@@ -43,8 +44,8 @@ export function render(container) {
       allDownloads = data.items;
       renderList();
     } catch (e) {
-      document.getElementById('dl-list').innerHTML =
-        `<div class="empty-state"><div class="empty-icon">⚠</div><p class="empty-title">${t('common.load_failed')}</p><p>${e.message}</p></div>`;
+      document.getElementById('dl-list').innerHTML = safeHtml`
+        <div class="empty-state"><div class="empty-icon">⚠</div><p class="empty-title">${t('common.load_failed')}</p><p>${e.message}</p></div>`;
     }
   }
 
@@ -56,7 +57,7 @@ export function render(container) {
     const list = document.getElementById('dl-list');
 
     if (items.length === 0) {
-      list.innerHTML = `<div class="empty-state">
+      list.innerHTML = safeHtml`<div class="empty-state">
         <div class="empty-icon">⬇</div>
         <p class="empty-title">${t('dl.empty')}</p>
         <p class="empty-sub">${t('dl.empty.sub')}</p>
@@ -72,23 +73,23 @@ export function render(container) {
       return `
         <div class="download-card">
           <div class="download-header">
-            <span class="download-name" title="${escHtml(d.source_url)}">${escHtml(d.name)}</span>
-            <span class="badge badge-${color} download-status">${label}</span>
+            <span class="download-name" title="${escapeHtml(d.source_url)}">${escapeHtml(d.name)}</span>
+            <span class="badge badge-${escapeHtml(color)} download-status">${escapeHtml(label)}</span>
           </div>
           ${d.status === 'downloading' ? `
             <div class="download-progress">
-              <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%"></div></div>
+              <div class="progress-wrap"><div class="progress-bar" style="width:${escapeHtml(pct)}%"></div></div>
             </div>
           ` : ''}
           <div class="download-meta">
             <span>${d.bytes_total > 0
-              ? `${fmtBytes(d.bytes_done)} / ${fmtBytes(d.bytes_total)} (${pct}%)`
-              : fmtBytes(d.bytes_done)}</span>
-            <span>${fmtRelTime(d.finished_at || d.started_at)}</span>
+              ? `${escapeHtml(fmtBytes(d.bytes_done))} / ${escapeHtml(fmtBytes(d.bytes_total))} (${escapeHtml(pct)}%)`
+              : escapeHtml(fmtBytes(d.bytes_done))}</span>
+            <span>${escapeHtml(fmtRelTime(d.finished_at || d.started_at))}</span>
           </div>
-          ${d.error ? `<div style="font-size:11px;color:var(--danger);margin-top:6px">⚠ ${escHtml(d.error)}</div>` : ''}
+          ${d.error ? `<div style="font-size:11px;color:var(--danger);margin-top:6px">⚠ ${escapeHtml(d.error)}</div>` : ''}
           ${d.blake3_hash
-            ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">BLAKE3: <span class="mono">${d.blake3_hash.slice(0,16)}…</span></div>`
+            ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">BLAKE3: <span class="mono">${escapeHtml(d.blake3_hash.slice(0,16))}…</span></div>`
             : ''}
         </div>
       `;
@@ -107,6 +108,3 @@ export function render(container) {
   return () => { unsub(); clearInterval(timer); };
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}

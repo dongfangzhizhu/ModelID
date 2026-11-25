@@ -1,6 +1,8 @@
 // main.js — Router, EventBus, WebSocket manager, global utilities
 import { t, buildLangToggle, onLangChange } from './i18n.js';
-import { wsUrl, backoffDelay, WS_TOKEN_KEY } from './ws.js';
+import { wsUrl, backoffDelay } from './ws.js';
+import { escapeHtml, safeHtml } from './security.js';
+import { wsToken } from './session.js';
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -88,8 +90,7 @@ export const events = new EventBus();
 let wsAttempts = 0;
 
 function connectWs() {
-  const token = localStorage.getItem(WS_TOKEN_KEY);
-  const ws = new WebSocket(wsUrl(location, token));
+  const ws = new WebSocket(wsUrl(location, wsToken()));
 
   ws.onopen = () => {
     wsAttempts = 0;
@@ -150,8 +151,8 @@ function buildSidebar() {
     a.dataset.route = item.route;
     a.id = item.id;
     a.innerHTML = `
-      <span class="nav-icon">${item.icon}</span>
-      <span class="nav-label">${t(item.labelKey)}</span>
+      <span class="nav-icon">${escapeHtml(item.icon)}</span>
+      <span class="nav-label">${escapeHtml(t(item.labelKey))}</span>
       ${item.route === '/dupes' ? '<span class="nav-badge" id="badge-dupes" style="display:none"></span>' : ''}
     `;
     nav.appendChild(a);
@@ -166,7 +167,7 @@ function buildSidebar() {
 
 function buildSidebarFooter() {
   const footer = document.querySelector('.sidebar-footer');
-  footer.innerHTML = `
+  footer.innerHTML = safeHtml`
     <div class="ws-indicator" id="ws-indicator" title="WebSocket">
       <span class="ws-dot"></span>
       <span class="ws-text">${t('ws.connecting')}</span>
@@ -203,14 +204,14 @@ async function navigate() {
   });
 
   const container = document.getElementById('page-content');
-  container.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>${t('common.loading')}</p></div>`;
+  container.innerHTML = safeHtml`<div class="loading-state"><div class="spinner"></div><p>${t('common.loading')}</p></div>`;
 
   try {
     const mod = await loader();
     container.innerHTML = '';
     currentCleanup = mod.render(container) || null;
   } catch (err) {
-    container.innerHTML = `
+    container.innerHTML = safeHtml`
       <div class="page-body">
         <div class="empty-state">
           <div class="empty-icon">⚠</div>

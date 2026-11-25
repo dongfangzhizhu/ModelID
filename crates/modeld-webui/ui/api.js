@@ -1,4 +1,5 @@
 // api.js — All fetch calls in one place
+import { authorizationHeader, promptForToken } from './session.js';
 const BASE = '/api/v1';
 
 class ApiError extends Error {
@@ -9,16 +10,13 @@ class ApiError extends Error {
   }
 }
 
-const TOKEN_KEY = 'modeld_token';
-
 // Every request carries the CSRF header; the server rejects browser-originated
-// writes that lack it. The bearer token (when the server needs one) lives in
-// localStorage and is filled in by the prompt below on the first 401.
+// writes that lack it. Bearer token state lives in session.js (C5).
 function buildHeaders(hasBody) {
   const headers = { 'X-Modeld-CSRF': '1' };
   if (hasBody) headers['Content-Type'] = 'application/json';
-  const token = localStorage.getItem(TOKEN_KEY);
-  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const auth = authorizationHeader();
+  if (auth) headers['Authorization'] = auth;
   return headers;
 }
 
@@ -30,11 +28,7 @@ async function send(method, path, body, retried) {
   });
 
   if (res.status === 401 && !retried) {
-    const entered = window.prompt('This modeld server requires an access token:');
-    if (entered && entered.trim()) {
-      localStorage.setItem(TOKEN_KEY, entered.trim());
-      return send(method, path, body, true);
-    }
+    if (promptForToken()) return send(method, path, body, true);
   }
 
   if (!res.ok) {

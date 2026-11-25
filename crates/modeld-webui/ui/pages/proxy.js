@@ -1,5 +1,6 @@
 // pages/proxy.js — LAN proxy endpoint info
 import { copyText, toast, t } from '../main.js';
+import { safeHtml } from '../security.js';
 
 export function render(container) {
   const host   = location.hostname;
@@ -8,7 +9,7 @@ export function render(container) {
   const apiUrl = `http://${host}:${port}/api/v1`;
   const uiUrl  = `http://${host}:${port}/`;
 
-  container.innerHTML = `
+  container.innerHTML = safeHtml`
     <div class="page-header">
       <h1 class="page-title">${t('proxy.title')}</h1>
       <p class="page-subtitle">${t('proxy.subtitle')}</p>
@@ -17,27 +18,27 @@ export function render(container) {
       <div style="max-width:700px">
 
         <div class="proxy-card">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:8px">${t('proxy.ui.title')}</h3>
+          <h2 style="font-size:14px;font-weight:700;margin-bottom:8px">${t('proxy.ui.title')}</h2>
           <div class="proxy-endpoint">
-            <span>${escHtml(uiUrl)}</span>
+            <span>${uiUrl}</span>
             <button class="copy-btn" title="${t('common.copy')}" id="copy-ui">⎘</button>
           </div>
           <p style="font-size:12px;color:var(--text-muted)">${t('proxy.ui.desc')}</p>
         </div>
 
         <div class="proxy-card">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:8px">${t('proxy.api.title')}</h3>
+          <h2 style="font-size:14px;font-weight:700;margin-bottom:8px">${t('proxy.api.title')}</h2>
           <div class="proxy-endpoint">
-            <span>${escHtml(apiUrl)}</span>
+            <span>${apiUrl}</span>
             <button class="copy-btn" title="${t('common.copy')}" id="copy-api">⎘</button>
           </div>
           <p style="font-size:12px;color:var(--text-muted)">${t('proxy.api.desc')}</p>
         </div>
 
         <div class="proxy-card">
-          <h3 style="font-size:14px;font-weight:700;margin-bottom:8px">${t('proxy.ws.title')}</h3>
+          <h2 style="font-size:14px;font-weight:700;margin-bottom:8px">${t('proxy.ws.title')}</h2>
           <div class="proxy-endpoint">
-            <span>${escHtml(wsUrl)}</span>
+            <span>${wsUrl}</span>
             <button class="copy-btn" title="${t('common.copy')}" id="copy-ws">⎘</button>
           </div>
           <p style="font-size:12px;color:var(--text-muted)">${t('proxy.ws.desc')}</p>
@@ -86,6 +87,3 @@ export function render(container) {
   }
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}

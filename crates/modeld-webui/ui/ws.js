@@ -1,9 +1,12 @@
 // ws.js — pure helpers for the WebSocket client.
 //
 // Kept free of DOM/global access so they can be unit-tested with `node --test`
-// (the browser only supplies `location` at the call site).
+// (the browser only supplies `location` at the call site). The token key now
+// comes from session.js so HTTP and WebSocket share one source of truth (C5).
 
-export const WS_TOKEN_KEY = 'modeld_token';
+import { SESSION_TOKEN_KEY } from './session.js';
+
+export const WS_TOKEN_KEY = SESSION_TOKEN_KEY;
 export const WS_MAX_BACKOFF_MS = 30000;
 
 /**

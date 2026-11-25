@@ -1,17 +1,20 @@
 // pages/dupes.js
 import { api } from '../api.js';
 import { fmtBytes, toast, confirm, t } from '../main.js';
+import { escapeHtml, safeHtml } from '../security.js';
+
+const HEX_HASH = /^[0-9a-f]+$/i;
 
 export function render(container) {
-  container.innerHTML = `
+  container.innerHTML = safeHtml`
     <div class="page-header">
       <h1 class="page-title">${t('dupes.title')}</h1>
       <p class="page-subtitle">${t('dupes.subtitle')}</p>
     </div>
     <div class="page-body">
       <div class="toolbar">
-        <input class="input" id="dupes-search" placeholder="${t('dupes.search')}" style="max-width:260px">
-        <select class="select" id="dupes-sort" style="width:auto">
+        <input class="input" id="dupes-search" aria-label="${t('dupes.search')}" placeholder="${t('dupes.search')}" style="max-width:260px">
+        <select class="select" id="dupes-sort" aria-label="${t('common.sort_by')}" style="width:auto">
           <option value="waste">${t('dupes.sort.waste')}</option>
           <option value="copies">${t('dupes.sort.copies')}</option>
           <option value="size">${t('dupes.sort.size')}</option>
@@ -37,8 +40,8 @@ export function render(container) {
         t('dupes.summary', { n: data.items.length, size: fmtBytes(data.total_waste_bytes) });
       renderList();
     } catch (e) {
-      document.getElementById('dupes-list').innerHTML =
-        `<div class="empty-state"><div class="empty-icon">⚠</div><p class="empty-title">${t('common.load_failed')}</p><p>${e.message}</p></div>`;
+      document.getElementById('dupes-list').innerHTML = safeHtml`
+        <div class="empty-state"><div class="empty-icon">⚠</div><p class="empty-title">${t('common.load_failed')}</p><p>${e.message}</p></div>`;
     }
   }
 
@@ -54,7 +57,7 @@ export function render(container) {
     const list = document.getElementById('dupes-list');
 
     if (items.length === 0) {
-      list.innerHTML = `<div class="empty-state">
+      list.innerHTML = safeHtml`<div class="empty-state">
         <div class="empty-icon">✓</div>
         <p class="empty-title">${t('dupes.empty')}</p>
         <p class="empty-sub">${t('dupes.empty.sub')}</p>
@@ -63,35 +66,45 @@ export function render(container) {
     }
 
     list.innerHTML = items.map((g, idx) => `
-      <div class="dupe-group" id="dg-${idx}">
-        <div class="dupe-header" onclick="toggleDupe(${idx})">
-          <span class="badge badge-orange">${t('dupes.copies', { n: g.copy_count })}</span>
-          <span class="dupe-name">${escHtml(g.name)}</span>
-          ${g.arch ? `<span class="badge badge-blue">${escHtml(g.arch)}</span>` : ''}
-          <span class="dupe-waste">${fmtBytes(g.waste_bytes)}</span>
-          <span class="mono" style="font-size:10px">${fmtBytes(g.size_bytes)}</span>
+      <div class="dupe-group" id="dg-${escapeHtml(idx)}">
+        <div class="dupe-header" data-dupe-idx="${escapeHtml(idx)}">
+          <span class="badge badge-orange">${escapeHtml(t('dupes.copies', { n: g.copy_count }))}</span>
+          <span class="dupe-name">${escapeHtml(g.name)}</span>
+          ${g.arch ? `<span class="badge badge-blue">${escapeHtml(g.arch)}</span>` : ''}
+          <span class="dupe-waste">${escapeHtml(fmtBytes(g.waste_bytes))}</span>
+          <span class="mono" style="font-size:10px">${escapeHtml(fmtBytes(g.size_bytes))}</span>
           <span class="dupe-toggle">▼</span>
         </div>
         <div class="dupe-paths">
           ${g.paths.map((p, i) => `
             <div class="dupe-path-row">
               ${i === 0
-                ? `<span class="path-keep">${t('dupes.group.keep')}</span>`
+                ? `<span class="path-keep">${escapeHtml(t('dupes.group.keep'))}</span>`
                 : '<span style="width:30px"></span>'}
-              <span class="path-text" title="${escHtml(p.path)}">${escHtml(p.path)}</span>
-              <span class="badge badge-gray">${p.frontend}</span>
+              <span class="path-text" title="${escapeHtml(p.path)}">${escapeHtml(p.path)}</span>
+              <span class="badge badge-gray">${escapeHtml(p.frontend)}</span>
             </div>
           `).join('')}
           <div style="margin-top:10px;display:flex;gap:8px">
-            <button class="btn btn-ghost btn-sm" onclick="dryRunGroup('${g.blake3_hash}')">${t('dupes.group.preview')}</button>
+            <button class="btn btn-ghost btn-sm dupe-preview" data-hash="${escapeHtml(g.blake3_hash)}">${escapeHtml(t('dupes.group.preview'))}</button>
           </div>
         </div>
       </div>
     `).join('');
 
-    window.toggleDupe = (idx) => document.getElementById(`dg-${idx}`)?.classList.toggle('open');
+    // Bind via addEventListener instead of inline onclick so no hash is ever
+    // concatenated into executable JavaScript.
+    list.querySelectorAll('.dupe-header').forEach((header) => {
+      header.addEventListener('click', () => {
+        document.getElementById(`dg-${header.dataset.dupeIdx}`)?.classList.toggle('open');
+      });
+    });
+    list.querySelectorAll('.dupe-preview').forEach((btn) => {
+      btn.addEventListener('click', () => window.dryRunGroup(btn.dataset.hash));
+    });
 
     window.dryRunGroup = async (hash) => {
+      if (!HEX_HASH.test(hash)) return;
       try {
         const res = await api.dedupPreview();
         const op = res.operations.find(o => o.hash === hash);
@@ -133,6 +146,3 @@ export function render(container) {
   loadDupes();
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}

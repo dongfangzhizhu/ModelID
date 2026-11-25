@@ -5,7 +5,8 @@
   "description": "Property-based and unit tests for the modeld-webui frontend (plain ES module JS, no build step).",
   "type": "module",
   "scripts": {
-    "test": "node --test \"tests/**/*.test.js\""
+    "test": "node --test \"tests/**/*.test.js\" && python3 ../../../scripts/ui_static_check.py",
+    "check:static": "python3 ../../../scripts/ui_static_check.py"
   },
   "devDependencies": {
     "fast-check": "3.23.2"

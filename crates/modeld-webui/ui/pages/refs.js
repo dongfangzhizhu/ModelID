@@ -1,17 +1,18 @@
 // pages/refs.js — Reference graph: models × frontends
 import { api } from '../api.js';
 import { fmtBytes, t } from '../main.js';
+import { escapeHtml, safeHtml } from '../security.js';
 
 export function render(container) {
-  container.innerHTML = `
+  container.innerHTML = safeHtml`
     <div class="page-header">
       <h1 class="page-title">${t('refs.title')}</h1>
       <p class="page-subtitle">${t('refs.subtitle')}</p>
     </div>
     <div class="page-body">
       <div class="toolbar">
-        <input class="input" id="refs-search" placeholder="${t('refs.search')}" style="max-width:280px">
-        <select class="select" id="refs-frontend" style="width:auto">
+        <input class="input" id="refs-search" aria-label="${t('refs.search')}" placeholder="${t('refs.search')}" style="max-width:280px">
+        <select class="select" id="refs-frontend" aria-label="${t('common.frontend')}" style="width:auto">
           <option value="">${t('refs.fe.all')}</option>
         </select>
         <div style="flex:1"></div>
@@ -44,8 +45,8 @@ export function render(container) {
 
       renderTable();
     } catch (e) {
-      document.getElementById('refs-table-wrap').innerHTML =
-        `<div class="empty-state"><div class="empty-icon">⚠</div><p>${e.message}</p></div>`;
+      document.getElementById('refs-table-wrap').innerHTML = safeHtml`
+        <div class="empty-state"><div class="empty-icon">⚠</div><p>${e.message}</p></div>`;
     }
   }
 
@@ -62,7 +63,7 @@ export function render(container) {
     const wrap = document.getElementById('refs-table-wrap');
 
     if (items.length === 0) {
-      wrap.innerHTML = `<div class="empty-state">
+      wrap.innerHTML = safeHtml`<div class="empty-state">
         <div class="empty-icon">◉</div>
         <p class="empty-title">${t('refs.empty')}</p>
       </div>`;
@@ -73,30 +74,30 @@ export function render(container) {
       <table class="data-table">
         <thead>
           <tr>
-            <th>${t('refs.col.model')}</th>
-            <th>${t('refs.col.size')}</th>
-            <th>${t('refs.col.fe')}</th>
-            <th>${t('refs.col.refs')}</th>
-            <th>${t('refs.col.orphan')}</th>
+            <th>${escapeHtml(t('refs.col.model'))}</th>
+            <th>${escapeHtml(t('refs.col.size'))}</th>
+            <th>${escapeHtml(t('refs.col.fe'))}</th>
+            <th>${escapeHtml(t('refs.col.refs'))}</th>
+            <th>${escapeHtml(t('refs.col.orphan'))}</th>
           </tr>
         </thead>
         <tbody>
           ${items.map(m => `
-            <tr title="${escHtml(m.paths.join('\n'))}">
+            <tr title="${escapeHtml(m.paths.join('\n'))}">
               <td>
-                <div style="font-weight:600;color:var(--text-primary)">${escHtml(m.name)}</div>
-                <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted)">${m.blake3_hash.slice(0,12)}…</div>
+                <div style="font-weight:600;color:var(--text-primary)">${escapeHtml(m.name)}</div>
+                <div style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted)">${escapeHtml(m.blake3_hash.slice(0,12))}…</div>
               </td>
-              <td>${fmtBytes(m.size_bytes)}</td>
+              <td>${escapeHtml(fmtBytes(m.size_bytes))}</td>
               <td>
                 ${[...new Set(m.frontends)].map(f =>
-                  `<span class="badge badge-blue" style="margin-right:3px">${escHtml(f)}</span>`
+                  `<span class="badge badge-blue" style="margin-right:3px">${escapeHtml(f)}</span>`
                 ).join('')}
               </td>
-              <td>${m.ref_count}</td>
+              <td>${escapeHtml(m.ref_count)}</td>
               <td>${m.is_orphan
-                ? `<span class="badge badge-red">${t('common.yes')}</span>`
-                : `<span class="badge badge-green">${t('common.no')}</span>`}
+                ? `<span class="badge badge-red">${escapeHtml(t('common.yes'))}</span>`
+                : `<span class="badge badge-green">${escapeHtml(t('common.no'))}</span>`}
               </td>
             </tr>
           `).join('')}
@@ -109,10 +110,6 @@ export function render(container) {
   document.getElementById('refs-frontend').addEventListener('change', renderTable);
 
   loadRefs();
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function debounce(fn, ms) {
