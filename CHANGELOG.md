@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`modeld daemon` — resident file watcher with debounced auto-ingest [C1]** — recursive
+  `notify` v8 watch over one or more `--watch` paths, an `mpsc` event queue and a
+  debounce window (default 800 ms) so half-written files are never ingested. Each
+  batch reuses `Scanner::scan_file` + `ingest_scan_results`, the same path CLI and
+  WebUI scans use, so daemon ingests produce identical CAS/DB state. A supervisor
+  restarts the watcher (bounded at 5) and survives worker panics (bounded at 20),
+  requeueing a panicked batch so no file is silently lost. A systemd unit
+  (`deploy/systemd/modeld-daemon.service`) restarts the process on abnormal exit.
+  (ROADMAP C1)
+- **Black-box daemon acceptance tests [C1]** — spawn the real `modeld daemon`
+  binary, write a new model file and read `<store>/daemon-status.json` for measured
+  numbers. Verified 5-second ingest (`files_ingested=1`) and idle RSS 15.9 MB
+  (limit 100 MB). (ROADMAP C1)
 - **Stage B exit-gate baselines and self-check** — `cargo bench -p modeld-core`
   now records a 100,000-file full scan and a 1 TiB *logical* dedup-planning
   baseline alongside the existing hot paths. `scripts/stage_b_gate.py` applies

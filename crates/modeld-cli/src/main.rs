@@ -15,6 +15,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
 use commands::config::config_command;
+use commands::daemon::daemon_command;
 use commands::db::db_command;
 use commands::dedup::dedup_command;
 use commands::gc::gc_command;
@@ -77,6 +78,19 @@ fn main() -> Result<()> {
                 ScanOptions { incremental, full, exclude_globs, follow_symlinks },
                 mode,
                 wait,
+            )?
+        }
+        Commands::Daemon { watches, mode, debounce_ms, wait } => {
+            let ingest_mode =
+                mode.parse::<modeld_core::IngestMode>().map_err(anyhow::Error::msg)?;
+            daemon_command(
+                resolve_store(store.clone()),
+                commands::daemon::DaemonOptions {
+                    watches,
+                    mode: ingest_mode,
+                    debounce_ms,
+                    wait_secs: wait,
+                },
             )?
         }
         Commands::Status {} => status_command(resolve_store(store.clone()))?,

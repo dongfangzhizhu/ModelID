@@ -1,0 +1,26 @@
+[Unit]
+Description=modeld resident file watcher (auto-ingest new model files)
+Documentation=https://github.com/dongfangzhizhu/modeld
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际安装路径与用户调整
+User=modeld
+Group=modeld
+Environment=MODELD_STORE=/var/lib/modeld
+ExecStart=/usr/local/bin/modeld --store /var/lib/modeld daemon \
+    --watch /models --mode index --debounce-ms 800 --wait 30
+# 进程异常退出后自动重启（C1 验收：异常退出可自动重启）
+Restart=on-failure
+RestartSec=3
+# 防止崩溃循环拖垮系统
+StartLimitIntervalSec=300
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=modeld-daemon
+
+[Install]
+WantedBy=multi-user.target

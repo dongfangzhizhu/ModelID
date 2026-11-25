@@ -4,6 +4,7 @@
 //! here, so a command can be read, tested and changed on its own.
 
 pub mod config;
+pub mod daemon;
 pub mod db;
 pub mod dedup;
 pub mod gc;

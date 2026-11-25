@@ -72,6 +72,21 @@ pub enum Commands {
         #[arg(long, value_name = "SECS", default_value_t = 30)]
         wait: u64,
     },
+    /// Run a resident file watcher that auto-ingests new model files (C1)
+    Daemon {
+        /// Directory to watch recursively (repeatable)
+        #[arg(long = "watch", value_name = "PATH", required = true)]
+        watches: Vec<PathBuf>,
+        /// What to do with each discovered file
+        #[arg(long, value_name = "MODE", default_value = "index")]
+        mode: String,
+        /// Milliseconds a file must stay unchanged before ingest (debounce)
+        #[arg(long, value_name = "MS", default_value_t = 800)]
+        debounce_ms: u64,
+        /// Seconds to wait for the store lock
+        #[arg(long, value_name = "SECS", default_value_t = 30)]
+        wait: u64,
+    },
     /// Show store statistics
     Status {},
     /// Show store statistics and duplicate-space summary

@@ -297,6 +297,39 @@ impl Scanner {
         Ok(results)
     }
 
+    /// Scan one file into the same `ScannedFile` shape produced by `scan()`.
+    ///
+    /// C1's file watcher receives individual paths from `notify`, not a
+    /// directory root. Going through this helper (and then
+    /// `ingest_scan_results`) keeps daemon ingests byte-for-byte identical to
+    /// CLI and WebUI scans: same extension filter, same exclusion rules, same
+    /// hash and metadata extraction. `Ok(None)` means "not a model file"
+    /// (wrong extension or excluded path), not an error.
+    pub fn scan_file(&self, path: &Path) -> Result<Option<ScannedFile>> {
+        if !path.is_file() || !self.matches_extension(path) || self.is_excluded(path) {
+            return Ok(None);
+        }
+        let meta = std::fs::metadata(path)?;
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let (inode, device_id) = get_file_id(path, &meta);
+        let hash = hash_file(path)?;
+        Ok(Some(ScannedFile {
+            path: path.to_path_buf(),
+            size,
+            hash,
+            from_cache: false,
+            mtime,
+            inode,
+            device_id,
+        }))
+    }
+
     /// Check if path should be excluded from scanning (using current options).
     fn is_excluded_with_opts(&self, path: &Path, opts: &ScanOptions) -> bool {
         // 1. Hard-coded excluded dir prefixes

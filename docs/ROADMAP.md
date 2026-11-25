@@ -708,6 +708,22 @@ Refs: docs/ROADMAP.md#A1
 
 - **产物**：`modeld daemon`（`notify` 监听 + 任务队列 + 去抖）
 - **验收**：新增模型文件 5 秒内自动入库；空闲 RSS < 100 MB；异常退出可自动重启
+- **状态**：done
+- **实现**：
+  - `crates/modeld-cli/src/commands/daemon.rs`：`notify` v8 递归监听（`--watch` 可重复），`mpsc` 事件通道，`DebounceQueue` 去抖（默认 800 ms，`--debounce-ms` 可调），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`，与 CLI/WebUI 扫描同路径；批次期间才持有 StoreLock。
+  - `supervise` 循环：监听线程死亡与工作线程 panic 分别计数、按预算重启（watcher 5 次、worker 20 次），退避 500 ms；批次在 panic 后重新入队避免丢数据。
+  - `crates/modeld-cli/src/commands/daemon.rs::current_rss_bytes`：Linux 读 `/proc/self/status`，Windows 经 `psapi` 读 working set；每 1 s 写 `<store>/daemon-status.json`（pid/事件数/入库数/重启数/RSS/running）供黑盒验收读取实测值。
+  - `deploy/systemd/modeld-daemon.service`：`Restart=on-failure` + `RestartSec=3` + `StartLimitBurst=5`，进程异常退出由 OS 自动重启。
+  - `crates/modeld-core/src/scanner.rs::Scanner::scan_file`：单文件扫描入口（扩展名/排除规则/元数据/哈希与目录扫描一致）。
+- **证据（2026-11-26）**：
+  - `cargo test -p modeld-cli --test daemon --locked`：2 个黑盒验收测试通过。真实启动 `modeld daemon` 子进程、写文件、读状态文件：
+    - 5 秒入库：`files_ingested=1`、`events_seen=4`、`watcher_restarts=0`，实测入库耗时 < 5 s。
+    - 空闲 RSS：`rss_bytes=16662528`（**15.9 MB**），低于 100 MB 门槛。
+  - 单元测试 5 项：去抖静默/最新事件覆盖/事件种类过滤/重启预算/状态 JSON 字段。
+  - 质量门：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo test --workspace --locked` → **402 passed / 0 failed**（较 B10 的 395 增加 7 项）。
+- **待办/边界**：
+  - Windows 无 systemd；OS 级自动重启需在 Windows 上用任务计划程序或服务包装器（未在本机实测）。
+  - 状态文件 RSS 是 working set（Windows）/VmRSS（Linux），非 PSS；多进程共享页会重复计入。
 
 ### C2 · 真实可观测性
 
@@ -821,7 +837,7 @@ Refs: docs/ROADMAP.md#A1
 
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
-| C1 | 常驻守护进程 | todo | — | — | — | — |
+| C1 | 常驻守护进程 | done | AI agent | 2026-11-26 | 2026-11-26 | `PENDING` |
 | C2 | 真实可观测性 | todo | — | — | — | — |
 | C3 | 发布工程 | todo | — | — | — | — |
 | C4 | 安全增强 | todo | — | — | — | — |
@@ -837,6 +853,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-26 | C1 | 常驻守护进程：新增 `modeld daemon`（notify v8 递归监听 + mpsc 事件队列 + `DebounceQueue` 去抖），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`；监督循环对 watcher 死亡 / worker panic 分别按预算重启并退避，panic 批次重新入队；写 `daemon-status.json` 暴露实测数字；新增 systemd `Restart=on-failure` 单元。黑盒验收：5 秒内入库（files_ingested=1）、空闲 RSS 15.9 MB（< 100 MB）、0 次非预期重启；全量 402/402 | `PENDING` | `cli/commands/daemon.rs`、`cli/cli.rs`、`cli/main.rs`、`cli/tests/daemon.rs`、`core/scanner.rs`、`deploy/systemd/modeld-daemon.service`、`Cargo.toml`、`Cargo.lock`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-25 | B10 | 阶段 B 出口 Gate 收口：新增 10 万文件全量扫描与 1 TiB 逻辑规模去重规划基准、平台隔离基线、静态自检脚本；故障注入 15/15、全量 395/395、core 覆盖率 79.4%、main.rs 183 行、库层零 print 宏，五项出口条件全部勾选 | `89e1f82` | `core/benches/scan_dedup.rs`、`bench/baseline.json`、`scripts/stage_b_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-24 | B9 | 文档 as-built 重构：重写 `architecture.md` 并逐模块给出源码锚点；新增 5 篇 ADR、`SECURITY.md`、`CONTRIBUTING.md`；17 篇旧规划稿归档 `docs/history/`，根目录仅剩 4 个 Markdown；逐项对齐 proxy API 默认值；修正 Windows 相对符号链接分隔符导致的 HF 缓存悬空链接 | `987ad35` | `docs/architecture.md`、`docs/adr/*`、`SECURITY.md`、`CONTRIBUTING.md`、`docs/history/*`、`docs/proxy-api.md`、`docs/proxy-setup.md`、`README.md`、`python/README.md`、`.gitignore`、`core/hf_cache.rs` |
 | 2026-11-24 | B8 | 测试体系：28 个 HTTP e2e 覆盖全部路由（含 4xx 与 401 遍历、路由表编译期防漏）、5 中断点矩阵、4 类环境测试；core 覆盖率 79.43% 入库（llvm-tools 直连，绕开 403 的 crates.io）；scan/dedup 基准 + 20% 回归门禁 + CI job；顺带修跨卷 adopt 仍 exit 0 与前端 `toString` phase 命中原型链两个真缺陷 | `cc93f1f` | `webui/tests/api_e2e.rs`、`core/tests/interruption_matrix.rs`、`cli/tests/environment.rs`、`core/benches/scan_dedup.rs`、`scripts/{coverage,bench_gate}.py`、`coverage/*`、`bench/*`、`.github/workflows/ci.yml`、`cli/commands/scan.rs`、`ui/pages/dashboard-progress.js` |
@@ -862,8 +879,8 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
 | B 架构收敛 | 10 | 10 | 100% |
-| C 产品化 | 7 | 0 | 0% |
-| **合计** | **25** | **18** | **72%** |
+| C 产品化 | 7 | 1 | 14% |
+| **合计** | **25** | **19** | **76%** |
 
 ---
 

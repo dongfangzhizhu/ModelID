@@ -26,6 +26,9 @@ serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 tokio.workspace = true
+notify.workspace = true
+chrono.workspace = true
+ctrlc.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
