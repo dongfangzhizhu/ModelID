@@ -837,7 +837,7 @@ Refs: docs/ROADMAP.md#A1
 
 | ID | 任务 | 状态 | 负责人 | 开始 | 完成 | 提交 |
 |---|---|---|---|---|---|---|
-| C1 | 常驻守护进程 | done | AI agent | 2026-11-26 | 2026-11-26 | `PENDING` |
+| C1 | 常驻守护进程 | done | AI agent | 2026-11-26 | 2026-11-26 | `419f9bf` |
 | C2 | 真实可观测性 | todo | — | — | — | — |
 | C3 | 发布工程 | todo | — | — | — | — |
 | C4 | 安全增强 | todo | — | — | — | — |
@@ -853,7 +853,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
-| 2026-11-26 | C1 | 常驻守护进程：新增 `modeld daemon`（notify v8 递归监听 + mpsc 事件队列 + `DebounceQueue` 去抖），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`；监督循环对 watcher 死亡 / worker panic 分别按预算重启并退避，panic 批次重新入队；写 `daemon-status.json` 暴露实测数字；新增 systemd `Restart=on-failure` 单元。黑盒验收：5 秒内入库（files_ingested=1）、空闲 RSS 15.9 MB（< 100 MB）、0 次非预期重启；全量 402/402 | `PENDING` | `cli/commands/daemon.rs`、`cli/cli.rs`、`cli/main.rs`、`cli/tests/daemon.rs`、`core/scanner.rs`、`deploy/systemd/modeld-daemon.service`、`Cargo.toml`、`Cargo.lock`、`docs/ROADMAP.md`、`CHANGELOG.md` |
+| 2026-11-26 | C1 | 常驻守护进程：新增 `modeld daemon`（notify v8 递归监听 + mpsc 事件队列 + `DebounceQueue` 去抖），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`；监督循环对 watcher 死亡 / worker panic 分别按预算重启并退避，panic 批次重新入队；写 `daemon-status.json` 暴露实测数字；新增 systemd `Restart=on-failure` 单元。黑盒验收：5 秒内入库（files_ingested=1）、空闲 RSS 15.9 MB（< 100 MB）、0 次非预期重启；全量 402/402 | `419f9bf` | `cli/commands/daemon.rs`、`cli/cli.rs`、`cli/main.rs`、`cli/tests/daemon.rs`、`core/scanner.rs`、`deploy/systemd/modeld-daemon.service`、`Cargo.toml`、`Cargo.lock`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-25 | B10 | 阶段 B 出口 Gate 收口：新增 10 万文件全量扫描与 1 TiB 逻辑规模去重规划基准、平台隔离基线、静态自检脚本；故障注入 15/15、全量 395/395、core 覆盖率 79.4%、main.rs 183 行、库层零 print 宏，五项出口条件全部勾选 | `89e1f82` | `core/benches/scan_dedup.rs`、`bench/baseline.json`、`scripts/stage_b_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-24 | B9 | 文档 as-built 重构：重写 `architecture.md` 并逐模块给出源码锚点；新增 5 篇 ADR、`SECURITY.md`、`CONTRIBUTING.md`；17 篇旧规划稿归档 `docs/history/`，根目录仅剩 4 个 Markdown；逐项对齐 proxy API 默认值；修正 Windows 相对符号链接分隔符导致的 HF 缓存悬空链接 | `987ad35` | `docs/architecture.md`、`docs/adr/*`、`SECURITY.md`、`CONTRIBUTING.md`、`docs/history/*`、`docs/proxy-api.md`、`docs/proxy-setup.md`、`README.md`、`python/README.md`、`.gitignore`、`core/hf_cache.rs` |
 | 2026-11-24 | B8 | 测试体系：28 个 HTTP e2e 覆盖全部路由（含 4xx 与 401 遍历、路由表编译期防漏）、5 中断点矩阵、4 类环境测试；core 覆盖率 79.43% 入库（llvm-tools 直连，绕开 403 的 crates.io）；scan/dedup 基准 + 20% 回归门禁 + CI job；顺带修跨卷 adopt 仍 exit 0 与前端 `toString` phase 命中原型链两个真缺陷 | `cc93f1f` | `webui/tests/api_e2e.rs`、`core/tests/interruption_matrix.rs`、`cli/tests/environment.rs`、`core/benches/scan_dedup.rs`、`scripts/{coverage,bench_gate}.py`、`coverage/*`、`bench/*`、`.github/workflows/ci.yml`、`cli/commands/scan.rs`、`ui/pages/dashboard-progress.js` |
