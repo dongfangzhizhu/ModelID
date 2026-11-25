@@ -135,9 +135,57 @@ pub fn quarantine_command(store_path: PathBuf, action: QuarantineAction) -> Resu
 // HF Command implementations
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub fn verify_command(store_path: PathBuf, json_output: bool) -> Result<()> {
+pub fn verify_command(
+    store_path: PathBuf,
+    json_output: bool,
+    manifest: Option<PathBuf>,
+    generate_manifest: Option<PathBuf>,
+) -> Result<()> {
     let db_path = require_store_db(&store_path)?;
     let db = Database::open(&db_path)?;
+
+    // C4: `--generate-manifest` 写出当前 CAS 对象清单；`--manifest` 重新哈希
+    // 所有对象，检出被篡改/替换/截断的内容。两者与常规一致性检查互斥。
+    if let Some(path) = generate_manifest {
+        let m = modeld_core::generate_manifest(&store_path, &db)?;
+        modeld_core::save_manifest(&path, &m)?;
+        println!("已生成清单 {}（{} 个对象）", path.display(), m.objects.len());
+        return Ok(());
+    }
+    if let Some(path) = manifest {
+        let m = modeld_core::load_manifest(&path)?;
+        let report = modeld_core::verify_manifest(&store_path, &m, true)?;
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "clean": report.is_clean(),
+                    "checked": report.checked,
+                    "mismatches": report.mismatches,
+                    "missing": report.missing,
+                    "unexpected": report.unexpected,
+                })
+            );
+        } else {
+            println!("清单校验 {} 个对象", report.checked);
+            for item in &report.mismatches {
+                println!("{} 内容篡改: {}", "⚠".red().bold(), item);
+            }
+            for item in &report.missing {
+                println!("{} 缺失: {}", "⚠".red().bold(), item);
+            }
+            for item in &report.unexpected {
+                println!("{} 清单外对象: {}", "⚠".red().bold(), item);
+            }
+            if report.is_clean() {
+                println!("{}", "清单校验通过：所有 CAS 对象与清单一致".green().bold());
+            }
+        }
+        if !report.is_clean() {
+            anyhow::bail!("manifest verification failed");
+        }
+        return Ok(());
+    }
 
     if !json_output {
         println!("{}", t("verify.running").cyan().bold());

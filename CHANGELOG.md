@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Security hardening: keyring tokens, manifest verification, clean advisories [C4]** —
+  CAS manifest generation/verification (`modeld verify --manifest`,
+  `--generate-manifest`) re-hashes objects and detects tampered, truncated and
+  missing CAS files. Bearer tokens now live in the OS keyring via
+  `modeld config token-set/status/migrate`; proxy startup and `token-rotate` no
+  longer write plaintext tokens to `modeld.toml`, and keyring failure is an
+  explicit error rather than a silent downgrade. (ROADMAP C4)
 - **Release engineering scaffolding for 0.2.0 [C3]** — version bumped to 0.2.0
   across Rust/Python; crates made publishable (versioned path deps + metadata);
   `release.yml` gains SBOM, Sigstore keyless signing, topologically ordered
@@ -124,6 +131,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dependency advisories [C4]** — upgraded rustls/tokio/zstd/crossbeam-epoch/url/
+  webpki-roots and rusqlite 0.31→0.41 (SQLite CVE-2026-119375), raised MSRV to
+  1.89; `cargo deny check` now reports advisories/bans/licenses/sources all ok.
+  Only two maintenance-only advisories with no safe upgrade are documented
+  exceptions in `deny.toml`. (ROADMAP C4)
 - **WebUI library printed the startup URL to stdout** — `modeld-webui::run`
   called `println!` after binding the socket, violating the library-layer
   output rule. The binary now prints the URL and the library keeps only the

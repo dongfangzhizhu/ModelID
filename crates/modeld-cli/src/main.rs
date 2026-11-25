@@ -188,7 +188,9 @@ fn main() -> Result<()> {
             cleanup_tmp,
             wait,
         )?,
-        Commands::Verify { json } => verify_command(resolve_store(store.clone()), json)?,
+        Commands::Verify { json, manifest, generate_manifest } => {
+            verify_command(resolve_store(store.clone()), json, manifest, generate_manifest)?
+        }
         Commands::Unlink { path, wait } => {
             unlink_command(resolve_store(store.clone()), path, wait)?
         }

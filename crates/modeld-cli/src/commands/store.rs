@@ -42,7 +42,7 @@ pub fn store_command(action: StoreAction, store: Option<PathBuf>) -> Result<()> 
         }
         StoreAction::Verify { json } => {
             let path = resolve_store(store.clone());
-            verify_command(path, json)
+            verify_command(path, json, None, None)
         }
         StoreAction::Migrate { from, to } => store_migrate_command(from, to),
     }

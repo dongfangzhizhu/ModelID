@@ -26,11 +26,13 @@ pub mod hf_cache;
 pub mod i18n;
 pub mod ingest;
 pub mod links;
+pub mod manifest;
 pub mod platform;
 pub mod quarantine;
 pub mod recover;
 pub mod refs;
 pub mod scanner;
+pub mod secret_store;
 pub mod store_lock;
 pub mod store_path;
 pub mod tx;
@@ -70,6 +72,10 @@ pub use hash::{hash_file, Blake3Hash};
 pub use hf_cache::{HfCache, HfCacheStats, RepoType};
 pub use i18n::{detect, t, tf, Lang};
 pub use ingest::{ingest_scan_results, IngestError, IngestMode, IngestResult};
+pub use manifest::{
+    generate as generate_manifest, load as load_manifest, save as save_manifest,
+    verify as verify_manifest, Manifest, ManifestEntry, ManifestReport,
+};
 pub use platform::{check_file_locked, detect_capabilities, is_same_volume, PlatformCapabilities};
 pub use quarantine::QuarantineManager;
 pub use recover::{recover_store, PathAction, PathOutcome, RecoveryReport, TxAction};

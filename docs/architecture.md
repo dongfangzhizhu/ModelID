@@ -21,7 +21,7 @@ modeld 是一个本地优先的 AI 模型内容寻址存储（CAS）系统。它
 | `modeld-client` | lib | 同步阻塞 Rust SDK | `crates/modeld-client/src/lib.rs`、`src/client.rs` |
 | `modeld_hook` | Python 包 | HF 下载拦截（可选） | `python/modeld_hook/__init__.py`、`intercept.py` |
 
-workspace 定义在根目录 `Cargo.toml`；`rust-version = 1.88`。二进制只有两个：`modeld` 与 `modeld-webui`；proxy 与 client 是被 CLI / 其他程序调用的库。
+workspace 定义在根目录 `Cargo.toml`；`rust-version = 1.89`。二进制只有两个：`modeld` 与 `modeld-webui`；proxy 与 client 是被 CLI / 其他程序调用的库。
 
 典型数据流：
 

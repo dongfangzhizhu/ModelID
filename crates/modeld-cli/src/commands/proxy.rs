@@ -1,6 +1,6 @@
 //! `modeld proxy …` — start, discover, inspect and re-key the local proxy.
 
-use crate::{format_bytes, load_config, resolve_store, save_config};
+use crate::{format_bytes, resolve_store};
 use anyhow::Result;
 use clap::Subcommand;
 use colored::*;
@@ -152,20 +152,24 @@ fn proxy_start_command(opts: ProxyStartOptions) -> Result<()> {
             "⚠  anonymous access enabled — reachable from this machine only".yellow().bold()
         );
     } else {
-        // Resolution order: --token, --config file, <store>/modeld.toml (either
-        // schema), MODELD_AUTH_TOKEN, generated.
-        let mut store_config = load_config(&store).unwrap_or_default();
+        // C4 resolution order: --token → OS keyring → MODELD_AUTH_TOKEN.
+        // `modeld.toml` plaintext is no longer a read fallback; a generated token
+        // goes to the keyring, never to disk. If no keyring is available we fail
+        // loudly instead of silently writing a plaintext secret.
         let configured = token
-            .or_else(|| cfg.auth.tokens.first().cloned())
-            .or_else(|| store_config.proxy_tokens().into_iter().next())
+            .or_else(|| modeld_core::secret_store::get_token(&store).ok())
             .or_else(|| std::env::var("MODELD_AUTH_TOKEN").ok().filter(|t| !t.is_empty()));
 
         let (token_value, generated) = match configured {
             Some(t) => (t, false),
             None => {
                 let t = Uuid::new_v4().to_string();
-                store_config.set_proxy_token(&t);
-                save_config(&store, &store_config)?;
+                modeld_core::secret_store::set_token(&store, &t).map_err(|e| {
+                    anyhow::anyhow!(
+                        "no token available and cannot store a generated one in OS keyring: {e}\n\
+                         pass --token, set MODELD_AUTH_TOKEN, or run `modeld config token-set`"
+                    )
+                })?;
                 (t, true)
             }
         };
@@ -297,25 +301,18 @@ fn proxy_status_command(url: &str, token: Option<String>) -> Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn proxy_token_rotate_command(store_path: PathBuf) -> Result<()> {
-    let mut config = load_config(&store_path).unwrap_or_default();
-
     let new_token = Uuid::new_v4().to_string();
-    // Write `[auth] token` *and* `[proxy.auth] tokens`: the proxy reads the
-    // latter, older versions read the former. Rotating only one left the server
-    // accepting the old token after a restart (A6).
-    config.set_proxy_token(&new_token);
-    save_config(&store_path, &config)?;
+    // C4: rotate into the OS keyring only. A6's dual-write to modeld.toml left
+    // plaintext secrets on disk; callers now read from keyring first.
+    modeld_core::secret_store::set_token(&store_path, &new_token)?;
+    modeld_core::audit::record(
+        &store_path,
+        modeld_core::AuditEntry::success("token_rotate_keyring", "os-keyring"),
+    );
 
     println!("{}", "✓ Bearer token rotated successfully.".green().bold());
     println!("  {}", format!("New token: {}", new_token).bold());
-    println!(
-        "  {}",
-        format!(
-            "Written to {}/modeld.toml as [auth] token and [proxy.auth] tokens.",
-            store_path.display()
-        )
-        .dimmed()
-    );
+    println!("  {}", "Stored in the OS keyring (not in modeld.toml).".dimmed());
     println!("  {}", "Restart the proxy server for the change to take effect.".dimmed());
     println!(
         "  {}",

@@ -770,12 +770,30 @@ Refs: docs/ROADMAP.md#A1
   - 真实 `cargo publish` / PyPI `twine upload` 未执行：本机无 `CRATESIO_TOKEN`/`PYPI_TOKEN`，需设仓库变量 `PUBLISH_CRATES`/`PUBLISH_PYPI=true`。
   - 三平台安装包未在 Linux/macOS 实机安装；本机只验证了 Windows `modeld.exe --version`。
   - cosign keyless 签名未产出真实 `.sig`/`.pem`（无 CI OIDC）；Homebrew/winget/scoop 清单 SHA256 仍是占位符。
-  - `cargo deny check advisories` 当前失败：ring/rustls/libsqlite3-sys/chrono/async-std 等存在真实公告（含 SQLite CVE-2026-119375）；修复需 rusqlite 0.31→0.41（MSRV 升至 1.89），归入 **C4** 处理，不在本任务声称通过。
+  - `cargo deny check advisories` 当时失败：ring/rustls/libsqlite3-sys/chrono/async-std 等存在真实公告（含 SQLite CVE-2026-119375）；已在 **C4** 修复至全项通过（见 C4 证据）。
 
 ### C4 · 安全增强
 
 - **产物**：token 存 OS keyring、模型校验清单（manifest）、可选签名验证、`cargo-deny` 无高危
 - **验收**：`modeld verify --manifest` 可检出被篡改的 CAS 对象；密钥不落盘明文
+- **状态**：done
+- **实现**：
+  - `cargo-deny` 清理：16 条公告 → 升级 13 条可修复项（rustls 0.23.46、tokio 1.54.1、zstd 0.13.6、crossbeam-epoch 0.9.21、url 2.5.9、webpki-roots 1.0.12 等），rusqlite 0.31→0.41（修复 SQLite CVE-2026-119375，附带 libsqlite3-sys 0.39.1）、MSRV 1.88→1.89；仅 2 条「无安全升级」的维护状态公告（async-std、chrono）在 `deny.toml` 每条带理由豁免。`cargo deny --offline check` → advisories/bans/licenses/sources 全 ok。
+  - `crates/modeld-core/src/manifest.rs`：CAS 对象清单生成/保存/加载/校验（重新哈希 + 字节数 + 缺失 + 清单外对象），**不伪造内嵌签名验证**；签名仍走 `scripts/sign_release.py` 的 cosign keyless。
+  - `modeld verify --manifest <PATH>` / `--generate-manifest <PATH>`：CLI 入口，检出篡改后非零退出。
+  - `crates/modeld-core/src/secret_store.rs` + keyring v4：token 存 OS keyring（按 store 路径 SHA256 分隔账户），**不静默降级**：无 keyring 时明确报错，不回写明文配置；`resolve_token` 仅 keyring → `MODELD_AUTH_TOKEN`。
+  - CLI `modeld config token-set/token-status/token-migrate`：写/查（不打印值）/从 `modeld.toml` 迁移到 keyring 并清除明文；`proxy` 启动与 `token-rotate` 改为只写 keyring，不再双写明文。
+- **证据（2026-11-26）**：
+  - `cargo test -p modeld-core --test manifest_test`：4 项通过 — 干净存储通过；篡改一字节（大小不变）报 `content hash changed`；截断报 size mismatch；缺失对象报 missing。
+  - `cargo test -p modeld-core --lib secret_store`：2 项通过 — 账户按 store 稳定且隔离；keyring 不可用时不修改磁盘配置（显式失败）。
+  - `cargo deny --offline check`：advisories ok / bans ok / licenses ok / sources ok（本地公告库离线，因在线拉取 502）。
+  - CLI 实测：`modeld verify --help` 含 `--manifest` / `--generate-manifest`；`modeld config --help` 含 `token-set/token-status/token-migrate`。
+  - 质量门：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings` 通过；`cargo test --workspace --locked` → **418 passed / 0 failed**（较 C3 的 412 增加 6 项）。
+- **待办/边界（如实登记）**：
+  - 两条维护状态公告（RUSTSEC-2025-0052 async-std、RUSTSEC-2026-0543 chrono）无安全升级，已在 deny.toml 带理由豁免；迁移到 smol/jiff 属后续技术债。
+  - 「可选签名验证」未做成清单内嵌签名验证：发布产物签名走 `scripts/sign_release.py`（cosign keyless），本机无 OIDC 未产出真实签名；不把清单校验冒充签名验证。
+  - keyring 在无头 Linux / 无 DBus 环境不可用，此时 proxy 启动要求显式 `--token` 或 `MODELD_AUTH_TOKEN`，不写明文到磁盘。
+  - 本机 Windows Credential Manager 可用于 keyring，但未在 CI 无头环境实测 token-set 全流程。
 
 ### C5 · 前端重构
 
@@ -877,6 +895,7 @@ Refs: docs/ROADMAP.md#A1
 | C1 | 常驻守护进程 | done | AI agent | 2026-11-26 | 2026-11-26 | `419f9bf` |
 | C2 | 真实可观测性 | done | AI agent | 2026-11-26 | 2026-11-26 | `a97041b` |
 | C3 | 发布工程 | done | AI agent | 2026-11-26 | 2026-11-26 | `aad1f6d` |
+| C4 | 安全增强 | done | AI agent | 2026-11-26 | 2026-11-26 | `PENDING` |
 | C2 | 真实可观测性 | todo | — | — | — | — |
 | C3 | 发布工程 | todo | — | — | — | — |
 | C4 | 安全增强 | todo | — | — | — | — |
@@ -892,6 +911,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-26 | C4 | 安全增强：清理 16 条 cargo-deny 公告（升级 rustls/tokio/zstd/rusqlite 0.41 修 SQLite CVE，MSRV→1.89，仅 2 条无升级路径的维护公告带理由豁免）→ advisories/bans/licenses/sources 全 ok；新增 CAS 内容清单（生成/校验/篡改检出）与 `modeld verify --manifest/--generate-manifest`；token 改存 OS keyring，`config token-set/status/migrate` 与 proxy/token-rotate 不再明文落盘且失败显式化。实测：篡改/截断/缺失对象全部检出、keyring 不可用不改磁盘配置、418/418 | `PENDING` | `Cargo.toml`、`Cargo.lock`、`deny.toml`、`docker/Dockerfile`、`CONTRIBUTING.md`、`docs/architecture.md`、`core/{manifest,secret_store,lib}.rs`、`core/tests/manifest_test.rs`、`cli/commands/{repair,config,proxy,store}.rs`、`cli/cli.rs`、`cli/main.rs`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C3 | 发布工程：版本统一 0.2.0、crate 改为可发布（path 依赖带版本号）、release.yml 新增 SBOM/签名/拓扑顺序 crates.io/PyPI 发布 job；`scripts/sbom.py` 从真实 metadata 生成 372 组件 CycloneDX、`scripts/sign_release.py` 无凭据时诚实失败；Homebrew/winget/scoop 清单带 SHA256 占位符；`docs/release-checklist.md` 区分实测与未验证。本地实测 `modeld --version`=0.2.0、`cargo install --path` 可用、core 可打包；真实 publish/签名/三平台安装需外部凭据与平台，未执行并已登记；cargo-deny 公告归入 C4 | `aad1f6d` | `Cargo.toml`、`Cargo.lock`、`crates/*/Cargo.toml`、`python/pyproject.toml`、`python/modeld_hook/__init__.py`、`.github/workflows/release.yml`、`scripts/{sbom,sign_release}.py`、`sbom/modeld-0.2.0.json`、`deploy/{homebrew,scoop,winget}/*`、`docs/release-checklist.md`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C2 | 真实可观测性：新增 `AuditQuery` 过滤查询（时间范围/op/actor/outcome/资源子串）、`modeld audit` CLI 与 `GET /api/v1/audit`；`/metrics` 派生 `modeld_audit_entries_total{op,outcome}` 与审计日志同源；新增 Grafana 面板 JSON；补齐 quarantine/tag/note/pin/favorite/scan_ingest 变更路径的审计写入。黑盒验证「上周谁删了什么」：7d+unlink 仅返回近 2 天删除记录、actor=192.168.1.5；全量 412/412 | `a97041b` | `core/audit.rs`、`core/ingest.rs`、`core/quarantine.rs`、`core/lib.rs`、`cli/commands/audit.rs`、`cli/commands/meta.rs`、`cli/tests/audit.rs`、`webui/api/audit.rs`、`webui/api/mod.rs`、`webui/metrics.rs`、`webui/server.rs`、`webui/tests/api_e2e.rs`、`deploy/grafana/modeld-dashboard.json`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C1 | 常驻守护进程：新增 `modeld daemon`（notify v8 递归监听 + mpsc 事件队列 + `DebounceQueue` 去抖），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`；监督循环对 watcher 死亡 / worker panic 分别按预算重启并退避，panic 批次重新入队；写 `daemon-status.json` 暴露实测数字；新增 systemd `Restart=on-failure` 单元。黑盒验收：5 秒内入库（files_ingested=1）、空闲 RSS 15.9 MB（< 100 MB）、0 次非预期重启；全量 402/402 | `419f9bf` | `cli/commands/daemon.rs`、`cli/cli.rs`、`cli/main.rs`、`cli/tests/daemon.rs`、`core/scanner.rs`、`deploy/systemd/modeld-daemon.service`、`Cargo.toml`、`Cargo.lock`、`docs/ROADMAP.md`、`CHANGELOG.md` |
@@ -920,8 +940,8 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
 | B 架构收敛 | 10 | 10 | 100% |
-| C 产品化 | 7 | 3 | 43% |
-| **合计** | **25** | **21** | **84%** |
+| C 产品化 | 7 | 4 | 57% |
+| **合计** | **25** | **22** | **88%** |
 
 ---
 

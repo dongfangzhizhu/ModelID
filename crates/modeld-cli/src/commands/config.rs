@@ -22,6 +22,15 @@ pub enum ConfigAction {
     },
     /// List every configurable key and its current value
     List {},
+    /// Store a bearer token in the OS keyring (never in modeld.toml) [C4]
+    TokenSet {
+        /// Token value (omit to read from stdin)
+        token: Option<String>,
+    },
+    /// Report whether a token is in the OS keyring (never prints the value) [C4]
+    TokenStatus {},
+    /// Move a plaintext token out of modeld.toml into the OS keyring [C4]
+    TokenMigrate {},
 }
 
 pub fn config_command(action: ConfigAction, store: Option<PathBuf>) -> Result<()> {
@@ -54,6 +63,49 @@ pub fn config_command(action: ConfigAction, store: Option<PathBuf>) -> Result<()
                 },
             );
             println!("{} {} = {}", "✓".green().bold(), key.bold(), value);
+            Ok(())
+        }
+        ConfigAction::TokenSet { token } => {
+            let store_path = resolve_store(store.clone());
+            let token = match token {
+                Some(t) => t,
+                None => {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)?;
+                    buf.trim().to_string()
+                }
+            };
+            modeld_core::secret_store::set_token(&store_path, &token)?;
+            // token 值绝不进审计日志。
+            modeld_core::audit::record(
+                &store_path,
+                modeld_core::AuditEntry::success("token_set_keyring", "os-keyring"),
+            );
+            println!("{} bearer token 已写入 OS keyring", "✓".green().bold());
+            Ok(())
+        }
+        ConfigAction::TokenStatus {} => {
+            let store_path = resolve_store(store.clone());
+            let present = modeld_core::secret_store::has_token(&store_path);
+            println!("OS keyring token: {}", if present { "已设置" } else { "未设置" });
+            println!(
+                "token 来源优先级: OS keyring → MODELD_AUTH_TOKEN（modeld.toml 明文不再作为回退）"
+            );
+            Ok(())
+        }
+        ConfigAction::TokenMigrate {} => {
+            let store_path = resolve_store(store.clone());
+            let migrated = modeld_core::secret_store::migrate_from_config(&store_path)?;
+            if migrated {
+                modeld_core::audit::record(
+                    &store_path,
+                    modeld_core::AuditEntry::success("token_migrate_keyring", "modeld.toml"),
+                );
+                println!("{} token 已迁移到 OS keyring，配置中的明文已清除", "✓".green().bold());
+            } else {
+                println!("配置中没有需要迁移的明文 token");
+            }
             Ok(())
         }
         ConfigAction::List {} => {

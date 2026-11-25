@@ -3,10 +3,10 @@
 # Multi-stage build: the toolchain image is ~1.4 GB, the runtime image only
 # carries the stripped binary and ca-certificates (~80 MB).
 #
-# The Rust version must satisfy `rust-version` in Cargo.toml (1.88, verified with
-# `cargo +1.88 build --workspace --locked`).
+# The Rust version must satisfy `rust-version` in Cargo.toml (1.89, verified with
+# `cargo +1.89 build --workspace --locked`).
 
-FROM rust:1.88-slim AS builder
+FROM rust:1.89-slim AS builder
 WORKDIR /app
 
 # Native build dependencies (rusqlite bundles SQLite itself; TLS is via rustls

@@ -14,7 +14,18 @@ targets = [
 # Deny any RUSTSEC advisory that affects a dependency in the graph.
 version = 2
 yanked = "deny"
-ignore = []
+# C4: 仅豁免「无安全升级路径」的维护状态公告，均非可利用漏洞。
+# 每条必须在 ROADMAP C4 记录理由与复核条件；有安全升级的公告一律修复而非豁免。
+ignore = [
+    # async-std 已被宣布停止维护（RUSTSEC-2025-0052），但 mdns 3.x 的发现流
+    # 依赖它，且官方无安全升级。mDNS 仅用于可选的 LAN 服务发现，不处理
+    # 不可信输入；替代方案（smol/tokio 重写 mdns）需较大改动，另行评估。
+    "RUSTSEC-2025-0052",
+    # chrono 全部版本被标记 unmaintained（RUSTSEC-2026-0543），无安全升级。
+    # 本项目只用其时间解析/格式化，不涉及时区数据库更新；迁移到 jiff/time
+    # 涉及 12 个文件的 API 变更，作为后续技术债跟踪。
+    "RUSTSEC-2026-0543",
+]
 
 [licenses]
 version = 2

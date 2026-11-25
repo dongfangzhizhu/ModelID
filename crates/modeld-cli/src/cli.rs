@@ -289,6 +289,12 @@ pub enum Commands {
         /// Output result as JSON
         #[arg(long)]
         json: bool,
+        /// Verify CAS objects against a manifest file (C4)
+        #[arg(long, value_name = "PATH", conflicts_with = "generate_manifest")]
+        manifest: Option<PathBuf>,
+        /// Generate a manifest of all CAS objects at this path (C4)
+        #[arg(long, value_name = "PATH", conflicts_with = "manifest")]
+        generate_manifest: Option<PathBuf>,
     },
     /// Restore a hardlinked/symlinked file to an independent physical copy
     Unlink {

@@ -13,7 +13,7 @@
 
 ## Development environment
 
-- Rust toolchain: MSRV is `1.88` (`rust-version` in the root `Cargo.toml`).
+- Rust toolchain: MSRV is `1.89` (`rust-version` in the root `Cargo.toml`).
 - Components: `rustfmt`, `clippy`, and `llvm-tools-preview` for coverage.
 - Node.js is **not** required to run the WebUI; it is only needed for
   `crates/modeld-webui/ui/tests/*.test.js`.
