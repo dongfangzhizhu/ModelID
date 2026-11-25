@@ -176,7 +176,6 @@ pub async fn run(state: AppState, config: WebUiConfig) -> Result<()> {
 
     let url = format!("http://{}", addr);
     tracing::info!("modeld Web UI listening on {}", url);
-    println!("🌐  modeld Web UI: {}", url);
 
     if config.open_browser {
         let _ = open_browser(&url);

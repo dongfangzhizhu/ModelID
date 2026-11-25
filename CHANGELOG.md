@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Stage B exit-gate baselines and self-check** — `cargo bench -p modeld-core`
+  now records a 100,000-file full scan and a 1 TiB *logical* dedup-planning
+  baseline alongside the existing hot paths. `scripts/stage_b_gate.py` applies
+  the deterministic exit checks (entry-point size, library print macros,
+  coverage, CI jobs, as-built docs, baseline coverage and the 20% regression
+  gate). All five stage B exit conditions are now checked with evidence.
+  (ROADMAP B10)
 - **As-built documentation set** — `docs/architecture.md` was rewritten from
   the implemented code: every module table row points to a real source file,
   and the Phase 0 planning draft is archived at
@@ -89,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **WebUI library printed the startup URL to stdout** — `modeld-webui::run`
+  called `println!` after binding the socket, violating the library-layer
+  output rule. The binary now prints the URL and the library keeps only the
+  `tracing::info!` record. Found by `scripts/stage_b_gate.py`. (ROADMAP B10)
 - **Windows HF cache symlinks were dangling** — the fake HF cache wrote
   relative symlink targets with `/` separators. Windows creates those links
   successfully but cannot resolve them, so `snapshots/<sha>/<file>` and

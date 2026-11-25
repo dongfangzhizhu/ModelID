@@ -104,6 +104,8 @@ async fn main() -> Result<()> {
 
     let config = modeld_webui::WebUiConfig { host: args.host, port: args.port, open_browser };
 
+    // The binary owns stdout; the library only logs through tracing.
+    println!("🌐  modeld Web UI: http://{}:{}", config.host, config.port);
     modeld_webui::run(state, config).await
 }
 

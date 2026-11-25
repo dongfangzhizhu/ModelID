@@ -672,13 +672,33 @@ Refs: docs/ROADMAP.md#A1
   - **未实测**：三平台 CI、ubuntu 首次 bench 基线、`cargo deny` RUSTSEC 公告库、NFS/SMB 网络卷（同 B8）
 - **估算**：4 人日 ｜ **依赖**：A3/A6/A7
 
+### B10 · 阶段 B 出口 Gate 收口
+
+- **目标**：把阶段 B 的五项出口条件从「已做」变成「有可复现证据」，关闭阶段 B。
+- **改动点**：新增 10 万文件扫描与 1 TiB 逻辑规模去重规划基准、平台隔离基线、`scripts/stage_b_gate.py` 静态自检；勾选阶段 B 出口 Gate。
+- **验收标准**（与阶段 B 出口 Gate 相同）：
+  - [x] 故障注入矩阵 100% 通过
+  - [x] 覆盖率达标并纳入 CI
+  - [x] `main.rs` < 300 行、库层零 `println!`
+  - [x] 文档 as-built 评审通过
+  - [x] 性能基线建立（10 万文件扫描 / 1 TB 去重）
+- **证据（2026-11-25，Windows 11 / rustc 1.98.1）**：
+  - `cargo test -p modeld-core --test fault_injection_tests --test interruption_matrix --locked` → **15 passed / 0 failed**（故障注入 10 + 中断矩阵 5）；全量回归 `cargo test --workspace --locked` → **395 passed / 0 failed**
+  - `coverage/core-summary.txt` → modeld-core 行覆盖率 **79.4%**（9574 行 / 7605 覆盖），高于 75% 门禁；`.github/workflows/ci.yml` 有 `coverage` job 且带 `llvm-tools-preview`
+  - `crates/modeld-cli/src/main.rs` = **183 行**；库层（`modeld-core` / `modeld-proxy` / `modeld-client` / `modeld-webui`，排除二进制 `main.rs`）`print!` 类宏 **0 命中**；由 `scripts/stage_b_gate.py` 确定性检查
+  - B9 已完成 as-built 文档重构并通过相对链接/源码锚点检查；`docs/ROADMAP.md` 阶段 B 出口 Gate 全部勾选
+  - `cargo bench -p modeld-core --locked` 实测：`scan_100k_files_full_hash` **24395.100 ms**（10 万个 1 字节 `.safetensors`，只计 `Scanner::scan`，不含建夹具）、`dedup_plan_1tib_logical` **805.324 ms**（1000 个 1 GiB 模型 × 2 路径 = 1 TiB 可回收逻辑字节，仅元数据 + 占位路径，不代表真实 1 TiB IO）；四项基准已写入 `bench/baseline.json`（`windows-x86_64`），`scripts/bench_gate.py --threshold 20` 通过
+  - `python3 scripts/stage_b_gate.py` → 7 项静态门全部 PASS；首次运行发现 `modeld-webui/src/server.rs:179` 仍在库层 `println!`，已移到二进制 `src/main.rs`，库层只保留 `tracing::info!`，复跑 7/7 PASS
+  - **未实测**：真实 1 TiB 模型字节的端到端 IO、三平台 CI 首次运行、ubuntu 平台基线（需 CI 上 `--record`）；已记入 §12.3
+- **估算**：2 人日 ｜ **依赖**：B1–B9
+
 ### 阶段 B 出口 Gate
 
-- [ ] 故障注入矩阵 100% 通过
-- [ ] 覆盖率达标并纳入 CI
-- [ ] `main.rs` < 300 行、库层零 `println!`
-- [ ] 文档 as-built 评审通过
-- [ ] 性能基线建立（10 万文件扫描 / 1 TB 去重）
+- [x] 故障注入矩阵 100% 通过
+- [x] 覆盖率达标并纳入 CI
+- [x] `main.rs` < 300 行、库层零 `println!`
+- [x] 文档 as-built 评审通过
+- [x] 性能基线建立（10 万文件扫描 / 1 TB 去重）
 
 ---
 
@@ -795,6 +815,7 @@ Refs: docs/ROADMAP.md#A1
 | B7 | 跨进程锁与并发安全 | done | AI agent | 2026-11-23 | 2026-11-23 | `c90c21e` |
 | B8 | 测试体系补齐 | done | AI agent | 2026-11-24 | 2026-11-24 | `cc93f1f` |
 | B9 | 文档重构 | done | AI agent | 2026-11-24 | 2026-11-24 | `987ad35` |
+| B10 | 阶段 B 出口 Gate 收口 | done | AI agent | 2026-11-25 | 2026-11-25 | `PENDING` |
 
 ### 阶段 C
 
@@ -816,6 +837,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-25 | B10 | 阶段 B 出口 Gate 收口：新增 10 万文件全量扫描与 1 TiB 逻辑规模去重规划基准、平台隔离基线、静态自检脚本；故障注入 15/15、全量 395/395、core 覆盖率 79.4%、main.rs 183 行、库层零 print 宏，五项出口条件全部勾选 | `PENDING` | `core/benches/scan_dedup.rs`、`bench/baseline.json`、`scripts/stage_b_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-24 | B9 | 文档 as-built 重构：重写 `architecture.md` 并逐模块给出源码锚点；新增 5 篇 ADR、`SECURITY.md`、`CONTRIBUTING.md`；17 篇旧规划稿归档 `docs/history/`，根目录仅剩 4 个 Markdown；逐项对齐 proxy API 默认值；修正 Windows 相对符号链接分隔符导致的 HF 缓存悬空链接 | `987ad35` | `docs/architecture.md`、`docs/adr/*`、`SECURITY.md`、`CONTRIBUTING.md`、`docs/history/*`、`docs/proxy-api.md`、`docs/proxy-setup.md`、`README.md`、`python/README.md`、`.gitignore`、`core/hf_cache.rs` |
 | 2026-11-24 | B8 | 测试体系：28 个 HTTP e2e 覆盖全部路由（含 4xx 与 401 遍历、路由表编译期防漏）、5 中断点矩阵、4 类环境测试；core 覆盖率 79.43% 入库（llvm-tools 直连，绕开 403 的 crates.io）；scan/dedup 基准 + 20% 回归门禁 + CI job；顺带修跨卷 adopt 仍 exit 0 与前端 `toString` phase 命中原型链两个真缺陷 | `cc93f1f` | `webui/tests/api_e2e.rs`、`core/tests/interruption_matrix.rs`、`cli/tests/environment.rs`、`core/benches/scan_dedup.rs`、`scripts/{coverage,bench_gate}.py`、`coverage/*`、`bench/*`、`.github/workflows/ci.yml`、`cli/commands/scan.rs`、`ui/pages/dashboard-progress.js` |
 | 2026-11-23 | B7 | 跨进程锁：`store_lock.rs` 从 O_EXCL 标记文件（崩溃后靠超时猜、无法区分活锁与残留）改为 `flock`/`LockFileEx` 内核独占锁，进程消失即释放；锁文件保留不删以避开 unlink 竞态；`current_holder()` 先试锁再读记录，残留记录不再误报 busy。CLI `scan/gc/dedup/unlink/repair` 全部接入，新增 `--wait <秒>`（默认 30）与 `util::lock_store()` 统一提示；WebUI scan/quarantine 同步加锁。新增 10 进程真实并发测试；顺带修 `store_crash_safe` 每次落一个空 staging 目录的泄漏 | `c90c21e` | `core/store_lock.rs`、`core/cas.rs`、`core/i18n.rs`、`cli/{cli,main,util}.rs`、`cli/commands/{scan,gc,dedup,repair}.rs`、`cli/tests/concurrency.rs`、`cli/Cargo.toml`、`webui/api/{scan,quarantine}.rs` |
@@ -839,9 +861,9 @@ Refs: docs/ROADMAP.md#A1
 | 阶段 | 任务数 | 完成 | 进度 |
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
-| B 架构收敛 | 9 | 9 | 100% |
+| B 架构收敛 | 10 | 10 | 100% |
 | C 产品化 | 7 | 0 | 0% |
-| **合计** | **24** | **17** | **71%** |
+| **合计** | **25** | **18** | **72%** |
 
 ---
 
@@ -923,6 +945,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-11-24 | B9 | `[proxy.network]` 的 IPv6 / hostname 退化为 `starts_with` 子串匹配，不能作为精确安全边界 | C4 | open |
 | 2026-11-24 | B9 | Python hook 的 `snapshot_download` 包装函数已定义但未启用；`modeld hook install` / `MODELD_NO_AUTO_HOOK` 只在旧文档中出现 | C7 | open |
 | 2026-11-24 | B9 | `AppState.rate_limit_per_min` 字段存在但 WebUI 路由未挂限流中间件 | C5 | open |
+| 2026-11-25 | B10 | 1 TiB 基准是元数据规模（1000 × 1 GiB 逻辑行 + 占位路径），未做真实 1 TiB 模型字节的端到端 IO；ubuntu 基线也需首次 CI `--record` | C6 | open |
 
 ---
 

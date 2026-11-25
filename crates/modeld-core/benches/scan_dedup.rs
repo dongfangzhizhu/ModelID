@@ -13,12 +13,20 @@
 //!
 //! What is measured is the engine, not the CLI shell: `Scanner::scan` over a
 //! synthetic library, and `DedupEngine::plan` over a store with one duplicated
-//! group per size class.
+//! group per size class. Two additional baselines close the stage B exit gate:
+//! a 100,000-file full scan and a 1 TiB *logical* dedup plan. The latter is a
+//! metadata-scale benchmark (SQLite rows plus tiny placeholder paths); it does
+//! not read or write 1 TiB of model bytes, and the result must be read as the
+//! planning/aggregation cost at that logical size, not whole-store IO.
+//!
+//! Fixtures are written to a unique `target/bench` subdirectory per run and
+//! deliberately not bulk-deleted: a recursive delete of 100k files can be
+//! blocked by the sandbox, and the directory is ignored by git.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use modeld_core::{CasStore, Database, DedupEngine, ScanOptions, Scanner};
+use modeld_core::{Blake3Hash, CasStore, Database, DedupEngine, ScanOptions, Scanner};
 
 /// A benchmark result: stable name, milliseconds, and what it measured.
 struct Measurement {
@@ -30,7 +38,12 @@ struct Measurement {
 fn main() {
     let dir = workspace_temp_dir("bench-scan-dedup");
 
-    let results = vec![measure_scan(&dir), measure_dedup_plan(&dir)];
+    let results = vec![
+        measure_scan(&dir),
+        measure_dedup_plan(&dir),
+        measure_scan_100k(&dir),
+        measure_dedup_plan_1tib(&dir),
+    ];
 
     // Print a human-readable table…
     println!("\n{:<24} {:>12}  unit", "benchmark", "median");
@@ -62,8 +75,6 @@ fn main() {
     let out = out_dir.join("latest.json");
     std::fs::write(&out, json).expect("write bench results");
     println!("\nwrote {}", out.display());
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Median wall-clock time of `iterations` runs, after `warmup` untimed ones.
@@ -167,12 +178,94 @@ fn measure_dedup_plan(root: &Path) -> Measurement {
     Measurement { name: "dedup_plan_100_groups", unit: "ms", value }
 }
 
-/// A temp dir next to the target dir, so the benchmark never measures the
-/// sandbox's `%TEMP%` (which may be on another, slower, volume).
+/// Stage B exit gate: full scan over 100,000 model-shaped files.
+///
+/// Files are tiny (one byte) on purpose — the gate is about path enumeration
+/// and per-file hash dispatch at 100k scale, not about disk throughput. The
+/// fixture is created outside the timed section.
+fn measure_scan_100k(root: &Path) -> Measurement {
+    const FILES: u32 = 100_000;
+    let lib = root.join("scan-100k");
+    std::fs::create_dir_all(&lib).expect("create 100k lib");
+
+    for i in 0..FILES {
+        let path = lib.join(format!("m-{i:06}.safetensors"));
+        std::fs::write(&path, [i as u8]).expect("write 100k fixture file");
+    }
+
+    // Creating 100k entries is already slow on Windows; one measured run with
+    // no warm-up is enough for a regression gate, and keeps CI time bounded.
+    let value = median_ms(0, 1, || {
+        let scanner = Scanner::new().with_scan_options(ScanOptions {
+            incremental: false,
+            full: true,
+            exclude_globs: vec![],
+            follow_symlinks: false,
+        });
+        let files = scanner.scan(&lib, |_, _| {}).expect("scan 100k");
+        assert_eq!(files.len(), FILES as usize, "100k benchmark fixture changed");
+    });
+
+    Measurement { name: "scan_100k_files_full_hash", unit: "ms", value }
+}
+
+/// Stage B exit gate: dedup planning at 1 TiB of logical size.
+///
+/// 1,000 model rows × 1 GiB = 1 TiB of unique content, each with two original
+/// paths, so the plan reports exactly 1 TiB of reclaimable bytes. Only the
+/// metadata and tiny placeholder files are materialised; this measures the
+/// planning/aggregation path at that logical size, not 1 TiB of IO.
+fn measure_dedup_plan_1tib(root: &Path) -> Measurement {
+    const MODELS: u32 = 1_000;
+    const GIB: u64 = 1 << 30;
+
+    let store = root.join("dedup-1tib-store");
+    std::fs::create_dir_all(store.join("shadow")).expect("create 1TiB store");
+    let mut db = Database::open(&store.join("modeld.db")).expect("open 1TiB db");
+
+    for i in 0..MODELS {
+        let hash = Blake3Hash::from_hex(&format!("{:064x}", i + 1)).expect("valid hash");
+        db.insert_or_update_model(&hash, GIB as i64, None, None, None, None)
+            .expect("insert 1GiB model");
+        for side in ["a", "b"] {
+            let path = store.join("shadow").join(format!("{i:04}-{side}.safetensors"));
+            std::fs::write(&path, b"x").expect("write placeholder path");
+            db.insert_alias(
+                &hash,
+                &path.to_string_lossy(),
+                modeld_core::db::Frontend::User,
+                modeld_core::db::AliasType::Original,
+            )
+            .expect("insert alias");
+        }
+    }
+
+    let value = median_ms(1, 3, || {
+        let engine =
+            DedupEngine::new(Database::open(&store.join("modeld.db")).expect("db"), store.clone());
+        let plan = engine.plan_dedup().expect("plan 1TiB");
+        assert_eq!(plan.groups.len(), MODELS as usize, "1TiB fixture changed");
+        assert_eq!(plan.total_savings_bytes, GIB * MODELS as u64, "1TiB savings changed");
+    });
+
+    Measurement { name: "dedup_plan_1tib_logical", unit: "ms", value }
+}
+
+/// A unique temp dir next to the target dir, so the benchmark never measures
+/// the sandbox's `%TEMP%` (which may be on another, slower, volume). Each run
+/// gets its own directory: bulk-deleting a previous 100k-file fixture can be
+/// blocked by the sandbox, and `target/` is ignored by git.
 fn workspace_temp_dir(name: &str) -> PathBuf {
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/bench");
-    let dir = base.join(name);
-    let _ = std::fs::remove_dir_all(&dir);
+    let unique = format!(
+        "{}-{}",
+        name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+    let dir = base.join(unique);
     std::fs::create_dir_all(&dir).expect("create bench temp dir");
     dir
 }

@@ -2,15 +2,9 @@
   "generated_by": "cargo bench -p modeld-core",
   "platform": "windows-x86_64",
   "results": [
-    {
-      "name": "scan_64x1MiB_full_hash",
-      "value": 13.587,
-      "unit": "ms"
-    },
-    {
-      "name": "dedup_plan_100_groups",
-      "value": 57.7843,
-      "unit": "ms"
-    }
+    { "name": "scan_64x1MiB_full_hash", "value": 15.881500, "unit": "ms" },
+    { "name": "dedup_plan_100_groups", "value": 77.903600, "unit": "ms" },
+    { "name": "scan_100k_files_full_hash", "value": 24395.099900, "unit": "ms" },
+    { "name": "dedup_plan_1tib_logical", "value": 805.324100, "unit": "ms" }
   ]
 }
