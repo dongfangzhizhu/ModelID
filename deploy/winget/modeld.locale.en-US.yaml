@@ -1,0 +1,15 @@
+PackageIdentifier: dongfangzhizhu.modeld
+PackageVersion: 0.2.0
+PackageLocale: en-US
+Publisher: modeld contributors
+PackageName: modeld
+License: MIT
+ShortDescription: Content-addressable storage and deduplication for AI model files
+Moniker: modeld
+Tags:
+  - ai
+  - deduplication
+  - storage
+  - huggingface
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

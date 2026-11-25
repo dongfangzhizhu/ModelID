@@ -3,8 +3,9 @@ name = "modeld-webui"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-license.workspace = true
 description = "Embedded Web UI server for modeld daemon"
+license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -12,7 +13,7 @@ name = "modeld-webui"
 path = "src/main.rs"
 
 [dependencies]
-modeld-core = { path = "../modeld-core" }
+modeld-core = { version = "0.2.0", path = "../modeld-core" }
 
 # Async
 tokio = { workspace = true }

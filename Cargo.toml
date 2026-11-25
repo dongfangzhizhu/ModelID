@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 authors = ["modeld contributors"]
 edition = "2021"
 # Verified with `cargo +1.88 build --workspace --locked` (see ROADMAP A8). Lower
@@ -18,10 +18,11 @@ edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/dongfangzhizhu/modeld"
-# The crates are a private workspace: they are built and shipped as the `modeld`
-# binary, never published to crates.io. This also lets `cargo-deny` accept the
-# workspace-internal `path` dependencies.
-publish = false
+# C3: publishable so `cargo install modeld-cli` works. Inter-crate path deps
+# also carry a version so crates.io can resolve them; `cargo-deny` accepts
+# versioned path dependencies (allow-wildcard-paths = true).
+description = "Content-addressable storage and deduplication for AI model files"
+publish = true
 
 [workspace.dependencies]
 # Logging

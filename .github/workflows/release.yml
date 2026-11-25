@@ -321,3 +321,116 @@ jobs:
           files: ${{ env.CHECKSUM_FILE }}
           draft: false
           prerelease: ${{ contains(steps.tag.outputs.value, '-') }}
+
+  # ---------------------------------------------------------------------------
+  # C3: SBOM — generated from the real cargo metadata, not hand-written.
+  # ---------------------------------------------------------------------------
+  sbom:
+    name: Generate CycloneDX SBOM
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate SBOM
+        run: python3 scripts/sbom.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/*.json
+          if-no-files-found: error
+      - name: Upload SBOM to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sbom/*.json
+
+  # ---------------------------------------------------------------------------
+  # C3: Sigstore keyless signing of the checksum file (OIDC identity from CI).
+  # Only runs for real tags; a missing identity fails loudly rather than
+  # shipping an unsigned file that looks signed.
+  # ---------------------------------------------------------------------------
+  sign:
+    name: Sign release checksums
+    runs-on: ubuntu-22.04
+    needs: [checksums]
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Download checksum artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+      - name: Sign checksums
+        run: python3 scripts/sign_release.py dist/
+      - name: Upload signatures
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/*.sig
+            dist/**/*.pem
+
+  # ---------------------------------------------------------------------------
+  # C3: crates.io publish. Cargo requires dependencies to exist on crates.io
+  # before dependents, so publish strictly in topological order. Each step is
+  # idempotent: an already-published version is skipped, not treated as failure.
+  # Gated on CRATESIO_TOKEN, so forks without the secret skip cleanly.
+  # ---------------------------------------------------------------------------
+  publish-crates:
+    name: Publish crates to crates.io
+    runs-on: ubuntu-22.04
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/') && vars.PUBLISH_CRATES == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for crate in modeld-core modeld-client modeld-proxy modeld-webui modeld-cli; do
+            echo "== publishing $crate =="
+            cargo publish -p "$crate" --locked || {
+              if cargo search "$crate" --limit 1 | grep -q "^$crate = \"0.2.0\""; then
+                echo "$crate 0.2.0 already published; skipping"
+              else
+                echo "failed to publish $crate" >&2
+                exit 1
+              fi
+            }
+            # crates.io needs a short delay before a just-published version is
+            # resolvable by the next crate's verification build.
+            sleep 20
+          done
+
+  # ---------------------------------------------------------------------------
+  # C3: PyPI publish for the optional hook package. Gated on PYPI_TOKEN.
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    name: Publish Python hook to PyPI
+    runs-on: ubuntu-22.04
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/') && vars.PUBLISH_PYPI == 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build distributions
+        working-directory: python
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish
+        working-directory: python
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine upload dist/*

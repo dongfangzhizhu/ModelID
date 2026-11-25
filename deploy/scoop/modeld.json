@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "homepage": "https://github.com/dongfangzhizhu/modeld",
+  "description": "Content-addressable storage and deduplication for AI model files",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/dongfangzhizhu/modeld/releases/download/v0.2.0/modeld-v0.2.0-windows-x86_64.zip",
+      "hash": "REPLACE_WITH_SHA256_WINDOWS_X86_64",
+      "extract": "zip"
+    }
+  },
+  "bin": [
+    ["modeld.exe", "modeld"],
+    ["modeld-webui.exe", "modeld-webui"]
+  ],
+  "checkver": {
+    "github": "https://github.com/dongfangzhizhu/modeld"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/dongfangzhizhu/modeld/releases/download/v$version/modeld-v$version-windows-x86_64.zip"
+      }
+    }
+  }
+}

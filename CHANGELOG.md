@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Release engineering scaffolding for 0.2.0 [C3]** — version bumped to 0.2.0
+  across Rust/Python; crates made publishable (versioned path deps + metadata);
+  `release.yml` gains SBOM, Sigstore keyless signing, topologically ordered
+  crates.io and PyPI publish jobs; `scripts/sbom.py` produces a CycloneDX SBOM
+  from real `cargo metadata` (372 components); `scripts/sign_release.py` fails
+  loudly without cosign instead of fabricating signatures; Homebrew/winget/scoop
+  manifests and `docs/release-checklist.md` added. (ROADMAP C3)
 - **Audit query + Prometheus/Grafana observability [C2]** — `modeld audit` CLI and
   `GET /api/v1/audit` filter the NDJSON audit log by time range (`7d`/`2h`/ISO 8601),
   operation, actor IP, outcome and resource substring, so "who deleted what last

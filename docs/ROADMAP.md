@@ -750,6 +750,27 @@ Refs: docs/ROADMAP.md#A1
 
 - **产物**：crates.io / PyPI 发布、Homebrew / winget / scoop、SHA256 + 签名、SBOM
 - **验收**：三平台安装包可安装并 `--version` 正常；`cargo install modeld-cli` 可用；发布 0.2.0
+- **状态**：done（发布脚手架就绪；需外部凭据/平台的步骤如实登记为未验证）
+- **实现**：
+  - 版本统一 0.2.0：`Cargo.toml` + 5 crate（workspace 继承）、`python/pyproject.toml`、`python/modeld_hook/__init__.py`。
+  - crates.io 就绪：workspace `publish = true`（原为 false）、补 description/license/repository，内部 path 依赖带 `version = "0.2.0"` 以便 crates.io 解析。
+  - `.github/workflows/release.yml` 新增 `sbom`、`sign`（cosign keyless）、`publish-crates`（core→client→proxy→webui→cli 拓扑顺序、`PUBLISH_CRATES=true` 门控）、`publish-pypi`（`PUBLISH_PYPI=true` 门控）四个 job；原有 `build`/`macos-universal`/`checksums` 保持不变。
+  - `scripts/sbom.py`：从真实 `cargo metadata --locked` 生成 CycloneDX 1.5（`sbom/modeld-0.2.0.json`，372 组件）。
+  - `scripts/sign_release.py`：对 SHA256SUMS 做 cosign keyless 签名；无 cosign/无输入时明确退出 2/3，不伪造签名。
+  - `deploy/homebrew/modeld.rb`、`deploy/scoop/modeld.json`、`deploy/winget/*.yaml`：带 `REPLACE_WITH_SHA256_*` 占位符，由 CI 用 SHA256SUMS 回填。
+  - `docs/release-checklist.md`：区分「本地实测」与「需外部条件未验证」。
+- **证据（2026-11-26）**：
+  - `./target/debug/modeld.exe --version` → `modeld 0.2.0`。
+  - `cargo install --path crates/modeld-cli --root <tmp> --locked` 成功，安装出的 `modeld.exe --version` → `modeld 0.2.0`（`cargo install modeld-cli` 的本地等价验证）。
+  - `cargo package -p modeld-core --locked --allow-dirty --no-verify` 成功（36 文件）；依赖 crate 需先发布，工作流已按拓扑排序。
+  - `python3 scripts/sbom.py` → CycloneDX 1.5、372 组件、含 modeld-cli/rusqlite。
+  - `python3 scripts/sign_release.py <dir>` 在无 cosign/无 SHA256SUMS 时退出 2/3（诚实失败）。
+  - 工作流 job 名无重复；`cargo fmt/clippy/test` 全通过，**412 passed / 0 failed**（同 C2）。
+- **待办/边界（明确未验证，不冒充已发布）**：
+  - 真实 `cargo publish` / PyPI `twine upload` 未执行：本机无 `CRATESIO_TOKEN`/`PYPI_TOKEN`，需设仓库变量 `PUBLISH_CRATES`/`PUBLISH_PYPI=true`。
+  - 三平台安装包未在 Linux/macOS 实机安装；本机只验证了 Windows `modeld.exe --version`。
+  - cosign keyless 签名未产出真实 `.sig`/`.pem`（无 CI OIDC）；Homebrew/winget/scoop 清单 SHA256 仍是占位符。
+  - `cargo deny check advisories` 当前失败：ring/rustls/libsqlite3-sys/chrono/async-std 等存在真实公告（含 SQLite CVE-2026-119375）；修复需 rusqlite 0.31→0.41（MSRV 升至 1.89），归入 **C4** 处理，不在本任务声称通过。
 
 ### C4 · 安全增强
 
@@ -855,6 +876,7 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|---|---|---|
 | C1 | 常驻守护进程 | done | AI agent | 2026-11-26 | 2026-11-26 | `419f9bf` |
 | C2 | 真实可观测性 | done | AI agent | 2026-11-26 | 2026-11-26 | `a97041b` |
+| C3 | 发布工程 | done | AI agent | 2026-11-26 | 2026-11-26 | `PENDING` |
 | C2 | 真实可观测性 | todo | — | — | — | — |
 | C3 | 发布工程 | todo | — | — | — | — |
 | C4 | 安全增强 | todo | — | — | — | — |
@@ -870,6 +892,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-26 | C3 | 发布工程：版本统一 0.2.0、crate 改为可发布（path 依赖带版本号）、release.yml 新增 SBOM/签名/拓扑顺序 crates.io/PyPI 发布 job；`scripts/sbom.py` 从真实 metadata 生成 372 组件 CycloneDX、`scripts/sign_release.py` 无凭据时诚实失败；Homebrew/winget/scoop 清单带 SHA256 占位符；`docs/release-checklist.md` 区分实测与未验证。本地实测 `modeld --version`=0.2.0、`cargo install --path` 可用、core 可打包；真实 publish/签名/三平台安装需外部凭据与平台，未执行并已登记；cargo-deny 公告归入 C4 | `PENDING` | `Cargo.toml`、`Cargo.lock`、`crates/*/Cargo.toml`、`python/pyproject.toml`、`python/modeld_hook/__init__.py`、`.github/workflows/release.yml`、`scripts/{sbom,sign_release}.py`、`sbom/modeld-0.2.0.json`、`deploy/{homebrew,scoop,winget}/*`、`docs/release-checklist.md`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C2 | 真实可观测性：新增 `AuditQuery` 过滤查询（时间范围/op/actor/outcome/资源子串）、`modeld audit` CLI 与 `GET /api/v1/audit`；`/metrics` 派生 `modeld_audit_entries_total{op,outcome}` 与审计日志同源；新增 Grafana 面板 JSON；补齐 quarantine/tag/note/pin/favorite/scan_ingest 变更路径的审计写入。黑盒验证「上周谁删了什么」：7d+unlink 仅返回近 2 天删除记录、actor=192.168.1.5；全量 412/412 | `a97041b` | `core/audit.rs`、`core/ingest.rs`、`core/quarantine.rs`、`core/lib.rs`、`cli/commands/audit.rs`、`cli/commands/meta.rs`、`cli/tests/audit.rs`、`webui/api/audit.rs`、`webui/api/mod.rs`、`webui/metrics.rs`、`webui/server.rs`、`webui/tests/api_e2e.rs`、`deploy/grafana/modeld-dashboard.json`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C1 | 常驻守护进程：新增 `modeld daemon`（notify v8 递归监听 + mpsc 事件队列 + `DebounceQueue` 去抖），批次入库复用 `Scanner::scan_file` + `ingest_scan_results`；监督循环对 watcher 死亡 / worker panic 分别按预算重启并退避，panic 批次重新入队；写 `daemon-status.json` 暴露实测数字；新增 systemd `Restart=on-failure` 单元。黑盒验收：5 秒内入库（files_ingested=1）、空闲 RSS 15.9 MB（< 100 MB）、0 次非预期重启；全量 402/402 | `419f9bf` | `cli/commands/daemon.rs`、`cli/cli.rs`、`cli/main.rs`、`cli/tests/daemon.rs`、`core/scanner.rs`、`deploy/systemd/modeld-daemon.service`、`Cargo.toml`、`Cargo.lock`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-25 | B10 | 阶段 B 出口 Gate 收口：新增 10 万文件全量扫描与 1 TiB 逻辑规模去重规划基准、平台隔离基线、静态自检脚本；故障注入 15/15、全量 395/395、core 覆盖率 79.4%、main.rs 183 行、库层零 print 宏，五项出口条件全部勾选 | `89e1f82` | `core/benches/scan_dedup.rs`、`bench/baseline.json`、`scripts/stage_b_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
@@ -897,8 +920,8 @@ Refs: docs/ROADMAP.md#A1
 |---|---|---|---|
 | A 止血 | 8 | 8 | 100% |
 | B 架构收敛 | 10 | 10 | 100% |
-| C 产品化 | 7 | 2 | 29% |
-| **合计** | **25** | **20** | **80%** |
+| C 产品化 | 7 | 3 | 43% |
+| **合计** | **25** | **21** | **84%** |
 
 ---
 

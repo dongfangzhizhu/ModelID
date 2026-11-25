@@ -9,7 +9,7 @@ publish.workspace = true
 
 [dependencies]
 tracing.workspace = true
-modeld-core = { path = "../modeld-core" }
+modeld-core = { version = "0.2.0", path = "../modeld-core" }
 tiny_http.workspace = true
 toml.workspace = true
 ctrlc.workspace = true
@@ -26,4 +26,4 @@ futures-util = "0.3"
 [dev-dependencies]
 tempfile.workspace = true
 ureq.workspace = true
-modeld-client = { path = "../modeld-client" }
+modeld-client = { version = "0.2.0", path = "../modeld-client" }

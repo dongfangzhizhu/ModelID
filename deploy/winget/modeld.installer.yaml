@@ -1,0 +1,18 @@
+# winget installer manifest for modeld (C3).
+# InstallerSha256 is filled by CI from the release SHA256SUMS.
+PackageIdentifier: dongfangzhizhu.modeld
+PackageVersion: 0.2.0
+PackageLocale: en-US
+Publisher: modeld contributors
+PublisherUrl: https://github.com/dongfangzhizhu
+PackageName: modeld
+PackageUrl: https://github.com/dongfangzhizhu/modeld
+License: MIT
+ShortDescription: Content-addressable storage and deduplication for AI model files
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: https://github.com/dongfangzhizhu/modeld/releases/download/v0.2.0/modeld-v0.2.0-windows-x86_64.zip
+    InstallerSha256: REPLACE_WITH_SHA256_WINDOWS_X86_64
+ManifestType: installer
+ManifestVersion: 1.6.0

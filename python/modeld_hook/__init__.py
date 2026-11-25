@@ -21,7 +21,7 @@ to the modeld Content-Addressable Store.
     modeld hook install
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["activate", "deactivate", "is_active", "get_hf_home"]
 
 import logging
