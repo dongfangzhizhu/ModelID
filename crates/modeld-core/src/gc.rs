@@ -17,6 +17,7 @@ use crate::hash::Blake3Hash;
 use crate::quarantine::QuarantineManager;
 use anyhow::Result;
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RefStatus
@@ -108,6 +109,52 @@ pub struct GcResult {
     pub skipped_soft: Vec<String>,
     pub bytes_recovered: i64,
     pub cleaned_quarantine: usize,
+    /// Candidates examined by this run (bounded for incremental GC).
+    pub scanned: usize,
+    /// True when an incremental run wrapped from the end back to the start.
+    pub wrapped: bool,
+}
+
+/// Persisted resume point for incremental GC (C6).
+///
+/// The cursor is a hash rather than an offset so inserts during a long run do
+/// not shift the remaining window. A corrupt or missing file simply restarts
+/// from the beginning; no destructive decision depends on the cursor.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GcCursor {
+    pub last_hash: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl GcCursor {
+    pub fn path(store_path: &std::path::Path) -> std::path::PathBuf {
+        store_path.join("gc-cursor.json")
+    }
+
+    pub fn load(store_path: &std::path::Path) -> Result<Self> {
+        let path = Self::path(store_path);
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        match serde_json::from_str(&std::fs::read_to_string(path)?) {
+            Ok(cursor) => Ok(cursor),
+            Err(err) => {
+                tracing::warn!("invalid GC cursor, restarting from the beginning: {err}");
+                Ok(Self::default())
+            }
+        }
+    }
+
+    pub fn save(&self, store_path: &std::path::Path) -> Result<()> {
+        let path = Self::path(store_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -161,31 +208,32 @@ impl<'a> GcEngine<'a> {
     /// List all models with their protection status (single batch query).
     pub fn candidates(&self) -> Result<Vec<GcCandidate>> {
         let rows = self.db.get_gc_candidate_counts()?;
-        let mut candidates = Vec::new();
-        for (model, alias_count, workflow_ref_count) in rows {
-            let cas_file_exists = self.cas.contains(&model.blake3_hash);
+        Ok(rows.into_iter().map(|row| self.candidate_from_row(row)).collect())
+    }
 
-            // Compute ref_status inline to avoid a second DB round-trip.
-            let ref_status = if model.pinned {
-                RefStatus::Pinned
-            } else if workflow_ref_count > 0 {
-                RefStatus::HardReference
-            } else if alias_count > 0 {
-                RefStatus::SoftReference
-            } else {
-                RefStatus::OrphanCandidate
-            };
+    fn candidate_from_row(&self, row: (Model, usize, usize)) -> GcCandidate {
+        let (model, alias_count, workflow_ref_count) = row;
+        let cas_file_exists = self.cas.contains(&model.blake3_hash);
 
-            candidates.push(GcCandidate {
-                savings_bytes: model.size_bytes,
-                workflow_ref_count,
-                alias_count,
-                cas_file_exists,
-                ref_status,
-                model,
-            });
+        // Compute ref_status inline to avoid a second DB round-trip.
+        let ref_status = if model.pinned {
+            RefStatus::Pinned
+        } else if workflow_ref_count > 0 {
+            RefStatus::HardReference
+        } else if alias_count > 0 {
+            RefStatus::SoftReference
+        } else {
+            RefStatus::OrphanCandidate
+        };
+
+        GcCandidate {
+            savings_bytes: model.size_bytes,
+            workflow_ref_count,
+            alias_count,
+            cas_file_exists,
+            ref_status,
+            model,
         }
-        Ok(candidates)
     }
 
     /// Preview what GC would do without making any changes.
@@ -227,98 +275,127 @@ impl<'a> GcEngine<'a> {
     pub fn run_safe(&mut self) -> Result<GcResult> {
         let mut result = GcResult::default();
         let candidates = self.candidates()?;
+        result.scanned = candidates.len();
 
         for c in &candidates {
-            let hash_prefix = c.model.blake3_hash.as_hex()[..16].to_string();
+            self.process_candidate(c, &mut result)?;
+        }
 
-            if c.is_hard_protected() {
-                result.skipped_protected.push(hash_prefix);
-                continue;
-            }
-            if c.is_soft_protected() {
-                result.skipped_soft.push(hash_prefix);
-                continue;
-            }
-            // Pinned or Unknown → skip conservatively (no GC)
-            if c.is_pinned() || matches!(c.ref_status, RefStatus::Unknown | RefStatus::RecentlyUsed)
-            {
-                result.skipped_protected.push(hash_prefix);
-                continue;
-            }
+        result.cleaned_quarantine = self.quarantine.cleanup_expired()?;
+        Ok(result)
+    }
 
-            if c.is_orphan() && c.cas_file_exists {
-                if let Some(cas_path) = self.cas.get(&c.model.blake3_hash) {
-                    self.quarantine.init()?;
-                    let hash_str = c.model.blake3_hash.as_hex().to_string();
+    /// Quarantine at most `batch_size` candidates per invocation, resuming
+    /// from `<store>/gc-cursor.json`. Once the catalogue is exhausted the
+    /// next call wraps to the beginning (C6).
+    pub fn run_safe_incremental(&mut self, batch_size: usize) -> Result<GcResult> {
+        let batch_size = batch_size.clamp(1, 100_000) as i64;
+        let mut cursor = GcCursor::load(&self.store_path)?;
+        let mut rows =
+            self.db.get_gc_candidate_counts_after(cursor.last_hash.as_deref(), batch_size)?;
 
-                    match self.quarantine.quarantine(
-                        &cas_path,
-                        &hash_str,
-                        "gc: no workflow refs, no aliases",
-                        vec![],
-                    ) {
-                        Ok(_qpath) => {
-                            result.quarantined.push(hash_prefix);
-                            result.bytes_recovered += c.model.size_bytes;
+        let wrapped = rows.is_empty() && cursor.last_hash.is_some();
+        if wrapped {
+            rows = self.db.get_gc_candidate_counts_after(None, batch_size)?;
+            cursor.last_hash = None;
+        }
 
-                            // Audit trail for a destructive operation.
-                            crate::audit::record(
-                                &self.store_path,
-                                crate::audit::AuditEntry {
-                                    details: Some(format!(
-                                        "quarantined {} bytes: no workflow refs, no aliases",
-                                        c.model.size_bytes
-                                    )),
-                                    ..crate::audit::AuditEntry::success("gc", hash_str.clone())
-                                },
-                            );
+        let mut result = GcResult { scanned: rows.len(), wrapped, ..Default::default() };
 
-                            // ── Write-back: mark quarantined in DB ──────────
-                            if let Err(e) =
-                                self.db.quarantine_model(&c.model.blake3_hash, Utc::now())
-                            {
-                                tracing::warn!(
-                                    "{}",
-                                    crate::i18n::tf(
-                                        "warn.gc_db_quarantine_failed",
-                                        &[
-                                            ("hash", &&hash_str[..16]),
-                                            ("error", &format!("{:#}", e)),
-                                        ],
-                                    )
-                                );
-                            }
+        for row in rows {
+            let candidate = self.candidate_from_row(row);
+            cursor.last_hash = Some(candidate.model.blake3_hash.as_hex().to_string());
+            self.process_candidate(&candidate, &mut result)?;
+        }
 
-                            // ── Delete dangling aliases ──────────────────────
-                            if let Err(e) = self.db.delete_aliases_for_model(&c.model.blake3_hash) {
-                                tracing::warn!(
-                                    "{}",
-                                    crate::i18n::tf(
-                                        "warn.gc_alias_cleanup_failed",
-                                        &[
-                                            ("hash", &&hash_str[..16]),
-                                            ("error", &format!("{:#}", e)),
-                                        ],
-                                    )
-                                );
-                            }
-                        }
-                        Err(e) => {
+        if result.scanned > 0 {
+            cursor.updated_at = Some(Utc::now().to_rfc3339());
+            cursor.save(&self.store_path)?;
+        }
+
+        result.cleaned_quarantine = self.quarantine.cleanup_expired()?;
+        Ok(result)
+    }
+
+    fn process_candidate(&mut self, c: &GcCandidate, result: &mut GcResult) -> Result<()> {
+        let hash_prefix = c.model.blake3_hash.as_hex()[..16].to_string();
+
+        if c.is_hard_protected() {
+            result.skipped_protected.push(hash_prefix);
+            return Ok(());
+        }
+        if c.is_soft_protected() {
+            result.skipped_soft.push(hash_prefix);
+            return Ok(());
+        }
+        // Pinned or Unknown → skip conservatively (no GC)
+        if c.is_pinned() || matches!(c.ref_status, RefStatus::Unknown | RefStatus::RecentlyUsed) {
+            result.skipped_protected.push(hash_prefix);
+            return Ok(());
+        }
+
+        if c.is_orphan() && c.cas_file_exists {
+            if let Some(cas_path) = self.cas.get(&c.model.blake3_hash) {
+                self.quarantine.init()?;
+                let hash_str = c.model.blake3_hash.as_hex().to_string();
+
+                match self.quarantine.quarantine(
+                    &cas_path,
+                    &hash_str,
+                    "gc: no workflow refs, no aliases",
+                    vec![],
+                ) {
+                    Ok(_qpath) => {
+                        result.quarantined.push(hash_prefix);
+                        result.bytes_recovered += c.model.size_bytes;
+
+                        // Audit trail for a destructive operation.
+                        crate::audit::record(
+                            &self.store_path,
+                            crate::audit::AuditEntry {
+                                details: Some(format!(
+                                    "quarantined {} bytes: no workflow refs, no aliases",
+                                    c.model.size_bytes
+                                )),
+                                ..crate::audit::AuditEntry::success("gc", hash_str.clone())
+                            },
+                        );
+
+                        // ── Write-back: mark quarantined in DB ──────────────
+                        if let Err(e) = self.db.quarantine_model(&c.model.blake3_hash, Utc::now()) {
                             tracing::warn!(
                                 "{}",
                                 crate::i18n::tf(
-                                    "warn.gc_quarantine_failed",
+                                    "warn.gc_db_quarantine_failed",
+                                    &[("hash", &&hash_str[..16]), ("error", &format!("{:#}", e)),],
+                                )
+                            );
+                        }
+
+                        // ── Delete dangling aliases ──────────────────────────
+                        if let Err(e) = self.db.delete_aliases_for_model(&c.model.blake3_hash) {
+                            tracing::warn!(
+                                "{}",
+                                crate::i18n::tf(
+                                    "warn.gc_alias_cleanup_failed",
                                     &[("hash", &&hash_str[..16]), ("error", &format!("{:#}", e)),],
                                 )
                             );
                         }
                     }
+                    Err(e) => {
+                        tracing::warn!(
+                            "{}",
+                            crate::i18n::tf(
+                                "warn.gc_quarantine_failed",
+                                &[("hash", &&hash_str[..16]), ("error", &format!("{:#}", e)),],
+                            )
+                        );
+                    }
                 }
             }
         }
-
-        result.cleaned_quarantine = self.quarantine.cleanup_expired()?;
-        Ok(result)
+        Ok(())
     }
 
     /// Clean expired quarantine entries.
@@ -459,6 +536,55 @@ mod tests {
         let gc = GcEngine::new(&mut db, tmp.path());
         let preview = gc.preview().unwrap();
         assert_eq!(preview.would_quarantine.len(), 0);
+    }
+
+    #[test]
+    fn gc_cursor_roundtrip_and_corrupt_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let cursor = GcCursor {
+            last_hash: Some("ab".repeat(32)),
+            updated_at: Some("2026-11-26T00:00:00Z".to_string()),
+        };
+        cursor.save(tmp.path()).unwrap();
+
+        let loaded = GcCursor::load(tmp.path()).unwrap();
+        assert_eq!(loaded.last_hash, cursor.last_hash);
+        assert_eq!(loaded.updated_at, cursor.updated_at);
+
+        std::fs::write(GcCursor::path(tmp.path()), "{not json").unwrap();
+        let recovered = GcCursor::load(tmp.path()).unwrap();
+        assert_eq!(recovered.last_hash, None, "a broken cursor restarts safely");
+    }
+
+    #[test]
+    fn incremental_gc_processes_bounded_batches_and_wraps() {
+        let tmp = TempDir::new().unwrap();
+        let db_file = NamedTempFile::new().unwrap();
+        let mut db = Database::open(db_file.path()).unwrap();
+
+        for byte in [0xaa, 0xbb, 0xcc] {
+            let hash = Blake3Hash::from_hex(&format!("{:02x}", byte).repeat(32)).unwrap();
+            db.insert_or_update_model(&hash, 10, None, None, None, None).unwrap();
+        }
+
+        let mut gc = GcEngine::new(&mut db, tmp.path());
+        let first = gc.run_safe_incremental(1).unwrap();
+        assert_eq!(first.scanned, 1);
+        assert!(!first.wrapped);
+        assert_eq!(GcCursor::load(tmp.path()).unwrap().last_hash, Some("aa".repeat(32)));
+
+        let second = gc.run_safe_incremental(1).unwrap();
+        assert_eq!(second.scanned, 1);
+        assert_eq!(GcCursor::load(tmp.path()).unwrap().last_hash, Some("bb".repeat(32)));
+
+        let third = gc.run_safe_incremental(1).unwrap();
+        assert_eq!(third.scanned, 1);
+        assert_eq!(GcCursor::load(tmp.path()).unwrap().last_hash, Some("cc".repeat(32)));
+
+        let wrapped = gc.run_safe_incremental(1).unwrap();
+        assert!(wrapped.wrapped, "the fourth batch must wrap to the first model");
+        assert_eq!(wrapped.scanned, 1);
+        assert_eq!(GcCursor::load(tmp.path()).unwrap().last_hash, Some("aa".repeat(32)));
     }
 
     #[test]

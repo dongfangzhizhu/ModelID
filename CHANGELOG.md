@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Frontend virtual filesystem and one-command integration [C7]** — `modeld frontend`
+  builds a zero-copy view of the store under `<store>/virtual/<frontend>/` for
+  ComfyUI, Forge and A1111, classifying models by category and original filename.
+  Links are hardlinks on the same volume and symlinks across volumes — no stub
+  files are ever written — and each new link records an alias. `frontend list`,
+  `frontend connect` (refuses to overwrite a non-empty target) and `frontend sync`
+  (`--dry-run`, repeatable `--frontend`) are exposed on the CLI, plus
+  `scripts/connect-frontend.{sh,ps1}` and `docs/frontend-integration.md`. Verified
+  core 3/3 and CLI black-box 2/2; loading models in the real frontends was not
+  tested on this host. (ROADMAP C7)
+- **Incremental GC with a persisted hash cursor [C6]** — `modeld gc --incremental
+  --batch-size N` processes one hash-ordered page at a time and stores its cursor
+  in `<store>/gc-cursor.json`, so a large catalogue no longer needs a full scan
+  per GC pass. A corrupt cursor safely restarts from the beginning. Paged DB
+  queries use the hash as a cursor instead of an offset so concurrent inserts
+  cannot cause skips. `scripts/c6_gate.py` pins eight as-built performance
+  invariants and `scripts/bench-proxy-throughput.py` measures proxy against a
+  same-host socket baseline. Verified core gc 6/6, CLI black-box 1/1, static gate
+  8/8; proxy throughput measured 443.7 MiB/s vs 962.6 MiB/s baseline (ratio 0.46,
+  below the 0.80 line-rate target) and is honestly recorded as unmet. (ROADMAP C6)
 - **Frontend hardening and session unification [C5]** — all server-derived values
   rendered through `innerHTML` now pass through `escapeHtml()`/`safeHtml`, and
   hash-bearing click handlers were replaced with `data-*` plus event delegation.
@@ -116,6 +136,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Streaming proxy responses use 1 MiB buffered reads [C6]** — full-file, Range
+  and HF-cache responses previously relied on the default 8 KiB `BufReader`
+  slice; they now use explicit 1 MiB buffers so `io::copy` issues far fewer
+  syscalls while still streaming (the model is never loaded into memory in one
+  piece). (ROADMAP C6)
 - **The store lock is an OS lock, not a marker file** — the previous `O_EXCL`
   marker relied on a 24 h mtime timeout to decide whether a holder was still
   alive, which both blocked on a clean `Ctrl-C` and let a stale file masquerade

@@ -8,6 +8,7 @@ pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod dedup;
+pub mod frontend;
 pub mod gc;
 pub mod hf;
 pub mod hfstore;

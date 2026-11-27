@@ -19,6 +19,7 @@ use commands::config::config_command;
 use commands::daemon::daemon_command;
 use commands::db::db_command;
 use commands::dedup::dedup_command;
+use commands::frontend::frontend_command;
 use commands::gc::gc_command;
 use commands::hf::hf_command;
 use commands::hfstore::{
@@ -94,6 +95,7 @@ fn main() -> Result<()> {
                 },
             )?
         }
+        Commands::Frontend { action } => frontend_command(resolve_store(store.clone()), action)?,
         Commands::Audit { since, until, op, actor, outcome, resource_contains, limit, json } => {
             audit_command(
                 &resolve_store(store.clone()),
@@ -181,11 +183,20 @@ fn main() -> Result<()> {
             workflow_deps_command(resolve_store(store.clone()), file)?
         }
         Commands::RefsOrphans { json } => refs_orphans_command(resolve_store(store.clone()), json)?,
-        Commands::Gc { preview, cleanup_quarantine, cleanup_tmp, wait } => gc_command(
+        Commands::Gc {
+            preview,
+            cleanup_quarantine,
+            cleanup_tmp,
+            incremental,
+            batch_size,
+            wait,
+        } => gc_command(
             resolve_store(store.clone()),
             preview,
             cleanup_quarantine,
             cleanup_tmp,
+            incremental,
+            batch_size,
             wait,
         )?,
         Commands::Verify { json, manifest, generate_manifest } => {

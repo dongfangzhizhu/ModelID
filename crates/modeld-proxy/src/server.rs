@@ -21,7 +21,7 @@ use crate::range::parse_range;
 use anyhow::{anyhow, Result};
 use modeld_core::{Blake3Hash, CasStore, Database, Downloader, HfCache};
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -393,6 +393,10 @@ fn handle_hf_proxy(request: Request, ctx: &RequestContext, parts: &HfProxyParts)
 // Response helpers (each consumes the request via respond())
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `io::copy` uses a reader's own buffer when it is a `BufReader`; 1 MiB here
+/// avoids the default 8 KiB syscall-per-slice pattern on large model blobs (C6).
+const STREAM_BUFFER_BYTES: usize = 1024 * 1024;
+
 fn respond(request: Request, status: StatusCode, content_type: Header, body: &[u8]) -> Result<()> {
     let response = Response::empty(status)
         .with_header(content_type)
@@ -410,7 +414,10 @@ fn stream_full(request: Request, path: &Path, total_len: u64) -> Result<()> {
     let response = Response::empty(StatusCode(200))
         .with_header(octet_content_type())
         .with_header(header("Accept-Ranges", "bytes"))
-        .with_data(file.take(total_len), Some(length));
+        .with_data(
+            BufReader::with_capacity(STREAM_BUFFER_BYTES, file.take(total_len)),
+            Some(length),
+        );
     request.respond(response).map_err(|e| anyhow!("stream full failed: {}", e))
 }
 
@@ -424,7 +431,10 @@ fn stream_range(request: Request, path: &Path, start: u64, end: u64, total_len: 
         .with_header(octet_content_type())
         .with_header(header("Content-Range", &content_range))
         .with_header(header("Accept-Ranges", "bytes"))
-        .with_data(file.take(length), Some(to_usize(length)?));
+        .with_data(
+            BufReader::with_capacity(STREAM_BUFFER_BYTES, file.take(length)),
+            Some(to_usize(length)?),
+        );
     request.respond(response).map_err(|e| anyhow!("stream range failed: {}", e))
 }
 
@@ -444,7 +454,10 @@ fn stream_file_with_headers(
     if let Some(h) = blake3 {
         response = response.with_header(header("X-Modeld-Blake3", h));
     }
-    let response = response.with_data(file.take(len), Some(to_usize(len)?));
+    let response = response.with_data(
+        BufReader::with_capacity(STREAM_BUFFER_BYTES, file.take(len)),
+        Some(to_usize(len)?),
+    );
     request.respond(response).map_err(|e| anyhow!("stream hf failed: {}", e))
 }
 

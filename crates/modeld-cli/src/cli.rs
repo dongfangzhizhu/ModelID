@@ -5,6 +5,7 @@
 
 use crate::commands::config::ConfigAction;
 use crate::commands::db::DbAction;
+use crate::commands::frontend::FrontendAction;
 use crate::commands::hf::HfAction;
 use crate::commands::meta::{FavoriteAction, NoteAction, PinAction, RefsAction, TagAction};
 use crate::commands::proxy::ProxyAction;
@@ -86,6 +87,11 @@ pub enum Commands {
         /// Seconds to wait for the store lock
         #[arg(long, value_name = "SECS", default_value_t = 30)]
         wait: u64,
+    },
+    /// AI frontend adapters and virtual filesystem sync (C7)
+    Frontend {
+        #[command(subcommand)]
+        action: FrontendAction,
     },
     /// Query the audit log (C2) — e.g. `audit --since 7d --op unlink --json`
     Audit {
@@ -279,6 +285,12 @@ pub enum Commands {
         /// Also remove stale .part and .tmp files from the tmp directory
         #[arg(long)]
         cleanup_tmp: bool,
+        /// Process one bounded batch per invocation using a persisted cursor [C6]
+        #[arg(long)]
+        incremental: bool,
+        /// Candidates per incremental batch (default 500)
+        #[arg(long, value_name = "N", default_value_t = 500)]
+        batch_size: usize,
         /// Seconds to wait for another modeld process to release the store lock
         /// (0 = fail immediately)
         #[arg(long, value_name = "SECS", default_value_t = 30)]

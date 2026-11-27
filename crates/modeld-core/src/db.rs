@@ -1651,6 +1651,87 @@ impl Database {
 
         Ok(rows)
     }
+
+    /// Return at most `limit` GC candidates with a hash greater than
+    /// `after_hash`, ordered by hash so an incremental GC can resume from a
+    /// persisted cursor without loading the whole catalogue (C6).
+    ///
+    /// `after_hash = None` starts from the beginning of the catalogue.
+    pub fn get_gc_candidate_counts_after(
+        &self,
+        after_hash: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<(Model, usize, usize)>> {
+        let (where_clause, limit_param) =
+            if after_hash.is_some() { ("WHERE m.blake3_hash > ?1", "?2") } else { ("", "?1") };
+        let sql = format!(
+            r#"
+            SELECT
+                m.id, m.blake3_hash, m.size_bytes, m.format, m.arch,
+                m.category, m.base_model, m.created_at, m.last_seen, m.quarantined_at,
+                COUNT(DISTINCT a.id)  AS alias_count,
+                COUNT(DISTINCT wr.id) AS workflow_ref_count,
+                m.note, m.pinned, m.favorited, m.source_type, m.hf_repo_id, m.revision,
+                m.download_url, m.license, m.downloaded_by, m.downloaded_at,
+                m.original_filename, m.model_card_url
+            FROM models m
+            LEFT JOIN aliases a  ON a.model_hash  = m.blake3_hash
+            LEFT JOIN workflow_refs wr ON wr.model_hash = m.blake3_hash
+            {where_clause}
+            GROUP BY m.id
+            ORDER BY m.blake3_hash ASC
+            LIMIT {limit_param}
+            "#
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            let h: String = row.get(1)?;
+            let created: String = row.get(7)?;
+            let last: String = row.get(8)?;
+            let qat: Option<String> = row.get(9)?;
+            let alias_count: i64 = row.get(10)?;
+            let wf_count: i64 = row.get(11)?;
+            let downloaded_at_str: Option<String> = row.get(21)?;
+            Ok((
+                Model {
+                    id: row.get(0)?,
+                    blake3_hash: parse_blake3(&h)?,
+                    size_bytes: row.get(2)?,
+                    format: row.get(3)?,
+                    arch: row.get(4)?,
+                    category: row.get(5)?,
+                    base_model: row.get(6)?,
+                    created_at: parse_dt(&created),
+                    last_seen: parse_dt(&last),
+                    quarantined_at: qat.as_deref().map(parse_dt),
+                    note: row.get(12)?,
+                    pinned: row.get::<_, i64>(13)? != 0,
+                    favorited: row.get::<_, i64>(14)? != 0,
+                    source_type: row.get(15)?,
+                    hf_repo_id: row.get(16)?,
+                    revision: row.get(17)?,
+                    download_url: row.get(18)?,
+                    license: row.get(19)?,
+                    downloaded_by: row.get(20)?,
+                    downloaded_at: downloaded_at_str.as_deref().map(parse_dt),
+                    original_filename: row.get(22)?,
+                    model_card_url: row.get(23)?,
+                },
+                alias_count as usize,
+                wf_count as usize,
+            ))
+        };
+
+        let rows = match after_hash {
+            Some(hash) => stmt
+                .query_map(rusqlite::params![hash, limit], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => {
+                stmt.query_map(rusqlite::params![limit], map_row)?.collect::<Result<Vec<_>, _>>()?
+            }
+        };
+        Ok(rows)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

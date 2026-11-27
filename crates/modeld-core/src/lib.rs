@@ -37,6 +37,7 @@ pub mod store_lock;
 pub mod store_path;
 pub mod tx;
 pub mod unlink;
+pub mod virtual_fs;
 pub mod workflow;
 
 pub use audit::{AuditEntry, AuditLogger, AuditQuery};
@@ -62,7 +63,9 @@ pub use fsck::{
     run_fsck, run_repair, run_verify, DanglingAlias, FsckReport, HashMismatch, MissingCasObject,
     OrphanRecord, RepairResult, SizeMismatch, VerifyReport,
 };
-pub use gc::{classify_refs, GcCandidate, GcEngine, GcPreview, GcPreviewItem, GcResult, RefStatus};
+pub use gc::{
+    classify_refs, GcCandidate, GcCursor, GcEngine, GcPreview, GcPreviewItem, GcResult, RefStatus,
+};
 pub use governance::{
     add_tag, export_tags_json, favorite_model, get_note, get_provenance, get_tags_for_model,
     import_tags_json, is_pinned, list_all_tags, list_pinned, pin_model, remove_tag, set_note,
@@ -88,6 +91,10 @@ pub use tx::{
     TxStatus,
 };
 pub use unlink::{unlink_path, UnlinkResult};
+pub use virtual_fs::{
+    canonical_category, connect, sync, template, FrontendTemplate, VirtualSyncReport,
+    BUILTIN_FRONTENDS,
+};
 pub use workflow::{
     build_model_lookup, find_workflow_files, index_workflow, parse_workflow, ModelRef,
     ParsedWorkflow,

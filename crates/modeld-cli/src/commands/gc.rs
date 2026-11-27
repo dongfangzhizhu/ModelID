@@ -7,12 +7,14 @@ use colored::*;
 use modeld_core::{t, tf, Database, GcEngine};
 use std::path::PathBuf;
 
-#[tracing::instrument(skip_all, fields(store = %store.display(), preview))]
+#[tracing::instrument(skip_all, fields(store = %store.display(), preview, incremental, batch_size))]
 pub fn gc_command(
     store: PathBuf,
     preview: bool,
     cleanup_quarantine: bool,
     cleanup_tmp: bool,
+    incremental: bool,
+    batch_size: usize,
     wait_secs: u64,
 ) -> Result<()> {
     let db_path = store.join("modeld.db");
@@ -102,8 +104,22 @@ pub fn gc_command(
     }
 
     // Execute GC
-    println!("{}", t("gc.running").bold());
-    let result = gc.run_safe()?;
+    if !incremental {
+        println!("{}", t("gc.running").bold());
+    }
+    let result = if incremental { gc.run_safe_incremental(batch_size)? } else { gc.run_safe()? };
+
+    if incremental {
+        println!(
+            "{}",
+            tf("gc.incremental", &[("count", &result.scanned), ("size", &batch_size)])
+                .green()
+                .bold()
+        );
+        if result.wrapped {
+            println!("{}", t("gc.incremental.wrapped").dimmed());
+        }
+    }
 
     println!();
     if result.quarantined.is_empty() {
