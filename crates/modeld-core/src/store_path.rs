@@ -112,7 +112,16 @@ fn read_store_path_from_toml(store_path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
+
+    // 同一测试进程内，所有改动 MODELD_STORE 的用例必须串行，避免并行
+    // 读写进程级环境变量导致断言拿到别的用例设置的值。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn test_default_store_path_not_empty() {
@@ -132,6 +141,7 @@ mod tests {
 
     #[test]
     fn test_env_var_takes_priority_over_default() {
+        let _guard = env_lock();
         // Save and restore the env var so we don't pollute other tests
         let original = std::env::var("MODELD_STORE").ok();
         let tmp = TempDir::new().unwrap();
@@ -149,6 +159,7 @@ mod tests {
 
     #[test]
     fn test_cli_beats_env_var() {
+        let _guard = env_lock();
         let original = std::env::var("MODELD_STORE").ok();
         let tmp = TempDir::new().unwrap();
         let cli_path = tmp.path().join("cli_store");
@@ -165,6 +176,7 @@ mod tests {
 
     #[test]
     fn test_toml_store_path_fallback() {
+        let _guard = env_lock();
         // Ensure MODELD_STORE is not set for this test
         let original = std::env::var("MODELD_STORE").ok();
         std::env::remove_var("MODELD_STORE");

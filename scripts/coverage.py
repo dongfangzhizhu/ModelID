@@ -69,18 +69,56 @@ def machine_triple() -> str:
     return match.group(1)
 
 
-def find_lib_test_binary() -> Path:
-    """Locate the instrumented `modeld_core` unit-test executable."""
-    deps = REPO_ROOT / "target" / "debug" / "deps"
-    # On Windows the same stem also yields a `.pdb`; only the actual
-    # executable carries coverage mappings. Unix test binaries have no suffix.
+def find_lib_test_binary(env: dict[str, str]) -> Path:
+    """Locate the instrumented `modeld_core` unit-test executable.
+
+    Cargo 在 `RUSTFLAGS=-C instrument-coverage` 下会把 lib 单测可执行文件
+    放到 `target/debug/build/<pkg>-<hash>/out/`，而不是 `target/debug/deps/`；
+    旧脚本只扫 deps/，在 CI 上就会误判为“找不到测试二进制”。先问 cargo 要
+    JSON 产物清单，拿到本次插桩构建的真实路径；失败时再递归扫描兜底。
+    """
+    probe = subprocess.run(
+        [
+            "cargo", "test", "-p", "modeld-core", "--lib", "--locked",
+            "--no-run", "--message-format=json",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode == 0:
+        for line in probe.stdout.splitlines():
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("reason") != "compiler-artifact":
+                continue
+            target = msg.get("target") or {}
+            profile = msg.get("profile") or {}
+            kinds = target.get("kind") or []
+            executable = msg.get("executable")
+            if (
+                target.get("name") == "modeld_core"
+                and "lib" in kinds
+                and profile.get("test") is True
+                and executable
+            ):
+                candidate = Path(executable)
+                if not candidate.is_absolute():
+                    candidate = (REPO_ROOT / candidate).resolve()
+                if candidate.is_file():
+                    return candidate
+
+    # 兜底：兼容旧版 cargo 只把测试二进制写在 deps/ 的行为。
+    debug = REPO_ROOT / "target" / "debug"
     candidates = sorted(
-        p for p in deps.glob("modeld_core-*")
+        p for p in debug.rglob("modeld_core-*")
         if p.is_file() and p.suffix in {".exe", ""} and os.access(p, os.X_OK)
     )
     if not candidates:
-        raise SystemExit(f"no modeld_core test binary found in {deps}")
-    # `cargo test --no-run` prints the path; prefer the newest instrumented one.
+        raise SystemExit(f"no modeld_core test binary found under {debug}")
     return max(candidates, key=lambda p: p.stat().st_mtime_ns)
 
 
@@ -130,7 +168,7 @@ def main() -> int:
         "-o", str(profdata),
     ])
 
-    binary = find_lib_test_binary()
+    binary = find_lib_test_binary(env)
     print(f"using test binary: {binary}")
 
     # The raw LLVM export contains every instrumented crate (std, the whole
