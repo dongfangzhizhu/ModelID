@@ -43,14 +43,14 @@ jobs:
 
           # ── macOS x86-64 (Intel Mac) ────────────────────────────────────
           - name: macos-x86_64
-            os: macos-13          # last Intel runner
+            os: macos-15-intel    # supported Intel runner
             target: x86_64-apple-darwin
             artifact_suffix: ''
             archive_ext: tar.gz
 
           # ── macOS ARM64 (Apple Silicon, M1/M2/M3) ───────────────────────
           - name: macos-aarch64
-            os: macos-14          # ARM runner (M1)
+            os: macos-15          # supported ARM runner
             target: aarch64-apple-darwin
             artifact_suffix: ''
             archive_ext: tar.gz
@@ -178,7 +178,7 @@ jobs:
   # ---------------------------------------------------------------------------
   macos-universal:
     name: Build macOS universal binary
-    runs-on: macos-14
+    runs-on: macos-15
     needs: build
 
     steps:

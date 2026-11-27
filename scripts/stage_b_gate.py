@@ -102,7 +102,7 @@ def run() -> list[tuple[str, bool, str]]:
     ci_ok = (
         "ubuntu-22.04" in ci
         and "windows-2022" in ci
-        and "macos-14" in ci
+        and "macos-15" in ci
         and re.search(r"^  coverage:\s*$", ci, re.M) is not None
         and re.search(r"^  bench:\s*$", ci, re.M) is not None
     )
