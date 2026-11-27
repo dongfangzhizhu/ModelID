@@ -163,6 +163,7 @@ mod tests {
     use super::*;
     use crate::db::{AliasType, Frontend};
     use crate::hash::Blake3Hash;
+    use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
