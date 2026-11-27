@@ -220,6 +220,16 @@ impl StagedLink {
 
         match fs::rename(&self.tmp_path, &self.dest_path) {
             Ok(()) => {
+                // POSIX `rename(2)`: if the staged link and the destination
+                // are already two hard links to the *same* inode (e.g. the
+                // destination is itself a link to the CAS object), the call
+                // succeeds as a no-op and leaves the staged entry behind.
+                // Windows' MoveFileEx does replace it, so this only shows up
+                // on Unix. Remove the redundant staged entry explicitly —
+                // the destination already points at the right object.
+                if fs::symlink_metadata(&self.tmp_path).is_ok() {
+                    let _ = fs::remove_file(&self.tmp_path);
+                }
                 self.committed = true;
                 restore_readonly(&self.dest_path, dest_was_readonly);
                 // The rename is durable only once the directory entry is

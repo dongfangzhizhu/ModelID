@@ -198,19 +198,22 @@ fn detect_fs_from_proc_mounts(path: &Path) -> Option<String> {
     let file = File::open(mounts_path).ok()?;
     let reader = BufReader::new(file);
 
-    // Find the longest mount point that is a prefix of the target path
+    // Find the longest mount point that is a prefix of the target path.
+    // `map_while(Result::ok)` stops at the first read error rather than
+    // potentially looping forever on a device that keeps returning errors;
+    // `flatten()` on an `io::Lines` is exactly the case clippy warns about.
     let mut best_mount: Option<(String, String)> = None; // (mount_point, fs_type)
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
             continue;
         }
         let mount_point = parts[1];
         let fs_type = parts[2];
-        if canon_str.starts_with(mount_point) {
-            if best_mount.as_ref().map_or(0, |(mp, _)| mp.len()) < mount_point.len() {
-                best_mount = Some((mount_point.to_string(), fs_type.to_string()));
-            }
+        if canon_str.starts_with(mount_point)
+            && best_mount.as_ref().map_or(0, |(mp, _)| mp.len()) < mount_point.len()
+        {
+            best_mount = Some((mount_point.to_string(), fs_type.to_string()));
         }
     }
 

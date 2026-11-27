@@ -180,6 +180,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI failures on fresh push: MSRV, clippy 1.100 and a Linux rename no-op** — three
+  real defects surfaced only on GitHub Actions (the local Windows toolchain is
+  older and takes a different `rename` path):
+  - `notify-types` was locked at 2.3.1, which requires rustc 1.91 and broke both
+    the MSRV job and the Docker build (pinned rust:1.89). Pinned to 2.0.0
+    (`rust-version = 1.77`), still satisfying notify 8.2.2's `^2.0.0` constraint.
+  - New Rust 1.100 clippy lints (`lines_filter_map_ok`, `collapsible_if`) failed
+    the `-D warnings` gate in `platform.rs`; replaced `lines().flatten()` with
+    `map_while(Result::ok)` and collapsed the nested mount-point check.
+  - `test_replace_over_readonly_destination` leaked a `.modeld_tmp_*.tmp` on
+    Linux: POSIX `rename(2)` is a successful no-op when two hard links name the
+    same inode, so the staged entry survived. `StagedLink::commit` now removes
+    the redundant staged link after such a rename.
+  (ROADMAP stage A/C exit gates)
 - **Dependency advisories [C4]** — upgraded rustls/tokio/zstd/crossbeam-epoch/url/
   webpki-roots and rusqlite 0.31→0.41 (SQLite CVE-2026-119375), raised MSRV to
   1.89; `cargo deny check` now reports advisories/bans/licenses/sources all ok.
