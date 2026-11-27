@@ -6,7 +6,12 @@
 # The Rust version must satisfy `rust-version` in Cargo.toml (1.89, verified with
 # `cargo +1.89 build --workspace --locked`).
 
-FROM rust:1.89-slim AS builder
+# Pin the bookworm variant explicitly so the builder's glibc matches the
+# bookworm-slim runtime below. The unqualified `rust:1.89-slim` currently
+# resolves to a trixie-based image (glibc 2.39) while the runtime ships
+# glibc 2.36, which makes the binary fail to start with:
+#   `/lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found`
+FROM rust:1.89-slim-bookworm AS builder
 WORKDIR /app
 
 # Native build dependencies (rusqlite bundles SQLite itself; TLS is via rustls

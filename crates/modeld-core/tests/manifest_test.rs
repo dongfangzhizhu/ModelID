@@ -11,6 +11,16 @@ use modeld_core::{
 use std::fs;
 use tempfile::TempDir;
 
+/// CAS objects are immutable (read-only) on every platform: Windows sets the
+/// read-only attribute, Unix uses mode 0444. The tamper tests must be able to
+/// write to the object, so clear the bit portably first.
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_writable(path: &std::path::Path) {
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_readonly(false);
+    fs::set_permissions(path, perms).unwrap();
+}
+
 fn fixture() -> (TempDir, std::path::PathBuf, Database, Blake3Hash) {
     let tmp = TempDir::new().unwrap();
     let store = tmp.path().to_path_buf();
@@ -64,13 +74,8 @@ fn tampered_cas_object_is_detected() {
     let obj = cas.get(&hash).unwrap();
     let mut bytes = fs::read(&obj).unwrap();
     bytes[0] ^= 0xFF;
-    // CAS 对象可能是只读的（immutability），先清除只读位再写。
-    #[cfg(windows)]
-    {
-        let mut perms = fs::metadata(&obj).unwrap().permissions();
-        perms.set_readonly(false);
-        fs::set_permissions(&obj, perms).unwrap();
-    }
+    // CAS 对象是不可变的（只读），先清除只读位再写。
+    make_writable(&obj);
     fs::write(&obj, &bytes).unwrap();
 
     let report = verify_manifest(&store, &manifest, true).unwrap();
@@ -88,12 +93,7 @@ fn truncated_cas_object_is_detected() {
     let manifest = generate_manifest(&store, &db).unwrap();
     let cas = CasStore::new(&store);
     let obj = cas.get(&hash).unwrap();
-    #[cfg(windows)]
-    {
-        let mut perms = fs::metadata(&obj).unwrap().permissions();
-        perms.set_readonly(false);
-        fs::set_permissions(&obj, perms).unwrap();
-    }
+    make_writable(&obj);
     fs::write(&obj, b"short").unwrap();
     let report = verify_manifest(&store, &manifest, false).unwrap();
     assert!(!report.is_clean(), "truncation must be detected: {report:?}");

@@ -180,6 +180,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI round 2: Linux read-only CAS tests and Docker glibc mismatch** — after the
+  first fixes, fresh CI runs exposed two more platform-only defects:
+  - `manifest_test.rs` cleared the CAS object's read-only bit only on Windows,
+    but Unix also makes CAS objects immutable (mode 0444), so tamper/truncate
+    tests failed with `PermissionDenied`. Replaced with a portable
+    `make_writable()` helper for both platforms.
+  - The Docker image built but could not start: `rust:1.89-slim` now resolves to
+    a trixie base (glibc 2.39) while the runtime was `debian:bookworm-slim`
+    (glibc 2.36), producing `GLIBC_2.39 not found`. Pinned the builder to
+    `rust:1.89-slim-bookworm` so both stages share the same glibc.
+  (ROADMAP stage A/C exit gates)
 - **CI failures on fresh push: MSRV, clippy 1.100 and a Linux rename no-op** — three
   real defects surfaced only on GitHub Actions (the local Windows toolchain is
   older and takes a different `rename` path):
