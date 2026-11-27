@@ -416,9 +416,9 @@ Refs: docs/ROADMAP.md#A1
     `node_modules/.package-lock.json`；`ui/package*.json` 保持跟踪以支持 `npm ci`；根目录两个空壳 `package*.json` 删除。
 - **产物**：可构建镜像 + 完整 CI + MSRV 声明
 - **验收标准**：
-  - [x] `docker build -f docker/Dockerfile .` 成功，镜像 < 200 MB —— **本地无 Docker，未实测**；已加入 CI 的 `docker` job 自动验证
+  - [x] `docker build -f docker/Dockerfile .` 成功，镜像 < 200 MB —— 本机无 Docker，未实测；GitHub Actions run `46005669760` 的 `docker` job 实测 93 MiB，token 401/200 断言通过
   - [x] 容器内 `MODELD_AUTH_TOKEN=xxx` 启动后，`Authorization: Bearer xxx` 可访问 —— 已用本机 release 二进制等价验证
-  - [x] CI 在 ubuntu/windows/macos 全绿，含前端测试与 `cargo-deny` —— **本地无法运行 GitHub Actions**；workflow 已用 YAML 解析校验，6 个 job 齐备
+  - [x] CI 在 ubuntu/windows/macos 全绿，含前端测试与 `cargo-deny` —— GitHub Actions run `46005669760` 实测 14/14 job 全部 success（matrix 已迁移到受支持的 `macos-15`）
   - [x] `cargo +1.82 build --workspace` 通过 —— 改为 **1.88**：1.82/1.86 实测无法构建，1.88 通过
 - **测试**：CI 本身（6 个 job）+ 本地 `cargo +1.88 build/test --workspace --locked` + `cargo deny check bans licenses sources` + `npm ci && npm test` + pytest
 - **验收证据**（2026-10-24，Windows 11）：
@@ -429,19 +429,19 @@ Refs: docs/ROADMAP.md#A1
   - **依赖审计**：`cargo deny check bans licenses sources` → `bans ok, licenses ok, sources ok`（首次运行暴露的 wildcard 报错已用 `publish = false` + `allow-wildcard-paths` 解决）。
     公告库（RUSTSEC）本次因网络无法克隆，未跑；CI 中执行 `cargo deny check`。
   - **前端**：`npm ci`（2 packages，锁文件同步）+ `npm test` → 38 通过；Python hook：`pytest` → 12 通过。
-  - **镜像体积**：release 二进制 10.39 MB + debian-slim 基础层，估算 ~90 MB < 200 MB（实际值由 CI 的 `docker` job 打印）。
-  - **未实测**：`docker build` 与「三平台 CI 全绿」需要 Docker 与 GitHub Actions，本机都没有；已记入 §12.3。
+  - **镜像体积**：CI run `46005669760` 实测 **93 MiB** < 200 MB（release 二进制 + debian-slim 基础层）。
+  - **本机未实测**：`docker build` 与「三平台 CI 全绿」需要 Docker 与 GitHub Actions，本机都没有；两者已由 GitHub Actions run `46005669760` 验证，其余外部依赖仍记入 §12.3。
 - **估算**：2 人日 ｜ **依赖**：A3（token 读取）
 
 ### 阶段 A 出口 Gate
 
-> 2026-11-27 据实核对：代码层出口条件已全部满足；需外部平台/人工的三项如实留空，不冒充通过。
+> 2026-11-27 据实核对：代码层出口条件已全部满足；三平台 CI 与 Docker 已由 GitHub Actions run `46005669760` 实测通过（14/14 job success，core 覆盖率 76.02%）；人工全链路验收仍需外部环境/人工操作，如实留空。
 
 - [x] A1–A8 全部 `done`（状态看板逐项核对）
 - [x] §8 追溯矩阵的全部 P0 已关闭 —— 矩阵实为 **11 项**（原 Gate 写「10 个」），映射到 A1/A2/A3/A4/A5/A6/A8/B1，对应任务全部 `done`
 - [x] `cargo test --workspace --locked` 全绿，新增测试不少于 20 个（跳过 7 项本机沙箱删除拦截用例后 **419 passed / 0 failed**；基线 395 → 419，净增 24）
-- [ ] 三平台 CI 全绿 —— 本机无 GitHub Actions；`.github/workflows/ci.yml` 已含 ubuntu/windows/macos 矩阵，需首次 push 后在 CI 上确认
-- [ ] `docker build` 成功 —— 本机无 Docker；`docker/Dockerfile` 与 CI 的 `docker` job 已就绪，需 CI 实测镜像 < 200 MB
+- [x] 三平台 CI 全绿 —— GitHub Actions run `46005669760`：ubuntu-22.04 / windows-2022 / macos-15 全部 success；MSRV、cargo deny、frontend、Python 3.9–3.12、benchmark、coverage 同步通过（14/14 job）
+- [x] `docker build` 成功 —— 同 run 的 `Docker image` job success，镜像 93 MiB < 200 MB，容器内无 token 401 / 带 token 200 断言通过
 - [ ] 一次完整人工验收：`init → scan --index-only → dedup → gc --preview → serve → 浏览器操作` 全链路无 401、无 panic、数字可信 —— 本机未做完整人工链路；已有 28 个 HTTP e2e 覆盖全路由，但不能替代人工验收
 - [x] 本文件 §9–§11 更新完毕
 
@@ -651,7 +651,7 @@ Refs: docs/ROADMAP.md#A1
 > - `python scripts/coverage.py` → 214 passed / 0 failed（instrumented），core 行覆盖率 79.43%，报告已入库
 > - `cargo fmt --check` / `clippy --workspace --all-targets -D warnings` 干净；前端 `npm test` 38 passed；Python 17 passed
 > - **本轮由测试抓出并修复的两个真缺陷**：① 跨卷 `--adopt` 每个文件都打印 `adopt failed: cross-volume`，CLI 仍 exit 0 → `scan_command` 现在只要有 per-file 失败就非零退出；② 前端 `resolvePhaseKey("toString")` 命中 `Object.prototype`，把函数当 i18n key → 改为只接受自有属性
-> - **未实测**：WebUI 覆盖率（只定了 e2e 路由覆盖，尚无 JS 行覆盖率工具）；NFS/SMB 网络卷（沿用 B7 未测项）；`llvm-cov` 在 ubuntu CI 上的实测要等首次 CI 运行
+> - **未实测**：WebUI 覆盖率（只定了 e2e 路由覆盖，尚无 JS 行覆盖率工具）；NFS/SMB 网络卷（沿用 B7 未测项）。`llvm-cov` 已在 GitHub Actions run `46005669760` 的 coverage job 实测 **76.02%**
 - **估算**：6 人日 ｜ **依赖**：B1–B7（持续进行）
 
 ### B9 · 文档重构
@@ -691,7 +691,7 @@ Refs: docs/ROADMAP.md#A1
   - B9 已完成 as-built 文档重构并通过相对链接/源码锚点检查；`docs/ROADMAP.md` 阶段 B 出口 Gate 全部勾选
   - `cargo bench -p modeld-core --locked` 实测：`scan_100k_files_full_hash` **24395.100 ms**（10 万个 1 字节 `.safetensors`，只计 `Scanner::scan`，不含建夹具）、`dedup_plan_1tib_logical` **805.324 ms**（1000 个 1 GiB 模型 × 2 路径 = 1 TiB 可回收逻辑字节，仅元数据 + 占位路径，不代表真实 1 TiB IO）；四项基准已写入 `bench/baseline.json`（`windows-x86_64`），`scripts/bench_gate.py --threshold 20` 通过
   - `python3 scripts/stage_b_gate.py` → 7 项静态门全部 PASS；首次运行发现 `modeld-webui/src/server.rs:179` 仍在库层 `println!`，已移到二进制 `src/main.rs`，库层只保留 `tracing::info!`，复跑 7/7 PASS
-  - **未实测**：真实 1 TiB 模型字节的端到端 IO、三平台 CI 首次运行、ubuntu 平台基线（需 CI 上 `--record`）；已记入 §12.3
+  - **未实测**：真实 1 TiB 模型字节的端到端 IO、ubuntu 平台基线（需 CI 上 `--record`）；三平台 CI 首次运行已于 run `46005669760` 完成（14/14 success），其余记入 §12.3
 - **估算**：2 人日 ｜ **依赖**：B1–B9
 
 ### 阶段 B 出口 Gate
@@ -854,7 +854,7 @@ Refs: docs/ROADMAP.md#A1
 
 ### 阶段 C 出口 Gate
 
-阶段 C 的出口标准是「三平台可安装；发布 0.2.0；端到端生态接入验收」。其中真实安装、真实 publish、真实前端出图依赖外部平台/凭据，本机无法验收，按证据优先原则**不勾选、如实登记**；能由仓库确定性判定的 as-built 不变量由 `scripts/stage_c_gate.py` 固化为可复现静态门（9/9 通过）。
+阶段 C 的出口标准是「三平台可安装；发布 0.2.0；端到端生态接入验收」。GitHub Actions run `46005669760` 已验证 ubuntu/windows/macos 三平台 build + test 全绿，但真实安装、真实 publish、真实前端出图依赖外部平台/凭据，按证据优先原则**不勾选、如实登记**；能由仓库确定性判定的 as-built 不变量由 `scripts/stage_c_gate.py` 固化为可复现静态门（9/9 通过）。
 
 - [x] 版本统一 0.2.0（Rust workspace 与 Python 包一致）
 - [x] 所有 crate 继承 workspace `publish = true`，release workflow 含 build/sbom/sign/publish-crates/publish-pypi 五个 job
@@ -862,11 +862,11 @@ Refs: docs/ROADMAP.md#A1
 - [x] 守护单元、Grafana 面板、生态接入与发布文档齐备
 - [x] C1–C7 状态板全部 `done`
 - [x] `scripts/stage_c_gate.py` 9/9 通过（内含 C5 前端静态门、C6 静态门、阶段 B 静态门）
-- [ ] **三平台可安装**：真实安装需要在 GitHub Actions runner 上执行，本机无 CI/macOS/Linux 环境；清单 SHA256 待真实制品回填（见 C3 待办）
+- [ ] **三平台可安装**：CI 已验证 ubuntu-22.04 / windows-2022 / macos-15 三平台 build + test 全绿（run `46005669760`）；真实安装（Homebrew/winget/scoop 清单 SHA256 回填）仍需发布制品，未勾选
 - [ ] **发布 0.2.0**：真实 crates.io/PyPI publish 需外部 token，未执行；本地只验证了版本统一、`cargo install --path`、crate 可打包（见 C3 待办）
 - [ ] **端到端生态接入验收**：真实 ComfyUI/Forge/A1111 出图需三端运行环境，本机只验了目录形状、零拷贝链接与别名记账（见 C7 待办）
 
-> 阶段 C 已交付 7/7 任务与全部代码产物；上述 3 项未勾选属外部环境依赖，不是未完成的代码工作。首次 CI 跑通与拿到发布凭据后即可据实勾选。
+> 阶段 C 已交付 7/7 任务与全部代码产物；首次 CI 已于 run `46005669760` 全绿，但上述 3 项未勾选属外部发布/运行环境依赖，不是未完成的代码工作。拿到真实发布制品与前端环境后即可据实勾选。
 
 ---
 
@@ -966,6 +966,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-27 | CI 收口 | GitHub Actions run `46005669760` 首次 14/14 job 全绿：修复 Windows `MODELD_STORE` 并行竞争、插桩测试二进制定位、`macos-14` 退役（改 `macos-15`/`macos-15-intel`）、macOS RSS 不支持时的跳过语义，并为 `manifest.rs` 补 8 个单元测试把 core 覆盖率从 74.97% 抬到 76.02%；Docker 实测 93 MiB、token 401/200。阶段 A Gate 的 CI/Docker 两项据实勾选，阶段 C 真实安装/发布/出图仍按外部依赖留空 | `7dac21d` | `.github/workflows/{ci,release}.yml`、`scripts/{coverage,stage_b_gate}.py`、`crates/modeld-core/src/{store_path,manifest}.rs`、`crates/modeld-cli/tests/daemon.rs`、`coverage/*`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-27 | 收口 | 补齐阶段 A/C 出口 Gate：新增 `scripts/stage_c_gate.py`（9/9：版本统一、publish 配置、五个 release job、SBOM、部署/生态产物、C1–C7 状态、C5/C6/阶段 B 静态门），明确三项外部验收（三平台安装、真实 publish、真实出图）本机未测不勾选；阶段 A Gate 据实勾选 4 项，纠正「10 个 P0」为矩阵实际的 11 项，CI/Docker/人工验收 3 项如实留空 | `0e1a20e` | `scripts/stage_c_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-27 | C7 | 生态集成：新增虚拟 FS（ComfyUI/Forge/A1111 三套目录模板，按 category/原始文件名启发式分类），同卷硬链接/跨卷符号链接零拷贝且写别名记账，`sync --dry-run` 幂等；`modeld frontend list\|connect\|sync` 与 `scripts/connect-frontend.{sh,ps1}` 一键接入；`docs/frontend-integration.md` 记录映射与边界。实测：core 3/3（模板/分类/零拷贝+幂等）、CLI 黑盒 2/2（list 含三端、sync 产出可读链接）；未在三端真实进程加载出图，已登记 | `abe6bec` | `core/virtual_fs.rs`、`core/lib.rs`、`cli/{cli,main}.rs`、`cli/commands/{mod,frontend}.rs`、`cli/tests/frontend.rs`、`scripts/connect-frontend.{sh,ps1}`、`docs/frontend-integration.md`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-27 | C6 | 性能优化：新增 `GcCursor`（`<store>/gc-cursor.json` hash 游标，损坏安全回退）与 `get_gc_candidate_counts_after()` 分页查询，`run_safe_incremental()` + `modeld gc --incremental --batch-size N`；流式代理三条路径改 1 MiB `BufReader`；`scripts/c6_gate.py` 固化 8 项 as-built 不变量；新增代理吞吐对拍脚本。实测：core gc 6/6、CLI 黑盒 1/1、静态门 8/8、bench 门禁 `--record` 后 `--threshold 20` 通过；代理吞吐 443.7 MiB/s 对比基线 962.6 MiB/s（比值 0.46，未达 0.80 线速目标），release 构建与真实 1 TiB IO 未完成，均已登记 | `abe6bec` | `core/{db,gc,i18n,lib}.rs`、`cli/{cli,main}.rs`、`cli/commands/gc.rs`、`cli/tests/gc_incremental.rs`、`proxy/server.rs`、`scripts/{c6_gate,bench-proxy-throughput}.py`、`bench/baseline.json`、`docs/ROADMAP.md`、`CHANGELOG.md` |
@@ -1055,10 +1056,10 @@ Refs: docs/ROADMAP.md#A1
 | 2026-10-24 | A7 | `stats` 的 `frontends` 按「每个前端各算一次模型大小」，同一模型被多个前端引用时合计会超过 `total_size_bytes`（口径问题，非 bug） | B6 | done（B6 改为 `frontend_stats()`，每个前端内按模型去重） |
 | 2026-10-24 | A7 | `audit.log` 无轮转/大小上限，长期运行会无限增长 | C2 | open |
 | 2026-10-24 | A7 | `download` 路径的审计未接（下载完成点在 `downloader.rs`，需要把 `store_path` 传进 `Downloader` 的完成回调） | B4 | open |
-| 2026-10-24 | A8 | 本机无 Docker、无 GitHub Actions，`docker build` 与「三平台 CI 全绿」未实测；两者已写进 CI（`docker` job 断言镜像 < 200 MB 且 token 生效），首次 push 后需人工确认 | C3 | open |
+| 2026-10-24 | A8 | 本机无 Docker、无 GitHub Actions，`docker build` 与「三平台 CI 全绿」本机未实测；已由 GitHub Actions run `46005669760` 验证（14/14 job success，镜像 93 MiB，token 401/200） | C3 | done（CI run `46005669760`） |
 | 2026-10-24 | A8 | RUSTSEC 公告库因网络不可达未能本地校验，`cargo deny check` 只在 CI 跑；本地只验证了 bans/licenses/sources | C3 | open |
 | 2026-10-24 | B1 | `downloads` 表与 WAL 是两套状态（`insert_download`/`complete_download` 与 WAL 并存），未来可合并为单一状态机 | C2 | open |
-| 2026-10-24 | B1 | 中断点矩阵只在 Windows 跑过，三平台需 CI | C3 | open |
+| 2026-10-24 | B1 | 中断点矩阵原先只在 Windows 跑过，三平台需 CI | C3 | done（run `46005669760` 三平台全量测试通过） |
 | 2026-10-24 | B1 | 锁的遗留判定只看 24h mtime，不探测持有进程是否存活（跨平台探测需额外平台代码） | C2 | done（B7 改用 `flock`/`LockFileEx` 内核锁，进程消失即释放；陈旧超时逻辑已删除） |
 | 2026-11-22 | 审核 | 本机 VS 升级到 18（MSVC 14.52）后，默认 `cargo test` 因 cc-rs 调 `cl.exe` 失败（C1034 stdarg.h）；需 `CC=clang-cl` 才能构建。CI 用固定 toolchain 不受影响 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-23 | B6 | `physical_bytes` 仅在 19.5 MB 合成库上与 `cas/` 实际字节对拍（差值 0）；无 ≥10 GB 真实库，`du -sb` 长期偏差与「SQLite 自身开销占比」未验证 | C6 | open |
@@ -1084,7 +1085,7 @@ Refs: docs/ROADMAP.md#A1
 | 2026-11-24 | B9 | `[proxy.network]` 的 IPv6 / hostname 退化为 `starts_with` 子串匹配，不能作为精确安全边界 | C4 | open |
 | 2026-11-24 | B9 | Python hook 的 `snapshot_download` 包装函数已定义但未启用；`modeld hook install` / `MODELD_NO_AUTO_HOOK` 只在旧文档中出现 | C7 | open |
 | 2026-11-24 | B9 | `AppState.rate_limit_per_min` 字段存在但 WebUI 路由未挂限流中间件 | C5 | open |
-| 2026-11-25 | B10 | 1 TiB 基准是元数据规模（1000 × 1 GiB 逻辑行 + 占位路径），未做真实 1 TiB 模型字节的端到端 IO；ubuntu 基线也需首次 CI `--record` | C6 | open |
+| 2026-11-25 | B10 | 1 TiB 基准是元数据规模（1000 × 1 GiB 逻辑行 + 占位路径），未做真实 1 TiB 模型字节的端到端 IO；ubuntu 基线仍需 CI `--record`（run `46005669760` 的 bench gate 按设计 SKIP，未误报回归） | C6 | open |
 | 2026-11-27 | 审核 | 本机 Python 3.13 未安装 `build`/`twine`/`hatchling`/`pytest`，`scripts/test_publish.py` 只能 3/9；配置镜像经 1080 代理 TLS EOF、直连 pypi.org 超时，无法补装。属本机依赖缺口（C3 已登记外部发布未验证），非代码缺陷；CI 固定环境含完整构建依赖 | C3 | open（本机环境，非代码缺陷） |
 | 2026-11-27 | 审核 | 本机沙箱的删除拦截 shim 阻止 Rust 进程删除目录（`fs::remove_dir`/`remove_dir_all` 均 `os error 5`，而同路径 Python `os.rmdir` 成功），导致 7 个「删除 staging 目录」相关测试失败：`cli/tests/{concurrency,environment}.rs` 各 1、core 的 `cas::tests::{test_store_crash_safe_staging_cleaned_on_success,failed_store_removes_its_staging_dir}`、`tx::tests::test_recover_cleans_staging`、`fault_injection_tests.rs` 的 recovery 清理 2 项。相关源码（`cas.rs`/`tx.rs`/`fault_injection_tests.rs`）与基线 `8e9532a` 逐字节相同，CLI 项用 stash 回退到基线复现同一失败 —— 全部与 C6/C7 无关；代码 rename/只读正确，空残留目录也不影响 `verify`。跳过这 7 项后 `cargo test --workspace --locked` → **419 passed / 0 failed**。CI 固定环境不受影响 | C3 | open（本机环境，非代码缺陷） |
 

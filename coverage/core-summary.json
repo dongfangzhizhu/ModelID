@@ -1,159 +1,177 @@
 {
   "scope": "crates/modeld-core/src",
   "tool": "rustc -C instrument-coverage + llvm-profdata/llvm-cov",
-  "line_count": 9574,
-  "line_covered": 7605,
-  "line_percent": 79.43,
+  "line_count": 10171,
+  "line_covered": 7732,
+  "line_percent": 76.02,
   "files": [
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\audit.rs",
-      "count": 103,
-      "covered": 97,
-      "percent": 94.17
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/audit.rs",
+      "count": 229,
+      "covered": 219,
+      "percent": 95.63
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\cas.rs",
-      "count": 309,
-      "covered": 253,
-      "percent": 81.88
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/cas.rs",
+      "count": 307,
+      "covered": 248,
+      "percent": 80.78
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\config.rs",
-      "count": 339,
-      "covered": 255,
-      "percent": 75.22
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\db.rs",
-      "count": 2068,
-      "covered": 1593,
-      "percent": 77.03
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\dedup.rs",
-      "count": 654,
-      "covered": 419,
-      "percent": 64.07
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\doctor.rs",
-      "count": 270,
-      "covered": 229,
-      "percent": 84.81
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\downloader.rs",
-      "count": 716,
-      "covered": 346,
-      "percent": 48.32
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\fsck.rs",
-      "count": 328,
-      "covered": 294,
-      "percent": 89.63
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\gc.rs",
-      "count": 301,
-      "covered": 224,
-      "percent": 74.42
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\governance.rs",
-      "count": 230,
-      "covered": 227,
-      "percent": 98.7
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\hash.rs",
-      "count": 96,
-      "covered": 88,
-      "percent": 91.67
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\hf_cache.rs",
-      "count": 382,
-      "covered": 260,
-      "percent": 68.06
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\i18n.rs",
-      "count": 599,
-      "covered": 574,
-      "percent": 95.83
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\ingest.rs",
-      "count": 286,
-      "covered": 243,
-      "percent": 84.97
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\links.rs",
-      "count": 273,
-      "covered": 244,
-      "percent": 89.38
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\platform.rs",
-      "count": 204,
-      "covered": 181,
-      "percent": 88.73
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\quarantine.rs",
-      "count": 271,
-      "covered": 225,
-      "percent": 83.03
-    },
-    {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\recover.rs",
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/config.rs",
       "count": 354,
-      "covered": 273,
-      "percent": 77.12
+      "covered": 266,
+      "percent": 75.14
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\refs.rs",
-      "count": 161,
-      "covered": 159,
-      "percent": 98.76
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/db.rs",
+      "count": 2117,
+      "covered": 1667,
+      "percent": 78.74
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\scanner.rs",
-      "count": 482,
-      "covered": 443,
-      "percent": 91.91
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/dedup.rs",
+      "count": 624,
+      "covered": 401,
+      "percent": 64.26
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\store_lock.rs",
-      "count": 231,
-      "covered": 190,
-      "percent": 82.25
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/doctor.rs",
+      "count": 227,
+      "covered": 191,
+      "percent": 84.14
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\store_path.rs",
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/downloader.rs",
+      "count": 734,
+      "covered": 364,
+      "percent": 49.59
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/fsck.rs",
+      "count": 315,
+      "covered": 280,
+      "percent": 88.89
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/gc.rs",
+      "count": 378,
+      "covered": 310,
+      "percent": 82.01
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/governance.rs",
+      "count": 235,
+      "covered": 230,
+      "percent": 97.87
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/hash.rs",
       "count": 97,
-      "covered": 75,
-      "percent": 77.32
+      "covered": 88,
+      "percent": 90.72
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\tx.rs",
-      "count": 320,
-      "covered": 271,
-      "percent": 84.69
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/hf_cache.rs",
+      "count": 397,
+      "covered": 296,
+      "percent": 74.56
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\unlink.rs",
-      "count": 148,
-      "covered": 122,
-      "percent": 82.43
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/i18n.rs",
+      "count": 593,
+      "covered": 145,
+      "percent": 24.45
     },
     {
-      "file": "D:\\AI\\my\\githubprojs\\ModelID\\crates\\modeld-core\\src\\workflow.rs",
-      "count": 352,
-      "covered": 320,
-      "percent": 90.91
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/ingest.rs",
+      "count": 288,
+      "covered": 263,
+      "percent": 91.32
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/links.rs",
+      "count": 241,
+      "covered": 213,
+      "percent": 88.38
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/manifest.rs",
+      "count": 202,
+      "covered": 196,
+      "percent": 97.03
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/platform.rs",
+      "count": 140,
+      "covered": 124,
+      "percent": 88.57
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/quarantine.rs",
+      "count": 270,
+      "covered": 219,
+      "percent": 81.11
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/recover.rs",
+      "count": 359,
+      "covered": 275,
+      "percent": 76.6
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/refs.rs",
+      "count": 160,
+      "covered": 158,
+      "percent": 98.75
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/scanner.rs",
+      "count": 487,
+      "covered": 426,
+      "percent": 87.47
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/secret_store.rs",
+      "count": 81,
+      "covered": 40,
+      "percent": 49.38
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/store_lock.rs",
+      "count": 210,
+      "covered": 172,
+      "percent": 81.9
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/store_path.rs",
+      "count": 104,
+      "covered": 80,
+      "percent": 76.92
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/tx.rs",
+      "count": 305,
+      "covered": 255,
+      "percent": 83.61
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/unlink.rs",
+      "count": 110,
+      "covered": 92,
+      "percent": 83.64
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/virtual_fs.rs",
+      "count": 268,
+      "covered": 209,
+      "percent": 77.99
+    },
+    {
+      "file": "/home/runner/work/ModelID/ModelID/crates/modeld-core/src/workflow.rs",
+      "count": 339,
+      "covered": 305,
+      "percent": 89.97
     }
   ]
 }

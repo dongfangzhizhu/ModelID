@@ -2,33 +2,36 @@ modeld-core line coverage (unit tests, `crates/modeld-core/src` only)
 
 file                           lines  covered       %
 ------------------------------------------------------
-audit.rs                         103       97   94.2%
-cas.rs                           309      253   81.9%
-config.rs                        339      255   75.2%
-db.rs                           2068     1593   77.0%
-dedup.rs                         654      419   64.1%
-doctor.rs                        270      229   84.8%
-downloader.rs                    716      346   48.3%
-fsck.rs                          328      294   89.6%
-gc.rs                            301      224   74.4%
-governance.rs                    230      227   98.7%
-hash.rs                           96       88   91.7%
-hf_cache.rs                      382      260   68.1%
-i18n.rs                          599      574   95.8%
-ingest.rs                        286      243   85.0%
-links.rs                         273      244   89.4%
-platform.rs                      204      181   88.7%
-quarantine.rs                    271      225   83.0%
-recover.rs                       354      273   77.1%
-refs.rs                          161      159   98.8%
-scanner.rs                       482      443   91.9%
-store_lock.rs                    231      190   82.3%
-store_path.rs                     97       75   77.3%
-tx.rs                            320      271   84.7%
-unlink.rs                        148      122   82.4%
-workflow.rs                      352      320   90.9%
+audit.rs                         229      219   95.6%
+cas.rs                           307      248   80.8%
+config.rs                        354      266   75.1%
+db.rs                           2117     1667   78.7%
+dedup.rs                         624      401   64.3%
+doctor.rs                        227      191   84.1%
+downloader.rs                    734      364   49.6%
+fsck.rs                          315      280   88.9%
+gc.rs                            378      310   82.0%
+governance.rs                    235      230   97.9%
+hash.rs                           97       88   90.7%
+hf_cache.rs                      397      296   74.6%
+i18n.rs                          593      145   24.5%
+ingest.rs                        288      263   91.3%
+links.rs                         241      213   88.4%
+manifest.rs                      202      196   97.0%
+platform.rs                      140      124   88.6%
+quarantine.rs                    270      219   81.1%
+recover.rs                       359      275   76.6%
+refs.rs                          160      158   98.8%
+scanner.rs                       487      426   87.5%
+secret_store.rs                   81       40   49.4%
+store_lock.rs                    210      172   81.9%
+store_path.rs                    104       80   76.9%
+tx.rs                            305      255   83.6%
+unlink.rs                        110       92   83.6%
+virtual_fs.rs                    268      209   78.0%
+workflow.rs                      339      305   90.0%
 ------------------------------------------------------
-TOTAL (modeld-core only)        9574     7605   79.4%
+TOTAL (modeld-core only)       10171     7732   76.0%
 
 Dependencies and std are excluded: including them made the same data
 look like 15% coverage on Windows because llvm-cov's -ignore regex

@@ -180,6 +180,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI 全绿收口（run `46005669760`，14/14 job success）** — 四轮 GitHub Actions 实测后，三平台 Rust + MSRV + clippy + coverage 76.02% + Docker 93 MiB + 前端 + Python 3.9–3.12 + benchmark + cargo deny 全部通过。修复项：
+  - `store_path` 中三个改写 `MODELD_STORE` 的测试加统一互斥锁，消除 Windows 并行用例互相覆盖环境变量造成的假失败；
+  - `scripts/coverage.py` 改为向 cargo 查询 JSON 产物清单，从 `target/debug/build/<pkg>/<hash>/out/` 找到插桩后的 lib 单测二进制（旧逻辑只扫 `deps/`，CI 上误报“找不到二进制”）。多二进制合并导出会把覆盖率错算成 24.42%，已回退到单二进制口径；
+  - 为 `crates/modeld-core/src/manifest.rs` 补 8 个单元测试，覆盖 clean / 篡改 / 截断 / 缺失 / strict-extra / 生成缺失记录 / 版本拒绝 / 字段不一致分支，Linux 单测覆盖率由 74.97% 回到 76.02%；
+  - `macos-14` 已于 2026-11-02 退役，CI 与 release workflow 改用 `macos-15` / `macos-15-intel`，`scripts/stage_b_gate.py` 同步；
+  - daemon RSS 测试按自身文档约定处理 macOS `current_rss_bytes() == 0`：跳过 <100 MB 断言并把状态写入 `rss-skip.txt`，不再误判为 daemon 失败。
+  （ROADMAP 阶段 A/C 出口 Gate）
 - **CI round 2: Linux read-only CAS tests and Docker glibc mismatch** — after the
   first fixes, fresh CI runs exposed two more platform-only defects:
   - `manifest_test.rs` cleared the CAS object's read-only bit only on Windows,
