@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Reproducible stage-C exit-gate self-check** — `scripts/stage_c_gate.py`
+  pins the as-built invariants that cannot drift silently: 0.2.0 version
+  parity across Rust/Python, inherited `publish = true`, all five release
+  jobs, a non-empty SBOM, the deployment/observability/frontend artifacts,
+  C1–C7 status, and the C5/C6/stage-B static gates. It passes 9/9 locally.
+  The three external exit criteria (three-platform install, real publish,
+  real frontend image generation) are explicitly *not* checked by the script
+  and remain unchecked in the roadmap rather than being claimed as done.
 - **Frontend virtual filesystem and one-command integration [C7]** — `modeld frontend`
   builds a zero-copy view of the store under `<store>/virtual/<frontend>/` for
   ComfyUI, Forge and A1111, classifying models by category and original filename.
@@ -136,6 +144,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Stage A exit gate checked against evidence, stage C gate added** — the
+  stage-A gate had seven unchecked boxes despite A1–A8 all being `done`.
+  Four locally verified conditions are now checked; the three needing GitHub
+  Actions, Docker or a manual acceptance walkthrough remain unchecked with
+  the reason recorded. The gate's "10 P0" wording was corrected to 11 — the
+  traceability matrix actually lists 11 P0 rows (including the build-chain
+  item mapped to A8), all pointing at done tasks. A stage-C exit gate was
+  added with the same honest split. (ROADMAP stage A/C gates)
 - **Streaming proxy responses use 1 MiB buffered reads [C6]** — full-file, Range
   and HF-cache responses previously relied on the default 8 KiB `BufReader`
   slice; they now use explicit 1 MiB buffers so `io::copy` issues far fewer

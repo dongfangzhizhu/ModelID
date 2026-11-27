@@ -435,13 +435,15 @@ Refs: docs/ROADMAP.md#A1
 
 ### 阶段 A 出口 Gate
 
-- [ ] A1–A8 全部 `done`
-- [ ] 10 个 P0 问题全部关闭（见 §8 追溯矩阵）
-- [ ] `cargo test --workspace --locked` 全绿，新增测试不少于 20 个
-- [ ] 三平台 CI 全绿
-- [ ] `docker build` 成功
-- [ ] 一次完整人工验收：`init → scan --index-only → dedup → gc --preview → serve → 浏览器操作` 全链路无 401、无 panic、数字可信
-- [ ] 本文件 §9–§11 更新完毕
+> 2026-11-27 据实核对：代码层出口条件已全部满足；需外部平台/人工的三项如实留空，不冒充通过。
+
+- [x] A1–A8 全部 `done`（状态看板逐项核对）
+- [x] §8 追溯矩阵的全部 P0 已关闭 —— 矩阵实为 **11 项**（原 Gate 写「10 个」），映射到 A1/A2/A3/A4/A5/A6/A8/B1，对应任务全部 `done`
+- [x] `cargo test --workspace --locked` 全绿，新增测试不少于 20 个（跳过 7 项本机沙箱删除拦截用例后 **419 passed / 0 failed**；基线 395 → 419，净增 24）
+- [ ] 三平台 CI 全绿 —— 本机无 GitHub Actions；`.github/workflows/ci.yml` 已含 ubuntu/windows/macos 矩阵，需首次 push 后在 CI 上确认
+- [ ] `docker build` 成功 —— 本机无 Docker；`docker/Dockerfile` 与 CI 的 `docker` job 已就绪，需 CI 实测镜像 < 200 MB
+- [ ] 一次完整人工验收：`init → scan --index-only → dedup → gc --preview → serve → 浏览器操作` 全链路无 401、无 panic、数字可信 —— 本机未做完整人工链路；已有 28 个 HTTP e2e 覆盖全路由，但不能替代人工验收
+- [x] 本文件 §9–§11 更新完毕
 
 ---
 
@@ -850,6 +852,22 @@ Refs: docs/ROADMAP.md#A1
   - Windows 目录符号链接需要 Developer Mode/管理员权限；`connect` 在权限不足时显式失败，不静默复制模型。
   - 仅索引未入库（`missing_cas`）的模型不生成虚拟链接；现有非托管同名文件不会被覆盖。
 
+### 阶段 C 出口 Gate
+
+阶段 C 的出口标准是「三平台可安装；发布 0.2.0；端到端生态接入验收」。其中真实安装、真实 publish、真实前端出图依赖外部平台/凭据，本机无法验收，按证据优先原则**不勾选、如实登记**；能由仓库确定性判定的 as-built 不变量由 `scripts/stage_c_gate.py` 固化为可复现静态门（9/9 通过）。
+
+- [x] 版本统一 0.2.0（Rust workspace 与 Python 包一致）
+- [x] 所有 crate 继承 workspace `publish = true`，release workflow 含 build/sbom/sign/publish-crates/publish-pypi 五个 job
+- [x] SBOM（372 组件）与三平台安装清单（Homebrew/winget/scoop）齐备
+- [x] 守护单元、Grafana 面板、生态接入与发布文档齐备
+- [x] C1–C7 状态板全部 `done`
+- [x] `scripts/stage_c_gate.py` 9/9 通过（内含 C5 前端静态门、C6 静态门、阶段 B 静态门）
+- [ ] **三平台可安装**：真实安装需要在 GitHub Actions runner 上执行，本机无 CI/macOS/Linux 环境；清单 SHA256 待真实制品回填（见 C3 待办）
+- [ ] **发布 0.2.0**：真实 crates.io/PyPI publish 需外部 token，未执行；本地只验证了版本统一、`cargo install --path`、crate 可打包（见 C3 待办）
+- [ ] **端到端生态接入验收**：真实 ComfyUI/Forge/A1111 出图需三端运行环境，本机只验了目录形状、零拷贝链接与别名记账（见 C7 待办）
+
+> 阶段 C 已交付 7/7 任务与全部代码产物；上述 3 项未勾选属外部环境依赖，不是未完成的代码工作。首次 CI 跑通与拿到发布凭据后即可据实勾选。
+
 ---
 
 ## 7. 风险与回滚
@@ -948,6 +966,7 @@ Refs: docs/ROADMAP.md#A1
 
 | 日期 | 任务 | 摘要 | 提交 | 影响面 |
 |---|---|---|---|---|
+| 2026-11-27 | 收口 | 补齐阶段 A/C 出口 Gate：新增 `scripts/stage_c_gate.py`（9/9：版本统一、publish 配置、五个 release job、SBOM、部署/生态产物、C1–C7 状态、C5/C6/阶段 B 静态门），明确三项外部验收（三平台安装、真实 publish、真实出图）本机未测不勾选；阶段 A Gate 据实勾选 4 项，纠正「10 个 P0」为矩阵实际的 11 项，CI/Docker/人工验收 3 项如实留空 | 待回填 | `scripts/stage_c_gate.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-27 | C7 | 生态集成：新增虚拟 FS（ComfyUI/Forge/A1111 三套目录模板，按 category/原始文件名启发式分类），同卷硬链接/跨卷符号链接零拷贝且写别名记账，`sync --dry-run` 幂等；`modeld frontend list\|connect\|sync` 与 `scripts/connect-frontend.{sh,ps1}` 一键接入；`docs/frontend-integration.md` 记录映射与边界。实测：core 3/3（模板/分类/零拷贝+幂等）、CLI 黑盒 2/2（list 含三端、sync 产出可读链接）；未在三端真实进程加载出图，已登记 | `abe6bec` | `core/virtual_fs.rs`、`core/lib.rs`、`cli/{cli,main}.rs`、`cli/commands/{mod,frontend}.rs`、`cli/tests/frontend.rs`、`scripts/connect-frontend.{sh,ps1}`、`docs/frontend-integration.md`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-27 | C6 | 性能优化：新增 `GcCursor`（`<store>/gc-cursor.json` hash 游标，损坏安全回退）与 `get_gc_candidate_counts_after()` 分页查询，`run_safe_incremental()` + `modeld gc --incremental --batch-size N`；流式代理三条路径改 1 MiB `BufReader`；`scripts/c6_gate.py` 固化 8 项 as-built 不变量；新增代理吞吐对拍脚本。实测：core gc 6/6、CLI 黑盒 1/1、静态门 8/8、bench 门禁 `--record` 后 `--threshold 20` 通过；代理吞吐 443.7 MiB/s 对比基线 962.6 MiB/s（比值 0.46，未达 0.80 线速目标），release 构建与真实 1 TiB IO 未完成，均已登记 | `abe6bec` | `core/{db,gc,i18n,lib}.rs`、`cli/{cli,main}.rs`、`cli/commands/gc.rs`、`cli/tests/gc_incremental.rs`、`proxy/server.rs`、`scripts/{c6_gate,bench-proxy-throughput}.py`、`bench/baseline.json`、`docs/ROADMAP.md`、`CHANGELOG.md` |
 | 2026-11-26 | C5 | 前端重构：新增 `escapeHtml`/`safeHtml` 并改造 8 个一方模板，hash 点击事件改 `data-*` 事件委托；`session.js` 统一 HTTP/WS token 与 401 提示；表单控件/对话框补可访问名；`scripts/ui_static_check.py` 纳入 `npm test`（15 JS 文件、60 模板、16 控件零违规）。实测前端 51/51、Lighthouse 可访问性 91 分、Rust 418/418 | `931e1ab` | `ui/{security,session,api,main,ws,i18n,index}.js/html`、`ui/pages/*`、`ui/tests/security.test.js`、`ui/tests/session.test.js`、`ui/package.json`、`scripts/ui_static_check.py`、`docs/ROADMAP.md`、`CHANGELOG.md` |
