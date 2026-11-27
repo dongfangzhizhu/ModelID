@@ -5,7 +5,7 @@ Uses the LLVM tools shipped by `rustup component add llvm-tools-preview`
 directly. `cargo-llvm-cov` would be nicer but needs crates.io, which is not
 reachable in this environment; the raw tools do the same job:
 
-  1. build the core unit + integration tests with `-C instrument-coverage`
+  1. build the core lib tests with `-C instrument-coverage`
   2. run them with `LLVM_PROFILE_FILE` pointing at `coverage/`
   3. `llvm-profdata merge` the `.profraw` files
   4. `llvm-cov report` and `llvm-cov export` for the summary
@@ -69,18 +69,17 @@ def machine_triple() -> str:
     return match.group(1)
 
 
-def find_test_binaries(env: dict[str, str]) -> list[Path]:
-    """Locate every instrumented `modeld-core` test executable.
+def find_lib_test_binary(env: dict[str, str]) -> Path:
+    """Locate the instrumented `modeld_core` unit-test executable.
 
     Cargo 在 `RUSTFLAGS=-C instrument-coverage` 下会把 lib 单测可执行文件
     放到 `target/debug/build/<pkg>-<hash>/out/`，而不是 `target/debug/deps/`；
     旧脚本只扫 deps/，在 CI 上就会误判为“找不到测试二进制”。先问 cargo 要
-    JSON 产物清单，拿到本次插桩构建的真实路径（lib 单测 + 各集成测试）；
-    失败时再递归扫描兜底。
+    JSON 产物清单，拿到本次插桩构建的真实路径；失败时再递归扫描兜底。
     """
     probe = subprocess.run(
         [
-            "cargo", "test", "-p", "modeld-core", "--locked",
+            "cargo", "test", "-p", "modeld-core", "--lib", "--locked",
             "--no-run", "--message-format=json",
         ],
         cwd=REPO_ROOT,
@@ -88,7 +87,6 @@ def find_test_binaries(env: dict[str, str]) -> list[Path]:
         capture_output=True,
         text=True,
     )
-    found: list[Path] = []
     if probe.returncode == 0:
         for line in probe.stdout.splitlines():
             try:
@@ -97,20 +95,23 @@ def find_test_binaries(env: dict[str, str]) -> list[Path]:
                 continue
             if msg.get("reason") != "compiler-artifact":
                 continue
-            if "modeld-core" not in (msg.get("package_id") or ""):
-                continue
+            target = msg.get("target") or {}
             profile = msg.get("profile") or {}
+            kinds = target.get("kind") or []
             executable = msg.get("executable")
-            if profile.get("test") is True and executable:
+            if (
+                target.get("name") == "modeld_core"
+                and "lib" in kinds
+                and profile.get("test") is True
+                and executable
+            ):
                 candidate = Path(executable)
                 if not candidate.is_absolute():
                     candidate = (REPO_ROOT / candidate).resolve()
-                if candidate.is_file() and candidate not in found:
-                    found.append(candidate)
-    if found:
-        return found
+                if candidate.is_file():
+                    return candidate
 
-    # 兜底：兼容旧版 cargo 只把 lib 单测二进制写在 deps/ 的行为。
+    # 兜底：兼容旧版 cargo 只把测试二进制写在 deps/ 的行为。
     debug = REPO_ROOT / "target" / "debug"
     candidates = sorted(
         p for p in debug.rglob("modeld_core-*")
@@ -118,7 +119,7 @@ def find_test_binaries(env: dict[str, str]) -> list[Path]:
     )
     if not candidates:
         raise SystemExit(f"no modeld_core test binary found under {debug}")
-    return [max(candidates, key=lambda p: p.stat().st_mtime_ns)]
+    return max(candidates, key=lambda p: p.stat().st_mtime_ns)
 
 
 def main() -> int:
@@ -146,7 +147,7 @@ def main() -> int:
     # A non-zero exit here is *not* fatal for this script: coverage data was
     # still written, and the normal `rust` CI job is the test gate. Failing
     # both jobs for one slow instrumented test would hide the coverage result.
-    tests = run(["cargo", "test", "-p", "modeld-core", "--locked"], env=env, check=False)
+    tests = run(["cargo", "test", "-p", "modeld-core", "--lib", "--locked"], env=env, check=False)
     if tests.returncode != 0:
         print(
             "WARNING: the instrumented test run exited non-zero "
@@ -167,10 +168,8 @@ def main() -> int:
         "-o", str(profdata),
     ])
 
-    binaries = find_test_binaries(env)
-    print("using test binaries:")
-    for binary in binaries:
-        print(f"  {binary}")
+    binary = find_lib_test_binary(env)
+    print(f"using test binary: {binary}")
 
     # The raw LLVM export contains every instrumented crate (std, the whole
     # dependency tree) — ~35 MB on this machine. Filter it down to
@@ -180,7 +179,7 @@ def main() -> int:
     # "TOTAL" is a meaningless ~15%.
     export = subprocess.run(
         [
-            str(llvm_cov), "export", *(str(binary) for binary in binaries),
+            str(llvm_cov), "export", str(binary),
             f"-instr-profile={profdata}",
             "-format=text",
         ],
@@ -216,7 +215,7 @@ def main() -> int:
 
     # Small, readable report committed as the acceptance evidence.
     report_lines = [
-        "modeld-core line coverage (unit + integration tests, `crates/modeld-core/src` only)",
+        "modeld-core line coverage (unit tests, `crates/modeld-core/src` only)",
         "",
         f"{'file':<28} {'lines':>7} {'covered':>8} {'%':>7}",
         "-" * 54,

@@ -157,3 +157,158 @@ pub fn verify(
 
     Ok(report)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{AliasType, Frontend};
+    use crate::hash::Blake3Hash;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// CAS 对象在 Windows 是只读属性、在 Unix 是 0444；篡改用例先清位。
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn make_writable(path: &Path) {
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_readonly(false);
+        fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn fixture() -> (TempDir, PathBuf, Database, Blake3Hash) {
+        let tmp = TempDir::new().unwrap();
+        let store = tmp.path().to_path_buf();
+        let cas = CasStore::new(&store);
+        cas.init().unwrap();
+        let mut db = Database::open(&store.join("modeld.db")).unwrap();
+
+        let src = store.join("source.bin");
+        fs::write(&src, b"model weights payload for manifest unit tests").unwrap();
+        let hash = hash_file(&src).unwrap();
+        cas.store_crash_safe(&src, &hash, "manifest-unit-tx").unwrap();
+        db.insert_or_update_model(
+            &hash,
+            fs::metadata(&src).unwrap().len() as i64,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        db.insert_alias(&hash, &src.display().to_string(), Frontend::User, AliasType::Original)
+            .unwrap();
+        (tmp, store, db, hash)
+    }
+
+    #[test]
+    fn clean_manifest_roundtrip_is_clean() {
+        let (_tmp, store, db, _) = fixture();
+        let manifest = generate(&store, &db).unwrap();
+        assert_eq!(manifest.objects.len(), 1);
+
+        let path = store.join("manifest.json");
+        save(&path, &manifest).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.version, 1);
+        let report = verify(&store, &loaded, true).unwrap();
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(report.checked, 1);
+    }
+
+    #[test]
+    fn tampered_object_is_detected() {
+        let (_tmp, store, db, hash) = fixture();
+        let manifest = generate(&store, &db).unwrap();
+        let obj = CasStore::new(&store).get(&hash).unwrap();
+        let mut bytes = fs::read(&obj).unwrap();
+        bytes[0] ^= 0xFF;
+        make_writable(&obj);
+        fs::write(&obj, &bytes).unwrap();
+
+        let report = verify(&store, &manifest, false).unwrap();
+        assert!(!report.is_clean(), "{report:?}");
+        assert!(report.mismatches.iter().any(|m| m.contains("content hash changed")), "{report:?}");
+    }
+
+    #[test]
+    fn truncated_object_is_detected() {
+        let (_tmp, store, db, hash) = fixture();
+        let manifest = generate(&store, &db).unwrap();
+        let obj = CasStore::new(&store).get(&hash).unwrap();
+        make_writable(&obj);
+        fs::write(&obj, b"short").unwrap();
+
+        let report = verify(&store, &manifest, false).unwrap();
+        assert!(!report.is_clean(), "{report:?}");
+        assert!(report.mismatches.iter().any(|m| m.contains("size")), "{report:?}");
+    }
+
+    #[test]
+    fn missing_object_is_detected() {
+        let (_tmp, store, db, hash) = fixture();
+        let manifest = generate(&store, &db).unwrap();
+        let obj = CasStore::new(&store).get(&hash).unwrap();
+        make_writable(&obj);
+        fs::remove_file(&obj).unwrap();
+
+        let report = verify(&store, &manifest, false).unwrap();
+        assert!(!report.is_clean(), "{report:?}");
+        assert!(report.missing.iter().any(|h| h.as_str() == hash.as_hex()), "{report:?}");
+    }
+
+    #[test]
+    fn strict_extra_reports_unregistered_model() {
+        let (_tmp, store, db, _) = fixture();
+        let empty = Manifest {
+            version: 1,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            objects: BTreeMap::new(),
+        };
+        let report = verify(&store, &empty, true).unwrap();
+        assert_eq!(report.unexpected.len(), 1, "{report:?}");
+        assert_eq!(db.list_models(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn generate_keeps_record_for_missing_cas_object() {
+        let (_tmp, store, db, hash) = fixture();
+        let obj = CasStore::new(&store).get(&hash).unwrap();
+        make_writable(&obj);
+        fs::remove_file(&obj).unwrap();
+
+        let manifest = generate(&store, &db).unwrap();
+        assert_eq!(manifest.objects.len(), 1);
+        let report = verify(&store, &manifest, false).unwrap();
+        assert!(report.missing.iter().any(|h| h.as_str() == hash.as_hex()), "{report:?}");
+    }
+
+    #[test]
+    fn load_rejects_unsupported_version() {
+        let (_tmp, store, _, _) = fixture();
+        let path = store.join("bad-manifest.json");
+        save(
+            &path,
+            &Manifest {
+                version: 2,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                objects: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert!(load(&path).is_err(), "unsupported version must be rejected");
+    }
+
+    #[test]
+    fn manifest_blake3_field_mismatch_is_reported() {
+        let (_tmp, store, _, hash) = fixture();
+        let key = hash.as_hex().to_string();
+        let mut objects = BTreeMap::new();
+        objects.insert(key.clone(), ManifestEntry { blake3: "00".repeat(32), size: 1 });
+        let manifest =
+            Manifest { version: 1, created_at: chrono::Utc::now().to_rfc3339(), objects };
+        let report = verify(&store, &manifest, false).unwrap();
+        assert!(
+            report.mismatches.iter().any(|m| m.contains("manifest blake3 field mismatch")),
+            "{report:?}"
+        );
+    }
+}

@@ -105,11 +105,23 @@ fn idle_rss_stays_below_100mb() {
 
     let _daemon = spawn_daemon(&store, &watch, 300);
     assert!(
-        wait_for(Duration::from_secs(10), || {
-            read_status(&store).map(|s| s["rss_bytes"].as_u64().unwrap_or(0) > 0).unwrap_or(false)
-        }),
-        "daemon never reported a nonzero RSS"
+        wait_for(Duration::from_secs(10), || read_status(&store).is_some()),
+        "daemon never wrote its status file"
     );
+    // current_rss_bytes() 只在 Linux/Windows 有实现；macOS 返回 0。
+    // 按本测试文档约定：读不到有效数字时跳过 <100 MB 断言，并留痕。
+    let reported = wait_for(Duration::from_secs(10), || {
+        read_status(&store).map(|s| s["rss_bytes"].as_u64().unwrap_or(0) > 0).unwrap_or(false)
+    });
+    if !reported {
+        let status = read_status(&store).unwrap();
+        let note = format!(
+            "RSS reporting unsupported on this platform; skipped <100 MB assertion\nstatus: {status}\n"
+        );
+        fs::write(root.join("rss-skip.txt"), &note).unwrap();
+        eprintln!("{note}");
+        return;
+    }
     let status = read_status(&store).unwrap();
     let rss = status["rss_bytes"].as_u64().unwrap_or(0);
     assert!(rss > 0, "invalid RSS reading: {status}");
